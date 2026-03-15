@@ -543,9 +543,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                 if pass_visible:
                     # Single-step: fill both and submit
-                    await page.locator(pass_sel).first.click()
+                    pw_loc = page.locator(pass_sel).first
+                    await pw_loc.click()
+                    await page.wait_for_timeout(300)
                     await page.keyboard.type(password, delay=40)
-                    await page.wait_for_timeout(500)
+                    await page.wait_for_timeout(300)
+                    # Verify password was entered; if empty, fall back to fill()
+                    try:
+                        pw_val = await pw_loc.input_value(timeout=1000)
+                        if not pw_val:
+                            await pw_loc.fill(password)
+                            await page.wait_for_timeout(300)
+                    except Exception:
+                        pass
                     # Try selector click, fall back to vision
                     try:
                         await page.click(submit_sel, timeout=3000)
@@ -600,9 +610,21 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pass
 
                     if pass_found:
-                        await page.locator(pass_sel).first.click()
+                        # Click the password field to focus it, then type
+                        pw_locator = page.locator(pass_sel).first
+                        await pw_locator.click()
+                        await page.wait_for_timeout(300)
                         await page.keyboard.type(password, delay=40)
-                        await page.wait_for_timeout(500)
+                        await page.wait_for_timeout(300)
+                        # Verify password was entered; if empty, fall back to fill()
+                        try:
+                            pw_value = await pw_locator.input_value(timeout=1000)
+                            if not pw_value:
+                                logger.info("Test login %s: keyboard.type() did not fill password, falling back to fill()", retailer_name)
+                                await pw_locator.fill(password)
+                                await page.wait_for_timeout(300)
+                        except Exception:
+                            pass
                         try:
                             await page.click(submit_sel, timeout=3000)
                         except Exception:
