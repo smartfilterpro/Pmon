@@ -238,9 +238,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.post("/api/accounts/test")
     async def api_test_account(request: Request, user: dict = Depends(get_current_user)):
-        """Test retailer login credentials without purchasing anything."""
-        import httpx
-
+        """Test retailer login credentials using Playwright browser automation."""
         data = await request.json()
         retailer = data.get("retailer", "").strip()
         if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
@@ -253,205 +251,121 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         email = acc["email"]
         password = acc["password"]
-        ua = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        )
-
-        def _fail(retailer_name: str, status: int, body: str) -> dict:
-            """Build failure response, log it, and return."""
-            # Truncate body for display but keep it useful
-            detail = body[:300].strip() if body else "no response body"
-            msg = f"{retailer_name} login failed (HTTP {status}): {detail}"
-            logger.warning("Test login failed for %s user=%s: HTTP %s — %s",
-                           retailer_name, email, status, detail)
-            db.add_error_log(
-                user["id"], "WARNING", "test-login",
-                f"{retailer_name} login failed (HTTP {status})",
-                detail,
-            )
-            return {"ok": False, "message": msg}
 
         try:
-            async with httpx.AsyncClient(
-                headers={"User-Agent": ua, "Accept": "text/html,application/json,*/*",
-                         "Accept-Language": "en-US,en;q=0.9"},
-                follow_redirects=True, timeout=20.0,
-            ) as client:
-                if retailer == "target":
-                    return await _test_target(client, email, password, _fail)
-                elif retailer == "walmart":
-                    return await _test_walmart(client, email, password, _fail)
-                elif retailer == "bestbuy":
-                    return await _test_bestbuy(client, email, password, _fail)
-                elif retailer == "pokemoncenter":
-                    return await _test_pokemoncenter(client, email, password, _fail)
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return {"ok": False, "message": "Playwright not installed — run: pip install playwright && playwright install chromium"}
 
-        except httpx.TimeoutException:
-            msg = f"Connection to {retailer} timed out"
-            logger.warning("Test login timeout for %s user=%s", retailer, email)
-            db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
-            return {"ok": False, "message": msg}
+        LOGIN_URLS = {
+            "target": "https://www.target.com/login",
+            "walmart": "https://www.walmart.com/account/login",
+            "bestbuy": "https://www.bestbuy.com/identity/global/signin",
+            "pokemoncenter": "https://www.pokemoncenter.com/login",
+        }
+
+        # Selectors for each retailer's login form
+        SELECTORS = {
+            "target": {
+                "email": '#username, input[name="username"]',
+                "password": '#password, input[name="password"]',
+                "submit": 'button[type="submit"], button:has-text("Sign in")',
+                "success": '#account, [data-test="accountNav"], a[href*="/account"]',
+                "error": '[data-test="error"], .error-message, #error, [class*="error" i]',
+            },
+            "walmart": {
+                "email": 'input[type="email"], input[name="email"]',
+                "password": 'input[type="password"]',
+                "submit": 'button[type="submit"], button:has-text("Sign in")',
+                "success": 'a[href*="/account"], [data-automation-id="account"]',
+                "error": '[data-automation-id="error"], .error-message, [class*="error" i]',
+            },
+            "bestbuy": {
+                "email": 'input[type="email"], input[name="email"], #fld-e',
+                "password": 'input[type="password"], #fld-p1',
+                "submit": 'button[type="submit"], button:has-text("Sign In")',
+                "success": 'a[href*="/account"], .account-menu',
+                "error": '.c-alert, .error-message, [class*="error" i]',
+            },
+            "pokemoncenter": {
+                "email": 'input[type="email"], input[name="email"]',
+                "password": 'input[type="password"]',
+                "submit": 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")',
+                "success": 'a[href*="/account"], .account-nav',
+                "error": '.error-message, [class*="error" i], .alert',
+            },
+        }
+
+        sel = SELECTORS[retailer]
+        retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center"}[retailer]
+
+        try:
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            )
+            context = await browser.new_context()
+            page = await context.new_page()
+
+            try:
+                # Navigate to login page
+                await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded")
+                await page.wait_for_timeout(3000)
+
+                # Fill credentials
+                await page.fill(sel["email"], email)
+                await page.fill(sel["password"], password)
+                await page.click(sel["submit"])
+                await page.wait_for_timeout(5000)
+
+                # Check for success indicators
+                final_url = page.url
+                success_el = page.locator(sel["success"])
+                error_el = page.locator(sel["error"])
+
+                # Check if we landed on an account/home page (away from login)
+                still_on_login = "/login" in final_url or "/signin" in final_url
+                has_success = await success_el.first.is_visible(timeout=2000) if not still_on_login else False
+                has_error = False
+                error_text = ""
+                try:
+                    if await error_el.first.is_visible(timeout=1000):
+                        has_error = True
+                        error_text = await error_el.first.inner_text(timeout=1000)
+                except Exception:
+                    pass
+
+                if has_error and error_text:
+                    msg = f"{retailer_name} login failed: {error_text.strip()[:200]}"
+                    logger.warning("Test login failed for %s user=%s: %s", retailer_name, email, error_text.strip())
+                    db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
+                    return {"ok": False, "message": msg}
+
+                if has_success or (not still_on_login and not has_error):
+                    logger.info("Test login successful for %s user=%s", retailer_name, email)
+                    return {"ok": True, "message": f"{retailer_name} login successful"}
+
+                if still_on_login:
+                    msg = f"{retailer_name} login failed — still on login page (wrong email/password?)"
+                    logger.warning("Test login failed for %s user=%s: still on login page", retailer_name, email)
+                    db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
+                    return {"ok": False, "message": msg}
+
+                # Ambiguous — couldn't determine success or failure
+                return {"ok": False, "message": f"{retailer_name} login result unclear — check credentials and try in a browser"}
+
+            finally:
+                await page.close()
+                await context.close()
+                await browser.close()
+                await pw.stop()
+
         except Exception as e:
-            msg = f"Error testing {retailer}: {str(e)}"
-            logger.error("Test login error for %s: %s", retailer, e, exc_info=True)
+            msg = f"Error testing {retailer_name}: {str(e)}"
+            logger.error("Test login error for %s: %s", retailer_name, e, exc_info=True)
             db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
             return {"ok": False, "message": msg}
-
-    async def _test_target(client, email, password, _fail):
-        """Target: get login page for cookies, then POST to login API."""
-        import re as _re
-
-        # Step 1: Load login page to get session cookies
-        page = await client.get("https://www.target.com/login")
-
-        # Step 2: Authenticate via the login API
-        resp = await client.post(
-            "https://login.target.com/gsp/static/v1/login/token",
-            json={
-                "username": email,
-                "password": password,
-                "device_info": {"type": "WEB"},
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Origin": "https://www.target.com",
-                "Referer": "https://www.target.com/login",
-            },
-        )
-        if resp.status_code in (200, 201):
-            logger.info("Test login successful for Target user=%s", email)
-            return {"ok": True, "message": "Target login successful"}
-        return _fail("Target", resp.status_code, resp.text)
-
-    async def _test_walmart(client, email, password, _fail):
-        """Walmart: get login page for CSRF token, then POST credentials."""
-        import re as _re
-
-        # Step 1: Load login page to get session cookies and CSRF
-        page = await client.get("https://www.walmart.com/account/login")
-        csrf = ""
-        for cookie_name, cookie_val in client.cookies.items():
-            if "csrf" in cookie_name.lower() or cookie_name == "CSRF-TOKEN":
-                csrf = cookie_val
-                break
-        if not csrf:
-            # Try to find it in the page HTML
-            match = _re.search(r'"csrfToken"\s*:\s*"([^"]+)"', page.text)
-            if match:
-                csrf = match.group(1)
-
-        # Step 2: Authenticate
-        headers = {
-            "Content-Type": "application/json",
-            "Origin": "https://www.walmart.com",
-            "Referer": "https://www.walmart.com/account/login",
-        }
-        if csrf:
-            headers["x-csrf-token"] = csrf
-            headers["WM_SEC.AUTH_TOKEN"] = csrf
-
-        resp = await client.post(
-            "https://www.walmart.com/account/electrode/api/signin",
-            json={"username": email, "password": password},
-            headers=headers,
-        )
-        if resp.status_code == 200:
-            logger.info("Test login successful for Walmart user=%s", email)
-            return {"ok": True, "message": "Walmart login successful"}
-        return _fail("Walmart", resp.status_code, resp.text)
-
-    async def _test_bestbuy(client, email, password, _fail):
-        """Best Buy: get login page for session + token, then POST."""
-        import re as _re
-
-        # Step 1: Load sign-in page
-        page = await client.get("https://www.bestbuy.com/identity/global/signin")
-
-        # Look for a CSRF/auth token in the page
-        token = ""
-        match = _re.search(r'name="token"\s+value="([^"]+)"', page.text)
-        if match:
-            token = match.group(1)
-        if not match:
-            match = _re.search(r'"csrfToken"\s*:\s*"([^"]+)"', page.text)
-            if match:
-                token = match.group(1)
-
-        # Step 2: Submit login
-        headers = {
-            "Content-Type": "application/json",
-            "Origin": "https://www.bestbuy.com",
-            "Referer": "https://www.bestbuy.com/identity/global/signin",
-        }
-        payload = {"email": email, "password": password}
-        if token:
-            payload["token"] = token
-
-        resp = await client.post(
-            "https://www.bestbuy.com/identity/global/signin",
-            json=payload,
-            headers=headers,
-        )
-        if resp.status_code == 200:
-            body = resp.text
-            if "error" in body.lower() and "password" in body.lower():
-                return _fail("Best Buy", resp.status_code, body)
-            logger.info("Test login successful for Best Buy user=%s", email)
-            return {"ok": True, "message": "Best Buy login successful"}
-        return _fail("Best Buy", resp.status_code, resp.text)
-
-    async def _test_pokemoncenter(client, email, password, _fail):
-        """Pokemon Center: get login page for CSRF, then POST."""
-        import re as _re
-
-        # Step 1: Load login page for cookies + CSRF token
-        page = await client.get("https://www.pokemoncenter.com/login")
-        csrf = ""
-        match = _re.search(
-            r'name="csrf[_-]?token"\s+(?:content|value)="([^"]+)"', page.text, _re.IGNORECASE
-        )
-        if match:
-            csrf = match.group(1)
-        if not csrf:
-            match = _re.search(r'"csrfToken"\s*:\s*"([^"]+)"', page.text)
-            if match:
-                csrf = match.group(1)
-        if not csrf:
-            for cname, cval in client.cookies.items():
-                if "csrf" in cname.lower():
-                    csrf = cval
-                    break
-
-        # Step 2: Submit login
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://www.pokemoncenter.com",
-            "Referer": "https://www.pokemoncenter.com/login",
-        }
-        form_data = {"email": email, "password": password}
-        if csrf:
-            form_data["csrf_token"] = csrf
-            headers["x-csrf-token"] = csrf
-
-        resp = await client.post(
-            "https://www.pokemoncenter.com/login",
-            data=form_data,
-            headers=headers,
-        )
-        # Successful login typically redirects to account page
-        final_url = str(resp.url)
-        if resp.status_code == 200 and "/account" in final_url:
-            logger.info("Test login successful for Pokemon Center user=%s", email)
-            return {"ok": True, "message": "Pokemon Center login successful"}
-        if resp.status_code == 200 and "login" not in final_url:
-            logger.info("Test login successful for Pokemon Center user=%s", email)
-            return {"ok": True, "message": "Pokemon Center login successful"}
-        if resp.status_code == 200:
-            # Still on login page means bad credentials
-            return _fail("Pokemon Center", resp.status_code, "Login returned to sign-in page — check email/password")
-        return _fail("Pokemon Center", resp.status_code, resp.text)
 
     # --- Settings ---
 
