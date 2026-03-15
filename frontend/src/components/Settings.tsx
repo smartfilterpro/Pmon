@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   getSettings, updateSettings, getAccounts, setAccount, testAccount,
-  setupTotp, confirmTotp, disableTotp,
+  setupTotp, confirmTotp, disableTotp, checkAuth,
 } from '../hooks/useApi';
 import type { User } from '../types';
 import { Save, Bell, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader } from 'lucide-react';
@@ -50,6 +50,8 @@ export default function Settings({ user }: Props) {
       setDiscordWebhook(data.settings.discord_webhook || '');
     });
     getAccounts().then(data => setAccounts(data.accounts || {}));
+    // Refresh TOTP status from server (user prop may be stale)
+    checkAuth().then(u => { if (u) setTotpEnabled(u.totp_enabled); });
   }, []);
 
   const handleSaveSettings = async () => {
