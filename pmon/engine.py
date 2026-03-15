@@ -97,7 +97,7 @@ class PmonEngine:
                     await notifier.notify_in_stock(result)
 
                 # Auto-checkout if enabled
-                if product.auto_checkout and self.checkout_engine:
+                if product.auto_checkout:
                     await self._auto_checkout(product)
 
         elif result.status == StockStatus.OUT_OF_STOCK:
@@ -106,7 +106,8 @@ class PmonEngine:
 
     async def _auto_checkout(self, product: Product):
         if not self.checkout_engine:
-            return
+            self.checkout_engine = CheckoutEngine(self.config)
+            await self.checkout_engine.start()
 
         logger.info(f"Attempting auto-checkout for {product.name}")
         checkout_result = await self.checkout_engine.attempt_checkout(
@@ -121,14 +122,10 @@ class PmonEngine:
 
     async def manual_checkout(self, product: Product):
         """Trigger a manual checkout attempt."""
-        if not self.checkout_engine:
-            self.checkout_engine = CheckoutEngine(self.config)
-            await self.checkout_engine.start()
-
         await self._auto_checkout(product)
 
     async def init_checkout(self):
-        """Initialize the checkout engine (launches browser)."""
+        """Initialize the checkout engine (API + optional browser)."""
         self.checkout_engine = CheckoutEngine(self.config)
         await self.checkout_engine.start()
 

@@ -6,37 +6,28 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
 if TYPE_CHECKING:
     from pmon.engine import PmonEngine
 
 DASHBOARD_DIR = Path(__file__).parent
-templates = Jinja2Templates(directory=str(DASHBOARD_DIR / "templates"))
+DIST_DIR = DASHBOARD_DIR / "static" / "dist"
 
 
 def create_app(engine: "PmonEngine") -> FastAPI:
     app = FastAPI(title="Pmon Dashboard")
 
-    static_dir = DASHBOARD_DIR / "static"
-    if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-    @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request):
-        return templates.TemplateResponse("index.html", {
-            "request": request,
-            "config": engine.config,
-            "state": engine.state,
-        })
+    # --- API routes ---
 
     @app.get("/api/status")
     async def status():
         products = []
         for url, result in engine.state.products.items():
+            # Find the config product to get auto_checkout flag
+            config_product = next((p for p in engine.config.products if p.url == url), None)
             products.append({
                 "url": result.url,
                 "name": result.product_name,
@@ -45,7 +36,23 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "price": result.price,
                 "timestamp": result.timestamp.isoformat(),
                 "error": result.error_message,
+                "auto_checkout": config_product.auto_checkout if config_product else False,
             })
+
+        # Also include configured products that haven't been checked yet
+        checked_urls = set(engine.state.products.keys())
+        for p in engine.config.products:
+            if p.url not in checked_urls:
+                products.append({
+                    "url": p.url,
+                    "name": p.name,
+                    "retailer": p.retailer,
+                    "status": "unknown",
+                    "price": "",
+                    "timestamp": "",
+                    "error": "",
+                    "auto_checkout": p.auto_checkout,
+                })
 
         checkouts = []
         for c in engine.state.checkout_attempts[-20:]:
@@ -104,7 +111,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         if action == "checkout_now":
             product = next((p for p in engine.config.products if p.url == url), None)
-            if product and engine.checkout_engine:
+            if product:
                 asyncio.create_task(engine.manual_checkout(product))
                 return {"ok": True, "message": "Checkout attempt started"}
 
@@ -130,5 +137,23 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         from pmon.config import save_config
         save_config(engine.config)
         return {"ok": True}
+
+    # --- Serve React app ---
+    # Static assets (JS, CSS)
+    if DIST_DIR.exists():
+        assets_dir = DIST_DIR / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    # Catch-all: serve index.html for any non-API route (SPA routing)
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        index = DIST_DIR / "index.html"
+        if index.exists():
+            return FileResponse(str(index))
+        return JSONResponse(
+            {"error": "Frontend not built. Run: cd frontend && npm run build"},
+            status_code=503,
+        )
 
     return app

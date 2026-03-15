@@ -1,4 +1,4 @@
-"""Checkout engine using Playwright for browser automation."""
+"""Checkout engine: API-first with optional Playwright browser fallback."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pmon.config import Config, AccountCredentials, Profile
 from pmon.models import CheckoutResult, CheckoutStatus
+from pmon.checkout.api_checkout import ApiCheckout
 
 logger = logging.getLogger(__name__)
 
@@ -16,33 +17,37 @@ SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 
 
 class CheckoutEngine:
-    """Manages browser-based auto-checkout across retailers."""
+    """API-first checkout with browser fallback."""
 
     def __init__(self, config: Config):
         self.config = config
+        self._api = ApiCheckout()
         self._browser = None
         self._playwright = None
+        self._browser_available = False
         SESSION_DIR.mkdir(exist_ok=True)
 
     async def start(self):
-        """Launch the browser."""
+        """Try to launch the browser for fallback. Not required."""
         try:
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
-                headless=False,  # Visible so you can solve captchas
+                headless=True,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                 ],
             )
-            logger.info("Checkout browser launched")
+            self._browser_available = True
+            logger.info("Browser fallback available (headless)")
         except Exception as e:
-            logger.error(f"Failed to launch browser: {e}")
-            raise
+            logger.info(f"Browser fallback unavailable: {e}")
+            logger.info("API-only checkout mode — this is fine for most retailers")
 
     async def stop(self):
-        """Close the browser."""
+        """Close resources."""
+        await self._api.close()
         if self._browser:
             await self._browser.close()
         if self._playwright:
@@ -55,18 +60,9 @@ class CheckoutEngine:
         product_name: str,
         profile_name: str = "default",
     ) -> CheckoutResult:
-        """Attempt to checkout a product."""
-        profile = self.config.profiles.get(profile_name)
+        """Attempt checkout: API first, browser fallback."""
+        profile = self.config.profiles.get(profile_name) or Profile()
         creds = self.config.accounts.get(retailer)
-
-        if not profile:
-            return CheckoutResult(
-                url=url,
-                retailer=retailer,
-                product_name=product_name,
-                status=CheckoutStatus.FAILED,
-                error_message=f"Profile '{profile_name}' not found",
-            )
 
         if not creds:
             return CheckoutResult(
@@ -74,27 +70,39 @@ class CheckoutEngine:
                 retailer=retailer,
                 product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"No credentials for {retailer}",
+                error_message=f"No credentials for {retailer}. Add them in config.",
             )
 
-        try:
-            handler = getattr(self, f"_checkout_{retailer}", None)
-            if not handler:
+        # Try API checkout first (fast, headless, works on cloud)
+        logger.info(f"Trying API checkout for {product_name}...")
+        result = await self._api.attempt(url, retailer, product_name, profile, creds)
+
+        if result.status == CheckoutStatus.SUCCESS:
+            return result
+
+        # If API failed and browser is available, try browser fallback
+        if self._browser_available:
+            logger.info(f"API failed, trying browser fallback for {product_name}...")
+            try:
+                handler = getattr(self, f"_checkout_{retailer}", None)
+                if handler:
+                    return await handler(url, product_name, profile, creds)
+            except Exception as e:
+                logger.error(f"Browser checkout also failed: {e}")
                 return CheckoutResult(
                     url=url,
                     retailer=retailer,
                     product_name=product_name,
                     status=CheckoutStatus.FAILED,
-                    error_message=f"No checkout handler for {retailer}",
+                    error_message=f"Both API and browser checkout failed: {e}",
                 )
-            return await handler(url, product_name, profile, creds)
-        except Exception as e:
-            logger.error(f"Checkout failed for {product_name}: {e}")
-            return CheckoutResult(
-                url=url,
-                retailer=retailer,
-                product_name=product_name,
-                status=CheckoutStatus.FAILED,
+
+        # Return the API result (which has the error details)
+        return CheckoutResult(
+            url=url,
+            retailer=retailer,
+            product_name=product_name,
+            status=CheckoutStatus.FAILED,
                 error_message=str(e),
             )
 

@@ -99,17 +99,10 @@ def cmd_run(args):
 async def _run(config, args):
     engine = PmonEngine(config)
 
-    # Initialize checkout if enabled
+    # Initialize checkout engine (API-first, browser is optional fallback)
     if not args.no_checkout:
-        has_any_auto = any(p.auto_checkout for p in config.products)
-        has_any_creds = bool(config.accounts)
-        if has_any_auto and has_any_creds:
-            try:
-                await engine.init_checkout()
-                console.print("[green]Checkout engine ready[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Checkout engine unavailable: {e}[/yellow]")
-                console.print("Install playwright browsers: playwright install chromium")
+        await engine.init_checkout()
+        console.print("[green]Checkout engine ready (API-first)[/green]")
 
     # Start dashboard in background thread
     if not args.no_dashboard:

@@ -1,0 +1,111 @@
+import { removeProduct, toggleAutoCheckout, checkoutNow } from '../hooks/useApi';
+import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff } from 'lucide-react';
+import type { Product } from '../types';
+import './ProductList.css';
+
+interface Props {
+  products: Product[];
+  refresh: () => void;
+}
+
+const RETAILER_LABELS: Record<string, string> = {
+  pokemoncenter: 'PKC',
+  target: 'Target',
+  bestbuy: 'Best Buy',
+  walmart: 'Walmart',
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  in_stock: 'In Stock',
+  out_of_stock: 'Out of Stock',
+  unknown: 'Unknown',
+  error: 'Error',
+};
+
+export default function ProductList({ products, refresh }: Props) {
+  const handleRemove = async (url: string) => {
+    await removeProduct(url);
+    refresh();
+  };
+
+  const handleToggleAuto = async (url: string) => {
+    await toggleAutoCheckout(url);
+    refresh();
+  };
+
+  const handleCheckout = async (url: string) => {
+    await checkoutNow(url);
+    refresh();
+  };
+
+  if (products.length === 0) {
+    return (
+      <div className="empty-state">
+        <ShoppingCart size={48} strokeWidth={1} />
+        <p>No products being monitored</p>
+        <p className="empty-hint">Add a product URL below to get started</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="product-list">
+      {products.map((p) => (
+        <div key={p.url} className={`product-card status-${p.status}`}>
+          <div className="product-main">
+            <div className="product-header">
+              <span className={`retailer-tag retailer-${p.retailer}`}>
+                {RETAILER_LABELS[p.retailer] ?? p.retailer}
+              </span>
+              <span className={`stock-badge stock-${p.status}`}>
+                {STATUS_LABELS[p.status] ?? p.status}
+              </span>
+              {p.price && <span className="price">{p.price}</span>}
+            </div>
+
+            <h3 className="product-name">{p.name || 'Unnamed Product'}</h3>
+
+            {p.error && <p className="product-error">{p.error}</p>}
+
+            <p className="product-time">
+              Last checked: {new Date(p.timestamp).toLocaleTimeString()}
+            </p>
+          </div>
+
+          <div className="product-actions">
+            <button
+              className={`action-btn auto-btn ${p.auto_checkout ? 'on' : 'off'}`}
+              onClick={() => handleToggleAuto(p.url)}
+              title={p.auto_checkout ? 'Disable auto-purchase' : 'Enable auto-purchase'}
+            >
+              {p.auto_checkout ? <Zap size={14} /> : <ZapOff size={14} />}
+              {p.auto_checkout ? 'Auto ON' : 'Auto OFF'}
+            </button>
+
+            <button
+              className="action-btn buy-btn"
+              onClick={() => handleCheckout(p.url)}
+              disabled={p.status !== 'in_stock'}
+              title="Buy now"
+            >
+              <ShoppingCart size={14} />
+              Buy
+            </button>
+
+            <a href={p.url} target="_blank" rel="noopener noreferrer" className="action-btn link-btn">
+              <ExternalLink size={14} />
+            </a>
+
+            <button
+              className="action-btn remove-btn"
+              onClick={() => handleRemove(p.url)}
+              title="Remove product"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

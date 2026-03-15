@@ -1,0 +1,53 @@
+.checkout-log { }
+
+.log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.log-header h2 { font-size: 18px; color: var(--text-primary); }
+.log-count { font-size: 13px; color: var(--text-secondary); }
+
+.log-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.log-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-secondary);
+  border-radius: 10px;
+}
+.log-entry svg { flex-shrink: 0; margin-top: 2px; }
+
+.log-info { flex: 1; min-width: 0; }
+.log-product { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.log-product strong { font-size: 14px; }
+.log-retailer {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+.log-order { font-size: 13px; color: var(--green); font-weight: 600; }
+.log-error { font-size: 12px; color: var(--orange); margin-top: 2px; }
+
+.log-meta { text-align: right; flex-shrink: 0; }
+.log-status { display: block; font-size: 13px; font-weight: 600; }
+.log-time { font-size: 11px; color: var(--text-secondary); }
+
+.log-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary);
+}
+.log-empty svg { margin-bottom: 16px; opacity: 0.3; }
+.log-empty p { font-size: 16px; margin-bottom: 4px; }
+.log-hint { font-size: 13px; }
+
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }

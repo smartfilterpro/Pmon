@@ -1,0 +1,123 @@
+.product-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.product-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border-left: 4px solid var(--text-secondary);
+  transition: background 0.15s;
+}
+.product-card:hover { background: var(--bg-tertiary); }
+.product-card.status-in_stock { border-left-color: var(--green); }
+.product-card.status-out_of_stock { border-left-color: var(--red); }
+.product-card.status-error { border-left-color: var(--orange); }
+.product-card.status-unknown { border-left-color: var(--text-secondary); }
+
+.product-main { flex: 1; min-width: 0; }
+
+.product-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.retailer-tag {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+.retailer-pokemoncenter { background: var(--accent-yellow); color: #000; }
+.retailer-target { background: #cc0000; color: #fff; }
+.retailer-bestbuy { background: #0046be; color: #fff; }
+.retailer-walmart { background: #0071dc; color: #fff; }
+
+.stock-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.stock-in_stock { background: var(--green); color: #000; }
+.stock-out_of_stock { background: rgba(255, 23, 68, 0.2); color: var(--red); }
+.stock-error { background: rgba(255, 145, 0, 0.2); color: var(--orange); }
+.stock-unknown { background: rgba(136, 136, 136, 0.2); color: var(--text-secondary); }
+
+.price { font-size: 14px; font-weight: 700; color: var(--green); }
+
+.product-name {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.product-error { font-size: 12px; color: var(--orange); margin-bottom: 2px; }
+.product-time { font-size: 12px; color: var(--text-secondary); }
+
+.product-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 16px;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+}
+.action-btn:hover { border-color: var(--accent-blue); }
+
+.auto-btn.on {
+  background: rgba(255, 203, 5, 0.15);
+  border-color: var(--accent-yellow);
+  color: var(--accent-yellow);
+}
+.auto-btn.off { color: var(--text-secondary); }
+
+.buy-btn:not(:disabled):hover {
+  background: var(--green);
+  color: #000;
+  border-color: var(--green);
+}
+
+.remove-btn:hover {
+  background: rgba(255, 23, 68, 0.15);
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.link-btn { padding: 6px 8px; }
+
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary);
+}
+.empty-state svg { margin-bottom: 16px; opacity: 0.3; }
+.empty-state p { font-size: 16px; margin-bottom: 4px; }
+.empty-hint { font-size: 13px; }

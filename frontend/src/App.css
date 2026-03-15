@@ -1,0 +1,56 @@
+.app {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0 20px 40px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.tab {
+  background: none;
+  color: var(--text-secondary);
+  border-radius: 8px 8px 0 0;
+  padding: 12px 24px;
+  font-size: 15px;
+  position: relative;
+}
+.tab:hover { color: var(--text-primary); background: var(--bg-secondary); }
+.tab.active {
+  color: var(--accent-yellow);
+  background: var(--bg-secondary);
+}
+.tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-yellow);
+}
+
+.badge {
+  background: var(--accent-blue);
+  color: #fff;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+
+.content { min-height: 400px; }
+
+.error-banner {
+  background: rgba(255, 23, 68, 0.15);
+  border: 1px solid var(--red);
+  color: var(--red);
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
