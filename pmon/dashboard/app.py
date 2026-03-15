@@ -258,7 +258,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return {"ok": False, "message": "Playwright package not installed — run: pip install playwright && playwright install chromium"}
 
         LOGIN_URLS = {
-            "target": "https://www.target.com/login",
+            "target": "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
             "walmart": "https://www.walmart.com/account/login",
             "bestbuy": "https://www.bestbuy.com/identity/global/signin",
             "pokemoncenter": "https://www.pokemoncenter.com/account/login",
@@ -267,11 +267,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         # Selectors for each retailer's login form
         SELECTORS = {
             "target": {
-                "email": '#username, input[name="username"]',
-                "password": '#password, input[name="password"]',
-                "submit": 'button[type="submit"], button:has-text("Sign in")',
-                "success": '#account, [data-test="accountNav"], a[href*="/account"]',
-                "error": '[data-test="error"], .error-message, #error, [class*="error" i]',
+                "email": '#username, input[name="username"], input[type="email"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"]',
+                "password": '#password, input[name="password"], input[type="password"], input[id*="password" i]',
+                "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
+                "success": '#account, [data-test="accountNav"], a[href*="/account"], [data-test="@web/AccountLink"]',
+                "error": '[data-test="error"], .error-message, #error, [class*="error" i], [role="alert"]',
             },
             "walmart": {
                 "email": 'input[type="email"], input[name="email"]',
@@ -331,10 +331,30 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 except Exception:
                     return {"ok": False, "message": f"{retailer_name} login page did not load — no email/username field found at {current_url}"}
 
-                # Fill credentials
+                # Fill credentials — some retailers use multi-step login (email first, then password)
                 await page.fill(email_sel, email)
-                await page.fill(pass_sel, password)
-                await page.click(submit_sel)
+
+                # Check if password field is visible yet (single-step) or needs submit first (multi-step)
+                pass_visible = False
+                try:
+                    pass_visible = await page.locator(pass_sel).first.is_visible(timeout=1000)
+                except Exception:
+                    pass
+
+                if pass_visible:
+                    # Single-step: fill both and submit
+                    await page.fill(pass_sel, password)
+                    await page.click(submit_sel)
+                else:
+                    # Multi-step: submit email first, wait for password field
+                    await page.click(submit_sel)
+                    try:
+                        await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
+                    except Exception:
+                        return {"ok": False, "message": f"{retailer_name} login: submitted email but password field did not appear"}
+                    await page.fill(pass_sel, password)
+                    await page.click(submit_sel)
+
                 await page.wait_for_timeout(5000)
 
                 # Check for success indicators
