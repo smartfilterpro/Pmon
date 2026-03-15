@@ -528,9 +528,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             msg += f" (page shows: {page_desc})"
                         return {"ok": False, "message": msg}
 
+                # Use keyboard.type() for human-like input instead of fill() which is a bot tell
                 if email_found and not await _page_has_value(page, email_sel, email):
-                    # Email field found by selector but not yet filled (vision path already filled)
-                    await page.fill(email_sel, email)
+                    await page.locator(email_sel).first.click()
+                    await page.locator(email_sel).first.press("Control+a")
+                    await page.keyboard.type(email, delay=40)
 
                 # Check if password field is visible yet (single-step) or needs submit first (multi-step)
                 pass_visible = False
@@ -541,7 +543,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                 if pass_visible:
                     # Single-step: fill both and submit
-                    await page.fill(pass_sel, password)
+                    await page.locator(pass_sel).first.click()
+                    await page.keyboard.type(password, delay=40)
+                    await page.wait_for_timeout(500)
                     # Try selector click, fall back to vision
                     try:
                         await page.click(submit_sel, timeout=3000)
@@ -554,6 +558,27 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     except Exception:
                         await vision_click(page, "Continue / Next button")
                     await page.wait_for_timeout(3000)
+
+                    # Check for "Something went wrong" error and retry once
+                    error_banner = page.locator('[role="alert"], .error-message, [class*="error" i], [data-test="error"]')
+                    try:
+                        if await error_banner.first.is_visible(timeout=2000):
+                            banner_text = await error_banner.first.inner_text(timeout=1000)
+                            if "something went wrong" in banner_text.lower() or "try again" in banner_text.lower():
+                                logger.info("Test login %s: server error on first attempt, retrying", retailer_name)
+                                await page.wait_for_timeout(2000)
+                                # Clear and re-type email, then submit again
+                                try:
+                                    await page.locator(email_sel).first.click()
+                                    await page.locator(email_sel).first.press("Control+a")
+                                    await page.keyboard.type(email, delay=40)
+                                    await page.wait_for_timeout(500)
+                                    await page.click(submit_sel, timeout=3000)
+                                    await page.wait_for_timeout(3000)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
 
                     # Some sites (e.g. Target) show an auth method picker
                     password_option = page.locator('button:has-text("Password"), a:has-text("Password"), [data-test*="password" i], button:has-text("Use password")')
@@ -575,7 +600,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pass
 
                     if pass_found:
-                        await page.fill(pass_sel, password)
+                        await page.locator(pass_sel).first.click()
+                        await page.keyboard.type(password, delay=40)
+                        await page.wait_for_timeout(500)
                         try:
                             await page.click(submit_sel, timeout=3000)
                         except Exception:
