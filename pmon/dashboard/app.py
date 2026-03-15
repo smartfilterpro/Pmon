@@ -346,8 +346,21 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     await page.fill(pass_sel, password)
                     await page.click(submit_sel)
                 else:
-                    # Multi-step: submit email first, wait for password field
+                    # Multi-step: submit email/phone first
                     await page.click(submit_sel)
+                    await page.wait_for_timeout(2000)
+
+                    # Some sites (e.g. Target) show an auth method picker
+                    # (password, OTP, etc.) — click "password" option if present
+                    password_option = page.locator('button:has-text("Password"), a:has-text("Password"), [data-test*="password" i], button:has-text("Use password")')
+                    try:
+                        if await password_option.first.is_visible(timeout=3000):
+                            await password_option.first.click()
+                            await page.wait_for_timeout(1000)
+                    except Exception:
+                        pass
+
+                    # Wait for password field
                     try:
                         await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
                     except Exception:
