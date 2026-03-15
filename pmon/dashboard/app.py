@@ -340,6 +340,24 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "Is it a login form, an error page, a CAPTCHA, a block page, or something else?",
             )
 
+        async def click_visible_button(pg, selector: str, timeout: int = 3000) -> bool:
+            """Click the first *visible* element matching the comma-separated selector."""
+            for sel_part in selector.split(","):
+                sel_part = sel_part.strip()
+                try:
+                    loc = pg.locator(sel_part)
+                    if await loc.first.is_visible(timeout=500):
+                        await loc.first.click(timeout=timeout)
+                        return True
+                except Exception:
+                    continue
+            # Fallback: try the full selector (Playwright's first-match)
+            try:
+                await pg.click(selector, timeout=timeout)
+                return True
+            except Exception:
+                return False
+
         LOGIN_URLS = {
             "target": "https://www.target.com/login",
             "walmart": "https://www.walmart.com/account/login",
@@ -367,7 +385,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "target": {
                 "email": '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]',
                 "password": '#password, input[name="password"], input[type="password"], input[id*="password" i]',
-                "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
+                "submit": 'button:has-text("Continue with email"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]',
                 "success": '#account, [data-test="accountNav"], a[href*="/account"], [data-test="@web/AccountLink"]',
                 "error": '[data-test="error"], .error-message, #error, [class*="error" i], [role="alert"]',
             },
@@ -557,15 +575,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     except Exception:
                         pass
                     # Try selector click, fall back to vision
-                    try:
-                        await page.click(submit_sel, timeout=3000)
-                    except Exception:
+                    if not await click_visible_button(page, submit_sel):
                         await vision_click(page, "Sign In / Continue button")
                 else:
                     # Multi-step: submit email/phone first
-                    try:
-                        await page.click(submit_sel, timeout=3000)
-                    except Exception:
+                    if not await click_visible_button(page, submit_sel):
                         await vision_click(page, "Continue / Next button")
                     await page.wait_for_timeout(3000)
 
@@ -583,7 +597,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     await page.locator(email_sel).first.press("Control+a")
                                     await page.keyboard.type(email, delay=40)
                                     await page.wait_for_timeout(500)
-                                    await page.click(submit_sel, timeout=3000)
+                                    await click_visible_button(page, submit_sel)
                                     await page.wait_for_timeout(3000)
                                 except Exception:
                                     pass
@@ -625,9 +639,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 await page.wait_for_timeout(300)
                         except Exception:
                             pass
-                        try:
-                            await page.click(submit_sel, timeout=3000)
-                        except Exception:
+                        if not await click_visible_button(page, submit_sel):
                             await vision_click(page, "Sign In / Continue button")
                     else:
                         # Vision fallback for password entry
