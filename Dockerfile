@@ -11,9 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python deps + Playwright Chromium
-COPY pyproject.toml .
+# Copy everything needed
+COPY pyproject.toml requirements.txt ./
 COPY pmon/ pmon/
+COPY config/ config/
+
+# Install Python deps + Playwright Chromium
 RUN pip install --no-cache-dir . \
     && playwright install chromium
 
