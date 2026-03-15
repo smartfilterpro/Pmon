@@ -268,12 +268,22 @@ def get_retailer_accounts(user_id: int) -> dict[str, dict]:
 
 def set_retailer_account(user_id: int, retailer: str, email: str, password: str):
     db = get_db()
-    db.execute(
-        """INSERT INTO retailer_accounts (user_id, retailer, email, password)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(user_id, retailer) DO UPDATE SET email=excluded.email, password=excluded.password""",
-        (user_id, retailer, email, password),
-    )
+    if password:
+        # Update both email and password
+        db.execute(
+            """INSERT INTO retailer_accounts (user_id, retailer, email, password)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id, retailer) DO UPDATE SET email=excluded.email, password=excluded.password""",
+            (user_id, retailer, email, password),
+        )
+    else:
+        # Empty password — only update the email, keep existing password
+        db.execute(
+            """INSERT INTO retailer_accounts (user_id, retailer, email, password)
+               VALUES (?, ?, ?, '')
+               ON CONFLICT(user_id, retailer) DO UPDATE SET email=excluded.email""",
+            (user_id, retailer, email),
+        )
     db.commit()
 
 

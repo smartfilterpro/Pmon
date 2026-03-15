@@ -200,10 +200,10 @@ export default function Settings({ user }: Props) {
               <input type="email" value={retailerEmail} onChange={e => setRetailerEmail(e.target.value)} />
             </div>
             <div className="setting-field">
-              <label>Password</label>
+              <label>Password {accounts[editRetailer]?.has_password ? '(saved — leave blank to keep current)' : ''}</label>
               <input type="password" value={retailerPassword}
                 onChange={e => setRetailerPassword(e.target.value)}
-                placeholder="Enter password" />
+                placeholder={accounts[editRetailer]?.has_password ? 'Leave blank to keep current password' : 'Enter password'} />
             </div>
             <div className="retailer-edit-actions">
               <button className="save-btn" onClick={handleSaveAccount}>
