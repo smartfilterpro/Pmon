@@ -282,21 +282,44 @@ class CheckoutEngine:
             await page.wait_for_timeout(2000)
 
             # Add to cart
-            add_btn = page.locator('button[data-tl-id*="addToCart"], button:has-text("Add to cart")')
+            add_btn = page.locator('button[data-tl-id="ProductPrimaryCTA-cta_add_to_cart_button"], button[data-tl-id*="addToCart"], button:has-text("Add to cart")')
             await add_btn.first.click(timeout=5000)
             await page.wait_for_timeout(2000)
 
-            # Go to checkout
-            await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
+            # Go to checkout via button or direct navigation
+            checkout_btn = page.locator('button[data-tl-id="IPPacCheckOutBtnBottom"], button:has-text("Check out")')
+            try:
+                if await checkout_btn.first.is_visible(timeout=3000):
+                    await checkout_btn.first.click()
+                    await page.wait_for_timeout(3000)
+                else:
+                    await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
+                await page.wait_for_timeout(3000)
 
             # Sign in if needed
             sign_in = page.locator('button:has-text("Sign in"), a:has-text("Sign in")')
-            if await sign_in.is_visible(timeout=2000):
-                await page.fill('input[type="email"]', creds.email)
-                await page.fill('input[type="password"]', creds.password)
-                await page.click('button[type="submit"]')
-                await page.wait_for_timeout(3000)
+            try:
+                if await sign_in.first.is_visible(timeout=2000):
+                    email_sel = 'input[name="email"], input[type="email"]'
+                    pass_sel = 'input[type="password"], input[name="password"]'
+                    await page.fill(email_sel, creds.email)
+                    await page.fill(pass_sel, creds.password)
+                    await page.click('button[type="submit"]')
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                pass
+
+            # Guest checkout fallback if not signed in
+            guest_btn = page.locator('button[data-tl-id="Wel-Guest_cxo_btn"], button:has-text("Continue without account"), button:has-text("Guest")')
+            try:
+                if await guest_btn.first.is_visible(timeout=2000):
+                    await guest_btn.first.click()
+                    await page.wait_for_timeout(2000)
+            except Exception:
+                pass
 
             # Wait for user to handle captcha if present, then place order
             place_order = page.locator('button:has-text("Place order")')
@@ -433,29 +456,52 @@ class CheckoutEngine:
                 )
 
             # Standard add to cart
-            add_btn = page.locator('button.add-to-cart-button:not([disabled])')
-            await add_btn.click(timeout=5000)
+            add_btn = page.locator('button.add-to-cart-button:not([disabled]), button.btn-primary.add-to-cart-button')
+            await add_btn.first.click(timeout=5000)
             await page.wait_for_timeout(2000)
 
-            # Go to cart
-            await page.goto("https://www.bestbuy.com/cart", wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
+            # Go to cart via popup button or direct navigation
+            go_to_cart = page.locator('div.go-to-cart-button a, a:has-text("Go to Cart"), a[href*="/cart"]')
+            try:
+                if await go_to_cart.first.is_visible(timeout=3000):
+                    await go_to_cart.first.click()
+                    await page.wait_for_timeout(2000)
+                else:
+                    await page.goto("https://www.bestbuy.com/cart", wait_until="domcontentloaded")
+                    await page.wait_for_timeout(2000)
+            except Exception:
+                await page.goto("https://www.bestbuy.com/cart", wait_until="domcontentloaded")
+                await page.wait_for_timeout(2000)
 
-            checkout_btn = page.locator('button:has-text("Checkout"), a:has-text("Checkout")')
+            # Click checkout
+            checkout_btn = page.locator('button[data-track="Checkout - Top"], button:has-text("Checkout"), a:has-text("Checkout")')
             await checkout_btn.first.click(timeout=5000)
             await page.wait_for_timeout(3000)
 
             # Sign in if needed
-            email_input = page.locator('input#fld-e')
-            if await email_input.is_visible(timeout=3000):
-                await email_input.fill(creds.email)
-                await page.fill('input#fld-p1', creds.password)
-                await page.click('button:has-text("Sign In")')
-                await page.wait_for_timeout(3000)
+            email_input = page.locator('input#fld-e, input[id="user.emailAddress"], input[type="email"]')
+            try:
+                if await email_input.first.is_visible(timeout=3000):
+                    await email_input.first.fill(creds.email)
+                    pass_input = page.locator('input#fld-p1, input[type="password"]')
+                    await pass_input.first.fill(creds.password)
+                    await page.click('button:has-text("Sign In"), button[type="submit"]')
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                pass
 
-            place_order = page.locator('button:has-text("Place Your Order")')
-            if await place_order.is_visible(timeout=15000):
-                await place_order.click()
+            # Guest checkout fallback
+            guest_btn = page.locator('button.cia-guest-content__continue.guest, button:has-text("Continue as Guest"), button:has-text("Guest")')
+            try:
+                if await guest_btn.first.is_visible(timeout=2000):
+                    await guest_btn.first.click()
+                    await page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
+            place_order = page.locator('button:has-text("Place Your Order"), button:has-text("Place Order")')
+            if await place_order.first.is_visible(timeout=15000):
+                await place_order.first.click()
                 await page.wait_for_timeout(5000)
 
                 await self._save_context(context, "bestbuy")
