@@ -261,7 +261,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "target": "https://www.target.com/login",
             "walmart": "https://www.walmart.com/account/login",
             "bestbuy": "https://www.bestbuy.com/identity/global/signin",
-            "pokemoncenter": "https://www.pokemoncenter.com/login",
+            "pokemoncenter": "https://www.pokemoncenter.com/account/login",
         }
 
         # Selectors for each retailer's login form
@@ -288,11 +288,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "error": '.c-alert, .error-message, [class*="error" i]',
             },
             "pokemoncenter": {
-                "email": 'input[type="email"], input[name="email"]',
-                "password": 'input[type="password"]',
-                "submit": 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")',
-                "success": 'a[href*="/account"], .account-nav',
-                "error": '.error-message, [class*="error" i], .alert',
+                "email": 'input[type="email"], input[name="email"], input[type="text"][autocomplete="email"], input[type="text"][autocomplete="username"], input[id*="email" i], input[id*="login" i], input[name*="email" i], input[name*="login" i]',
+                "password": 'input[type="password"], input[name="password"], input[id*="password" i]',
+                "submit": 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")',
+                "success": 'a[href*="/account"], .account-nav, [href*="/account/dashboard"], [data-testid*="account"]',
+                "error": '.error-message, [class*="error" i], .alert, [data-testid*="error"], [role="alert"]',
             },
         }
 
@@ -313,10 +313,28 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded")
                 await page.wait_for_timeout(3000)
 
+                # Pokemon Center may redirect to access.pokemon.com SSO
+                current_url = page.url
+                if "access.pokemon.com" in current_url or "sso.pokemon.com" in current_url:
+                    # SSO login page — find the email/username and password fields there
+                    email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
+                    pass_sel = 'input[type="password"], input[name="password"]'
+                    submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
+                else:
+                    email_sel = sel["email"]
+                    pass_sel = sel["password"]
+                    submit_sel = sel["submit"]
+
+                # Wait for the email field to appear (up to 15s for JS-heavy pages)
+                try:
+                    await page.locator(email_sel).first.wait_for(state="visible", timeout=15000)
+                except Exception:
+                    return {"ok": False, "message": f"{retailer_name} login page did not load — no email/username field found at {current_url}"}
+
                 # Fill credentials
-                await page.fill(sel["email"], email)
-                await page.fill(sel["password"], password)
-                await page.click(sel["submit"])
+                await page.fill(email_sel, email)
+                await page.fill(pass_sel, password)
+                await page.click(submit_sel)
                 await page.wait_for_timeout(5000)
 
                 # Check for success indicators

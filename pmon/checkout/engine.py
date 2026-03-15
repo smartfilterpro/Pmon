@@ -304,14 +304,23 @@ class CheckoutEngine:
             await checkout_btn.first.click(timeout=5000)
             await page.wait_for_timeout(3000)
 
-            # Sign in if needed
-            email_input = page.locator('input[type="email"]')
-            if await email_input.is_visible(timeout=3000):
-                await email_input.fill(creds.email)
-                password_input = page.locator('input[type="password"]')
-                await password_input.fill(creds.password)
-                await page.click('button[type="submit"]')
-                await page.wait_for_timeout(3000)
+            # Sign in if needed (may redirect to access.pokemon.com SSO)
+            current_url = page.url
+            if "access.pokemon.com" in current_url or "sso.pokemon.com" in current_url:
+                email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
+                pass_sel = 'input[type="password"], input[name="password"]'
+                submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
+            else:
+                email_sel = 'input[type="email"], input[name="email"], input[id*="email" i], input[id*="login" i], input[name*="email" i]'
+                pass_sel = 'input[type="password"], input[name="password"], input[id*="password" i]'
+                submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
+
+            email_input = page.locator(email_sel)
+            if await email_input.first.is_visible(timeout=5000):
+                await email_input.first.fill(creds.email)
+                await page.locator(pass_sel).first.fill(creds.password)
+                await page.locator(submit_sel).first.click()
+                await page.wait_for_timeout(5000)
 
             # Place order - assumes saved payment on account
             place_order = page.locator('button:has-text("Place Order"), button:has-text("Submit Order")')
