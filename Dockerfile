@@ -24,4 +24,4 @@ ENV PMON_DATA_DIR=/data
 
 EXPOSE 8888
 
-CMD ["sh", "-c", "python -m pmon.cli run --host 0.0.0.0 --port ${PORT:-8888}"]
+CMD ["python", "-m", "pmon.cli", "run", "--host", "0.0.0.0"]
