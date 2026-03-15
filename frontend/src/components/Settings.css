@@ -86,10 +86,39 @@
   background: var(--bg-tertiary);
   border-radius: 8px;
 }
-.retailer-info { display: flex; flex-direction: column; gap: 2px; }
+.retailer-info { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .retailer-info strong { font-size: 14px; }
 .retailer-email { font-size: 12px; color: var(--green); }
 .retailer-none { font-size: 12px; color: var(--text-secondary); }
+
+.retailer-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+.test-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: rgba(59, 76, 202, 0.1);
+  color: var(--accent-blue);
+  border: 1px solid var(--accent-blue);
+}
+.test-btn:hover { background: rgba(59, 76, 202, 0.2); }
+.test-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.test-result {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 0;
+}
+.test-ok { color: var(--green); }
+.test-fail { color: var(--red); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; }
 
 .retailer-edit {
   padding: 14px;

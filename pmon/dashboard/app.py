@@ -236,6 +236,83 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         db.set_retailer_account(user["id"], retailer, email, password)
         return {"ok": True}
 
+    @app.post("/api/accounts/test")
+    async def api_test_account(request: Request, user: dict = Depends(get_current_user)):
+        """Test retailer login credentials without purchasing anything."""
+        import httpx
+
+        data = await request.json()
+        retailer = data.get("retailer", "").strip()
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+            return JSONResponse({"error": "Invalid retailer"}, 400)
+
+        accounts = db.get_retailer_accounts(user["id"])
+        acc = accounts.get(retailer)
+        if not acc or not acc.get("email") or not acc.get("password"):
+            return JSONResponse({"error": "No credentials saved for this retailer"}, 400)
+
+        email = acc["email"]
+        password = acc["password"]
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        )
+
+        try:
+            async with httpx.AsyncClient(
+                headers={"User-Agent": ua}, follow_redirects=True, timeout=15.0
+            ) as client:
+                if retailer == "target":
+                    resp = await client.post(
+                        "https://gsp.target.com/gsp/authentications/v1/auth_codes",
+                        json={"username": email, "password": password, "keep_me_signed_in": False},
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if resp.status_code in (200, 201):
+                        return {"ok": True, "message": "Target login successful"}
+                    return {"ok": False, "message": f"Target login failed (HTTP {resp.status_code})"}
+
+                elif retailer == "walmart":
+                    resp = await client.post(
+                        "https://www.walmart.com/account/electrode/api/signin",
+                        json={"username": email, "password": password},
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if resp.status_code == 200:
+                        return {"ok": True, "message": "Walmart login successful"}
+                    return {"ok": False, "message": f"Walmart login failed (HTTP {resp.status_code})"}
+
+                elif retailer == "bestbuy":
+                    resp = await client.post(
+                        "https://www.bestbuy.com/identity/signin",
+                        json={"email": email, "password": password},
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if resp.status_code == 200:
+                        return {"ok": True, "message": "Best Buy login successful"}
+                    return {"ok": False, "message": f"Best Buy login failed (HTTP {resp.status_code})"}
+
+                elif retailer == "pokemoncenter":
+                    # Pokemon Center uses a standard form-based login
+                    resp = await client.get("https://www.pokemoncenter.com/login")
+                    resp2 = await client.post(
+                        "https://www.pokemoncenter.com/login",
+                        data={"email": email, "password": password},
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    )
+                    # A successful login typically redirects (302->200) to account page
+                    if resp2.status_code == 200 and "/account" in str(resp2.url):
+                        return {"ok": True, "message": "Pokemon Center login successful"}
+                    if resp2.status_code == 200:
+                        return {"ok": True, "message": "Pokemon Center responded OK (verify in browser if unsure)"}
+                    return {"ok": False, "message": f"Pokemon Center login failed (HTTP {resp2.status_code})"}
+
+        except httpx.TimeoutException:
+            return {"ok": False, "message": f"Connection to {retailer} timed out"}
+        except Exception as e:
+            return {"ok": False, "message": f"Error testing {retailer}: {str(e)}"}
+
     # --- Settings ---
 
     @app.get("/api/settings")

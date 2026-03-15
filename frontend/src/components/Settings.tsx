@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import {
-  getSettings, updateSettings, getAccounts, setAccount,
+  getSettings, updateSettings, getAccounts, setAccount, testAccount,
   setupTotp, confirmTotp, disableTotp,
 } from '../hooks/useApi';
 import type { User } from '../types';
-import { Save, Bell, Clock, Shield, ShieldCheck, Store, Users } from 'lucide-react';
+import { Save, Bell, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import AdminPanel from './AdminPanel';
 import './Settings.css';
@@ -31,6 +31,10 @@ export default function Settings({ user }: Props) {
   const [retailerEmail, setRetailerEmail] = useState('');
   const [retailerPassword, setRetailerPassword] = useState('');
   const [accountSaved, setAccountSaved] = useState('');
+
+  // Test login
+  const [testResult, setTestResult] = useState<Record<string, { ok: boolean; message: string } | null>>({});
+  const [testLoading, setTestLoading] = useState<Record<string, boolean>>({});
 
   // 2FA
   const [totpEnabled, setTotpEnabled] = useState(user.totp_enabled);
@@ -91,6 +95,19 @@ export default function Settings({ user }: Props) {
     setTotpEnabled(false);
   };
 
+  const handleTestLogin = async (retailerId: string) => {
+    setTestResult(prev => ({ ...prev, [retailerId]: null }));
+    setTestLoading(prev => ({ ...prev, [retailerId]: true }));
+    try {
+      const data = await testAccount(retailerId);
+      setTestResult(prev => ({ ...prev, [retailerId]: { ok: data.ok, message: data.message } }));
+    } catch {
+      setTestResult(prev => ({ ...prev, [retailerId]: { ok: false, message: 'Request failed' } }));
+    } finally {
+      setTestLoading(prev => ({ ...prev, [retailerId]: false }));
+    }
+  };
+
   const startEditAccount = (retailerId: string) => {
     setEditRetailer(retailerId);
     const acc = accounts[retailerId];
@@ -149,10 +166,27 @@ export default function Settings({ user }: Props) {
                   ) : (
                     <span className="retailer-none">Not configured</span>
                   )}
+                  {testResult[r.id] && (
+                    <span className={`test-result ${testResult[r.id]!.ok ? 'test-ok' : 'test-fail'}`}>
+                      {testResult[r.id]!.ok ? <CheckCircle size={12} /> : <XCircle size={12} />}
+                      {testResult[r.id]!.message}
+                    </span>
+                  )}
                 </div>
-                <button className="action-btn" onClick={() => startEditAccount(r.id)}>
-                  {acc?.email ? 'Edit' : 'Add'}
-                </button>
+                <div className="retailer-actions">
+                  {acc?.email && acc?.has_password && (
+                    <button
+                      className="test-btn"
+                      onClick={() => handleTestLogin(r.id)}
+                      disabled={testLoading[r.id]}
+                    >
+                      {testLoading[r.id] ? <><Loader size={12} className="spin" /> Testing...</> : 'Test Login'}
+                    </button>
+                  )}
+                  <button className="action-btn" onClick={() => startEditAccount(r.id)}>
+                    {acc?.email ? 'Edit' : 'Add'}
+                  </button>
+                </div>
               </div>
             );
           })}

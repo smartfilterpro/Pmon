@@ -171,6 +171,13 @@ export async function setAccount(retailer: string, email: string, password: stri
   })).json();
 }
 
+export async function testAccount(retailer: string) {
+  return (await apiFetch('/accounts/test', {
+    method: 'POST',
+    body: JSON.stringify({ retailer }),
+  })).json();
+}
+
 // --- 2FA ---
 
 export async function setupTotp() {
