@@ -149,17 +149,35 @@ class CheckoutEngine:
             if not await self._is_signed_in_target(page):
                 await self._sign_in_target(page, creds)
 
-            # Try to add to cart
-            add_btn = page.locator('button[data-test="shipItButton"], button:has-text("Add to cart")')
+            # Try to add to cart — decline coverage if offered
+            add_btn = page.locator('button[data-test="shipItButton"], button:has-text("Add to cart"), button:has-text("Ship it")')
             await add_btn.first.click(timeout=5000)
             await page.wait_for_timeout(1500)
 
-            # Go to cart
-            await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
+            # Decline optional coverage/warranty if modal appears
+            decline_btn = page.locator('button[data-test="espModalContent-declineCoverageButton"]')
+            try:
+                if await decline_btn.is_visible(timeout=2000):
+                    await decline_btn.click()
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+            # Go to cart via modal button or direct navigation
+            cart_checkout = page.locator('button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"]')
+            try:
+                if await cart_checkout.first.is_visible(timeout=2000):
+                    await cart_checkout.first.click()
+                    await page.wait_for_timeout(2000)
+                else:
+                    await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+                    await page.wait_for_timeout(2000)
+            except Exception:
+                await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+                await page.wait_for_timeout(2000)
 
             # Click checkout
-            checkout_btn = page.locator('button:has-text("Check out"), a:has-text("Check out")')
+            checkout_btn = page.locator('button[data-test="checkout-button"], button:has-text("Check out"), a:has-text("Check out")')
             await checkout_btn.first.click(timeout=5000)
             await page.wait_for_timeout(3000)
 
@@ -208,12 +226,48 @@ class CheckoutEngine:
             return False
 
     async def _sign_in_target(self, page, creds: AccountCredentials):
-        await page.goto("https://www.target.com/login", wait_until="domcontentloaded")
+        await page.goto(
+            "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
+            wait_until="domcontentloaded",
+        )
         await page.wait_for_timeout(2000)
 
-        await page.fill('#username, input[name="username"]', creds.email)
-        await page.fill('#password, input[name="password"]', creds.password)
-        await page.click('button[type="submit"], button:has-text("Sign in")')
+        email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"]'
+        pass_sel = '#password, input[name="password"], input[type="password"]'
+        submit_sel = 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")'
+
+        # Step 1: Enter email/phone
+        await page.locator(email_sel).first.wait_for(state="visible", timeout=10000)
+        await page.fill(email_sel, creds.email)
+
+        # Check if password is already visible (single-step) or multi-step
+        pass_visible = False
+        try:
+            pass_visible = await page.locator(pass_sel).first.is_visible(timeout=1000)
+        except Exception:
+            pass
+
+        if pass_visible:
+            await page.fill(pass_sel, creds.password)
+            await page.click(submit_sel)
+        else:
+            # Step 2: Submit email, then select password auth method
+            await page.click(submit_sel)
+            await page.wait_for_timeout(2000)
+
+            password_option = page.locator('button:has-text("Password"), a:has-text("Password"), [data-test*="password" i], button:has-text("Use password")')
+            try:
+                if await password_option.first.is_visible(timeout=3000):
+                    await password_option.first.click()
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+            # Step 3: Enter password
+            await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
+            await page.fill(pass_sel, creds.password)
+            await page.click(submit_sel)
+
         await page.wait_for_timeout(3000)
 
     async def _checkout_walmart(
