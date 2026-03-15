@@ -239,6 +239,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.post("/api/accounts/test")
     async def api_test_account(request: Request, user: dict = Depends(get_current_user)):
         """Test retailer login credentials using Playwright browser automation."""
+        import base64
+        import json
+        import os
+
         data = await request.json()
         retailer = data.get("retailer", "").strip()
         if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
@@ -256,6 +260,85 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             from playwright.async_api import async_playwright
         except ImportError:
             return {"ok": False, "message": "Playwright package not installed — run: pip install playwright && playwright install chromium"}
+
+        # --- Vision fallback helpers ---
+        vision_client = None
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            try:
+                import anthropic
+                vision_client = anthropic.Anthropic(api_key=api_key)
+            except ImportError:
+                pass
+
+        async def screenshot_b64(pg):
+            raw = await pg.screenshot(type="png")
+            return base64.b64encode(raw).decode()
+
+        def ask_vision(img_b64: str, prompt: str) -> str | None:
+            if not vision_client:
+                return None
+            try:
+                resp = vision_client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=512,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+                        {"type": "text", "text": prompt},
+                    ]}],
+                )
+                return resp.content[0].text
+            except Exception as exc:
+                logger.warning("Vision API call failed in test-login: %s", exc)
+                return None
+
+        async def vision_click(pg, description: str) -> bool:
+            img = await screenshot_b64(pg)
+            answer = ask_vision(
+                img,
+                f'I need to click the "{description}" button/link on this page. '
+                f'Return ONLY a JSON object with the x,y pixel coordinates: '
+                f'{{"x": N, "y": N}}. If not visible, return {{"x": null, "y": null}}.',
+            )
+            if not answer:
+                return False
+            try:
+                coords = json.loads(answer.strip())
+                if coords.get("x") is not None and coords.get("y") is not None:
+                    await pg.mouse.click(int(coords["x"]), int(coords["y"]))
+                    return True
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            return False
+
+        async def vision_fill(pg, description: str, value: str) -> bool:
+            img = await screenshot_b64(pg)
+            answer = ask_vision(
+                img,
+                f'I need to click the "{description}" input field to type into it. '
+                f'Return ONLY a JSON object with x,y pixel coordinates: '
+                f'{{"x": N, "y": N}}. If not visible, return {{"x": null, "y": null}}.',
+            )
+            if not answer:
+                return False
+            try:
+                coords = json.loads(answer.strip())
+                if coords.get("x") is not None and coords.get("y") is not None:
+                    await pg.mouse.click(int(coords["x"]), int(coords["y"]))
+                    await pg.keyboard.type(value, delay=50)
+                    return True
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            return False
+
+        async def vision_read_page(pg) -> str | None:
+            """Ask Claude what's on the page — used to diagnose blocks/errors."""
+            img = await screenshot_b64(pg)
+            return ask_vision(
+                img,
+                "Describe what you see on this page in 1-2 sentences. "
+                "Is it a login form, an error page, a CAPTCHA, a block page, or something else?",
+            )
 
         LOGIN_URLS = {
             "target": "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
@@ -299,24 +382,69 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         sel = SELECTORS[retailer]
         retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center"}[retailer]
 
+        # Stealth JS to inject into every page to reduce bot detection
+        STEALTH_JS = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        window.chrome = {runtime: {}};
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) =>
+            parameters.name === 'notifications'
+                ? Promise.resolve({state: Notification.permission})
+                : originalQuery(parameters);
+        """
+
         try:
             pw = await async_playwright().start()
             browser = await pw.chromium.launch(
                 headless=True,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor",
+                ],
             )
-            context = await browser.new_context()
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1366, "height": 768},
+                locale="en-US",
+                timezone_id="America/New_York",
+            )
+            await context.add_init_script(STEALTH_JS)
             page = await context.new_page()
 
             try:
-                # Navigate to login page
-                await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded")
+                # Navigate to login page (longer timeout for slow retailers)
+                try:
+                    await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
+                except Exception as nav_err:
+                    # If navigation timed out, check if page partially loaded
+                    page_desc = await vision_read_page(page)
+                    if page_desc:
+                        return {"ok": False, "message": f"{retailer_name} page load issue: {page_desc}"}
+                    return {"ok": False, "message": f"{retailer_name} login page failed to load: {str(nav_err)[:150]}"}
+
                 await page.wait_for_timeout(3000)
 
-                # Pokemon Center may redirect to access.pokemon.com SSO
+                # Check for bot-block / redirect pages before proceeding
                 current_url = page.url
+                if "blocked" in current_url or "captcha" in current_url or "challenge" in current_url:
+                    page_desc = await vision_read_page(page)
+                    msg = f"{retailer_name} blocked the login attempt"
+                    if page_desc:
+                        msg += f" — {page_desc}"
+                    db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
+                    return {"ok": False, "message": msg}
+
+                # Pokemon Center may redirect to access.pokemon.com SSO
                 if "access.pokemon.com" in current_url or "sso.pokemon.com" in current_url:
-                    # SSO login page — find the email/username and password fields there
                     email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
                     pass_sel = 'input[type="password"], input[name="password"]'
                     submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
@@ -326,47 +454,88 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     submit_sel = sel["submit"]
 
                 # Wait for the email field to appear (up to 15s for JS-heavy pages)
+                email_found = False
                 try:
                     await page.locator(email_sel).first.wait_for(state="visible", timeout=15000)
+                    email_found = True
                 except Exception:
-                    return {"ok": False, "message": f"{retailer_name} login page did not load — no email/username field found at {current_url}"}
+                    pass
 
-                # Fill credentials — some retailers use multi-step login (email first, then password)
-                await page.fill(email_sel, email)
+                # Vision fallback: if selectors didn't find the email field, ask Claude
+                if not email_found:
+                    if await vision_fill(page, "email or username input", email):
+                        email_found = True
+                        await page.wait_for_timeout(1000)
+                    else:
+                        page_desc = await vision_read_page(page)
+                        msg = f"{retailer_name} login page did not load — no email/username field found at {current_url}"
+                        if page_desc:
+                            msg += f" (page shows: {page_desc})"
+                        return {"ok": False, "message": msg}
+
+                if email_found and not await _page_has_value(page, email_sel, email):
+                    # Email field found by selector but not yet filled (vision path already filled)
+                    await page.fill(email_sel, email)
 
                 # Check if password field is visible yet (single-step) or needs submit first (multi-step)
                 pass_visible = False
                 try:
-                    pass_visible = await page.locator(pass_sel).first.is_visible(timeout=1000)
+                    pass_visible = await page.locator(pass_sel).first.is_visible(timeout=1500)
                 except Exception:
                     pass
 
                 if pass_visible:
                     # Single-step: fill both and submit
                     await page.fill(pass_sel, password)
-                    await page.click(submit_sel)
+                    # Try selector click, fall back to vision
+                    try:
+                        await page.click(submit_sel, timeout=3000)
+                    except Exception:
+                        await vision_click(page, "Sign In / Continue button")
                 else:
                     # Multi-step: submit email/phone first
-                    await page.click(submit_sel)
-                    await page.wait_for_timeout(2000)
+                    try:
+                        await page.click(submit_sel, timeout=3000)
+                    except Exception:
+                        await vision_click(page, "Continue / Next button")
+                    await page.wait_for_timeout(3000)
 
                     # Some sites (e.g. Target) show an auth method picker
-                    # (password, OTP, etc.) — click "password" option if present
                     password_option = page.locator('button:has-text("Password"), a:has-text("Password"), [data-test*="password" i], button:has-text("Use password")')
                     try:
                         if await password_option.first.is_visible(timeout=3000):
                             await password_option.first.click()
-                            await page.wait_for_timeout(1000)
+                            await page.wait_for_timeout(1500)
+                    except Exception:
+                        # Vision fallback for auth method picker
+                        await vision_click(page, "Password option or Use password button")
+                        await page.wait_for_timeout(1500)
+
+                    # Wait for password field — selectors first, then vision
+                    pass_found = False
+                    try:
+                        await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
+                        pass_found = True
                     except Exception:
                         pass
 
-                    # Wait for password field
-                    try:
-                        await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
-                    except Exception:
-                        return {"ok": False, "message": f"{retailer_name} login: submitted email but password field did not appear"}
-                    await page.fill(pass_sel, password)
-                    await page.click(submit_sel)
+                    if pass_found:
+                        await page.fill(pass_sel, password)
+                        try:
+                            await page.click(submit_sel, timeout=3000)
+                        except Exception:
+                            await vision_click(page, "Sign In / Continue button")
+                    else:
+                        # Vision fallback for password entry
+                        if await vision_fill(page, "password input", password):
+                            await page.wait_for_timeout(500)
+                            await vision_click(page, "Sign In / Continue button")
+                        else:
+                            page_desc = await vision_read_page(page)
+                            msg = f"{retailer_name} login: submitted email but password field did not appear"
+                            if page_desc:
+                                msg += f" (page shows: {page_desc})"
+                            return {"ok": False, "message": msg}
 
                 await page.wait_for_timeout(5000)
 
@@ -375,9 +544,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 success_el = page.locator(sel["success"])
                 error_el = page.locator(sel["error"])
 
-                # Check if we landed on an account/home page (away from login)
                 still_on_login = "/login" in final_url or "/signin" in final_url
-                has_success = await success_el.first.is_visible(timeout=2000) if not still_on_login else False
+                has_success = False
+                if not still_on_login:
+                    try:
+                        has_success = await success_el.first.is_visible(timeout=2000)
+                    except Exception:
+                        pass
                 has_error = False
                 error_text = ""
                 try:
@@ -398,13 +571,21 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     return {"ok": True, "message": f"{retailer_name} login successful"}
 
                 if still_on_login:
+                    # Use vision to understand why we're still on login
+                    page_desc = await vision_read_page(page)
                     msg = f"{retailer_name} login failed — still on login page (wrong email/password?)"
+                    if page_desc:
+                        msg += f" (page shows: {page_desc})"
                     logger.warning("Test login failed for %s user=%s: still on login page", retailer_name, email)
                     db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
                     return {"ok": False, "message": msg}
 
-                # Ambiguous — couldn't determine success or failure
-                return {"ok": False, "message": f"{retailer_name} login result unclear — check credentials and try in a browser"}
+                # Ambiguous — use vision for diagnosis
+                page_desc = await vision_read_page(page)
+                msg = f"{retailer_name} login result unclear — check credentials and try in a browser"
+                if page_desc:
+                    msg += f" (page shows: {page_desc})"
+                return {"ok": False, "message": msg}
 
             finally:
                 await page.close()
@@ -423,6 +604,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             logger.error("Test login error for %s: %s", retailer_name, e, exc_info=True)
             db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
             return {"ok": False, "message": msg}
+
+    async def _page_has_value(page, selector: str, value: str) -> bool:
+        """Check if an input already contains a value (e.g. filled by vision path)."""
+        try:
+            actual = await page.locator(selector).first.input_value(timeout=1000)
+            return actual == value
+        except Exception:
+            return False
 
     # --- Settings ---
 
