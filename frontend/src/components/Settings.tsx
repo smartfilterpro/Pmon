@@ -5,6 +5,7 @@ import {
 } from '../hooks/useApi';
 import type { User } from '../types';
 import { Save, Bell, Clock, Shield, ShieldCheck, Store, Users } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import AdminPanel from './AdminPanel';
 import './Settings.css';
 
@@ -203,7 +204,7 @@ export default function Settings({ user }: Props) {
           <div className="totp-setup">
             <p className="section-desc">Scan this QR code with your authenticator app, then enter the 6-digit code below.</p>
             <div className="totp-qr">
-              <img src="/api/auth/totp/qr" alt="TOTP QR Code" width={200} height={200} />
+              <QRCodeSVG value={totpUri} size={200} bgColor="#ffffff" fgColor="#000000" />
             </div>
             <p className="totp-manual">
               Manual entry: <code>{totpSecret}</code>
