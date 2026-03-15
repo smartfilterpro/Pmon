@@ -341,10 +341,25 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             )
 
         LOGIN_URLS = {
-            "target": "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
+            "target": "https://www.target.com/login",
             "walmart": "https://www.walmart.com/account/login",
             "bestbuy": "https://www.bestbuy.com/identity/global/signin",
             "pokemoncenter": "https://www.pokemoncenter.com/account/login",
+        }
+
+        # Fallback: navigate to homepage and click sign-in link if direct URL fails
+        HOME_URLS = {
+            "target": "https://www.target.com",
+            "walmart": "https://www.walmart.com",
+            "bestbuy": "https://www.bestbuy.com",
+            "pokemoncenter": "https://www.pokemoncenter.com",
+        }
+
+        SIGNIN_LINK_SELECTORS = {
+            "target": 'a[href*="/login"], a[href*="/account"], [data-test="@web/AccountLink"], #account, a:has-text("Sign in")',
+            "walmart": 'a[href*="/account/login"], a[href*="/account"], button:has-text("Sign In"), a:has-text("Sign In")',
+            "bestbuy": 'a[href*="/signin"], a[href*="/identity"], a:has-text("Sign In"), .account-button',
+            "pokemoncenter": 'a[href*="/account/login"], a[href*="/account"], a:has-text("Sign In"), a:has-text("Log In")',
         }
 
         # Selectors for each retailer's login form
@@ -421,29 +436,69 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             page = await context.new_page()
 
             try:
-                # Navigate to login page (longer timeout for slow retailers)
+                # --- Navigate to login page ---
+                landed_on_login = False
+                nav_failed = False
+
                 try:
                     await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
-                except Exception as nav_err:
-                    # If navigation timed out, check if page partially loaded
-                    page_desc = await vision_read_page(page)
-                    if page_desc:
-                        return {"ok": False, "message": f"{retailer_name} page load issue: {page_desc}"}
-                    return {"ok": False, "message": f"{retailer_name} login page failed to load: {str(nav_err)[:150]}"}
+                except Exception:
+                    nav_failed = True
 
-                await page.wait_for_timeout(3000)
+                if not nav_failed:
+                    await page.wait_for_timeout(3000)
 
-                # Check for bot-block / redirect pages before proceeding
                 current_url = page.url
-                if "blocked" in current_url or "captcha" in current_url or "challenge" in current_url:
-                    page_desc = await vision_read_page(page)
-                    msg = f"{retailer_name} blocked the login attempt"
-                    if page_desc:
-                        msg += f" — {page_desc}"
-                    db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
-                    return {"ok": False, "message": msg}
 
-                # Pokemon Center may redirect to access.pokemon.com SSO
+                # Determine if we actually landed on a login page
+                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com"]
+                landed_on_login = any(ind in current_url.lower() for ind in login_indicators)
+
+                # Check for bot-block pages
+                if "blocked" in current_url or "captcha" in current_url or "challenge" in current_url:
+                    landed_on_login = False
+
+                # --- Fallback: if redirected away from login, go to homepage and find sign-in link ---
+                if not landed_on_login or nav_failed:
+                    logger.info("Test login %s: direct login URL missed (landed on %s), trying homepage approach", retailer_name, current_url)
+                    try:
+                        await page.goto(HOME_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
+                    except Exception as home_err:
+                        page_desc = await vision_read_page(page)
+                        msg = f"{retailer_name} page failed to load"
+                        if page_desc:
+                            msg += f": {page_desc}"
+                        return {"ok": False, "message": msg}
+
+                    await page.wait_for_timeout(3000)
+
+                    # Try to click the sign-in link from the homepage
+                    signin_clicked = False
+                    try:
+                        signin_link = page.locator(SIGNIN_LINK_SELECTORS[retailer])
+                        if await signin_link.first.is_visible(timeout=5000):
+                            await signin_link.first.click()
+                            signin_clicked = True
+                            await page.wait_for_timeout(4000)
+                    except Exception:
+                        pass
+
+                    if not signin_clicked:
+                        # Vision fallback: find and click sign-in link on homepage
+                        if await vision_click(page, "Sign in or Account link"):
+                            signin_clicked = True
+                            await page.wait_for_timeout(4000)
+
+                    if not signin_clicked:
+                        page_desc = await vision_read_page(page)
+                        msg = f"{retailer_name}: could not find sign-in link on homepage"
+                        if page_desc:
+                            msg += f" (page shows: {page_desc})"
+                        return {"ok": False, "message": msg}
+
+                    current_url = page.url
+
+                # --- Resolve selectors based on final URL ---
                 if "access.pokemon.com" in current_url or "sso.pokemon.com" in current_url:
                     email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
                     pass_sel = 'input[type="password"], input[name="password"]'
