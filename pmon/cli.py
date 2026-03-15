@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -84,10 +85,13 @@ def cmd_run(args):
         console.print(f"Add products to your config file: {args.config or CONFIG_PATH}")
         console.print("Or use the dashboard to add products after starting.")
 
-    if args.host:
-        config.dashboard_host = args.host
+    # Support Railway's PORT env var and 0.0.0.0 binding
+    config.dashboard_host = args.host or os.environ.get("HOST", config.dashboard_host)
+    env_port = os.environ.get("PORT")
     if args.port:
         config.dashboard_port = args.port
+    elif env_port:
+        config.dashboard_port = int(env_port)
 
     asyncio.run(_run(config, args))
 

@@ -1,0 +1,9 @@
+httpx>=0.27
+beautifulsoup4>=4.12
+fastapi>=0.110
+uvicorn>=0.27
+jinja2>=3.1
+pyyaml>=6.0
+rich>=13.0
+python-dotenv>=1.0
+apscheduler>=3.10

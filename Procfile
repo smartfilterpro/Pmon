@@ -1,0 +1,1 @@
+web: python -m pmon.cli run --no-checkout --host 0.0.0.0 --port ${PORT:-8888}

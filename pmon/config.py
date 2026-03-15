@@ -72,11 +72,11 @@ def detect_retailer(url: str) -> str:
 
 def load_config(path: Path | None = None) -> Config:
     path = path or CONFIG_PATH
-    if not path.exists():
-        return Config()
 
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
+    raw = {}
+    if path.exists():
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
 
     products = []
     for p in raw.get("products", []):
@@ -85,6 +85,14 @@ def load_config(path: Path | None = None) -> Config:
             name=p.get("name", ""),
             auto_checkout=p.get("auto_checkout", False),
         ))
+
+    # Support adding products via PMON_PRODUCTS env var (comma-separated URLs)
+    env_products = os.environ.get("PMON_PRODUCTS", "")
+    if env_products:
+        for url in env_products.split(","):
+            url = url.strip()
+            if url:
+                products.append(Product(url=url, name="", auto_checkout=False))
 
     profiles = {}
     for name, pdata in raw.get("profiles", {}).items():
@@ -99,8 +107,8 @@ def load_config(path: Path | None = None) -> Config:
     dash = raw.get("dashboard", {})
 
     return Config(
-        poll_interval=raw.get("poll_interval", 30),
-        discord_webhook=notif.get("discord_webhook", ""),
+        poll_interval=int(os.environ.get("PMON_POLL_INTERVAL", raw.get("poll_interval", 30))),
+        discord_webhook=os.environ.get("PMON_DISCORD_WEBHOOK", notif.get("discord_webhook", "")),
         console_notifications=notif.get("console", True),
         products=products,
         profiles=profiles,
