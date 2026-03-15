@@ -259,6 +259,20 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "Chrome/122.0.0.0 Safari/537.36"
         )
 
+        def _fail(retailer_name: str, status: int, body: str) -> dict:
+            """Build failure response, log it, and return."""
+            # Truncate body for display but keep it useful
+            detail = body[:300].strip() if body else "no response body"
+            msg = f"{retailer_name} login failed (HTTP {status}): {detail}"
+            logger.warning("Test login failed for %s user=%s: HTTP %s — %s",
+                           retailer_name, email, status, detail)
+            db.add_error_log(
+                user["id"], "WARNING", "test-login",
+                f"{retailer_name} login failed (HTTP {status})",
+                detail,
+            )
+            return {"ok": False, "message": msg}
+
         try:
             async with httpx.AsyncClient(
                 headers={"User-Agent": ua}, follow_redirects=True, timeout=15.0
@@ -270,8 +284,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         headers={"Content-Type": "application/json"},
                     )
                     if resp.status_code in (200, 201):
+                        logger.info("Test login successful for Target user=%s", email)
                         return {"ok": True, "message": "Target login successful"}
-                    return {"ok": False, "message": f"Target login failed (HTTP {resp.status_code})"}
+                    return _fail("Target", resp.status_code, resp.text)
 
                 elif retailer == "walmart":
                     resp = await client.post(
@@ -280,8 +295,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         headers={"Content-Type": "application/json"},
                     )
                     if resp.status_code == 200:
+                        logger.info("Test login successful for Walmart user=%s", email)
                         return {"ok": True, "message": "Walmart login successful"}
-                    return {"ok": False, "message": f"Walmart login failed (HTTP {resp.status_code})"}
+                    return _fail("Walmart", resp.status_code, resp.text)
 
                 elif retailer == "bestbuy":
                     resp = await client.post(
@@ -290,28 +306,34 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         headers={"Content-Type": "application/json"},
                     )
                     if resp.status_code == 200:
+                        logger.info("Test login successful for Best Buy user=%s", email)
                         return {"ok": True, "message": "Best Buy login successful"}
-                    return {"ok": False, "message": f"Best Buy login failed (HTTP {resp.status_code})"}
+                    return _fail("Best Buy", resp.status_code, resp.text)
 
                 elif retailer == "pokemoncenter":
-                    # Pokemon Center uses a standard form-based login
                     resp = await client.get("https://www.pokemoncenter.com/login")
                     resp2 = await client.post(
                         "https://www.pokemoncenter.com/login",
                         data={"email": email, "password": password},
                         headers={"Content-Type": "application/x-www-form-urlencoded"},
                     )
-                    # A successful login typically redirects (302->200) to account page
                     if resp2.status_code == 200 and "/account" in str(resp2.url):
+                        logger.info("Test login successful for Pokemon Center user=%s", email)
                         return {"ok": True, "message": "Pokemon Center login successful"}
                     if resp2.status_code == 200:
                         return {"ok": True, "message": "Pokemon Center responded OK (verify in browser if unsure)"}
-                    return {"ok": False, "message": f"Pokemon Center login failed (HTTP {resp2.status_code})"}
+                    return _fail("Pokemon Center", resp2.status_code, resp2.text)
 
         except httpx.TimeoutException:
-            return {"ok": False, "message": f"Connection to {retailer} timed out"}
+            msg = f"Connection to {retailer} timed out"
+            logger.warning("Test login timeout for %s user=%s", retailer, email)
+            db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
+            return {"ok": False, "message": msg}
         except Exception as e:
-            return {"ok": False, "message": f"Error testing {retailer}: {str(e)}"}
+            msg = f"Error testing {retailer}: {str(e)}"
+            logger.error("Test login error for %s: %s", retailer, e, exc_info=True)
+            db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
+            return {"ok": False, "message": msg}
 
     # --- Settings ---
 
