@@ -12,3 +12,4 @@ bcrypt>=4.1
 pyotp>=2.9
 qrcode>=7.4
 aiosqlite>=0.19
+anthropic>=0.39
