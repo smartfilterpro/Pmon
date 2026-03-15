@@ -84,22 +84,30 @@ class ApiCheckout:
             )
         tcin = match.group(1)
 
-        # Step 1: Authenticate
+        # Step 1: Load login page for session cookies
+        await client.get("https://www.target.com/login")
+
+        # Step 2: Authenticate
         auth_resp = await client.post(
-            "https://gsp.target.com/gsp/authentications/v1/auth_codes",
+            "https://login.target.com/gsp/static/v1/login/token",
             json={
                 "username": creds.email,
                 "password": creds.password,
-                "keep_me_signed_in": True,
+                "device_info": {"type": "WEB"},
             },
-            headers={**HEADERS, "Content-Type": "application/json"},
+            headers={
+                **HEADERS,
+                "Content-Type": "application/json",
+                "Origin": "https://www.target.com",
+                "Referer": "https://www.target.com/login",
+            },
         )
 
         if auth_resp.status_code not in (200, 201):
             return CheckoutResult(
                 url=url, retailer="target", product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"Auth failed (HTTP {auth_resp.status_code})",
+                error_message=f"Auth failed (HTTP {auth_resp.status_code}): {auth_resp.text[:200]}",
             )
 
         # Step 2: Add to cart
@@ -160,18 +168,40 @@ class ApiCheckout:
             )
         product_id = match.group(1)
 
-        # Step 1: Sign in
+        # Step 1: Load login page for session cookies + CSRF
+        page = await client.get("https://www.walmart.com/account/login")
+        csrf = ""
+        for cookie_name, cookie_val in client.cookies.items():
+            if "csrf" in cookie_name.lower() or cookie_name == "CSRF-TOKEN":
+                csrf = cookie_val
+                break
+        if not csrf:
+            csrf_match = re.search(r'"csrfToken"\s*:\s*"([^"]+)"', page.text)
+            if csrf_match:
+                csrf = csrf_match.group(1)
+
+        login_headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Origin": "https://www.walmart.com",
+            "Referer": "https://www.walmart.com/account/login",
+        }
+        if csrf:
+            login_headers["x-csrf-token"] = csrf
+            login_headers["WM_SEC.AUTH_TOKEN"] = csrf
+
+        # Step 2: Sign in
         login_resp = await client.post(
             "https://www.walmart.com/account/electrode/api/signin",
             json={"username": creds.email, "password": creds.password},
-            headers={**HEADERS, "Content-Type": "application/json"},
+            headers=login_headers,
         )
 
         if login_resp.status_code != 200:
             return CheckoutResult(
                 url=url, retailer="walmart", product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"Login failed (HTTP {login_resp.status_code})",
+                error_message=f"Login failed (HTTP {login_resp.status_code}): {login_resp.text[:200]}",
             )
 
         # Step 2: Add to cart
