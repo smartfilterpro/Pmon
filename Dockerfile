@@ -14,8 +14,9 @@ WORKDIR /app
 # Copy project files
 COPY . .
 
-# Install Python deps + Playwright Chromium
-RUN pip install --no-cache-dir . \
+# Install deps from requirements.txt (keeps code in /app, not site-packages)
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir playwright \
     && playwright install chromium
 
 # Persistent data lives on Railway volume at /data

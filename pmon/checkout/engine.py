@@ -6,8 +6,6 @@ import asyncio
 import logging
 from pathlib import Path
 
-import os
-
 from pmon.config import Config, AccountCredentials, Profile
 from pmon.models import CheckoutResult, CheckoutStatus
 from pmon.checkout.api_checkout import ApiCheckout
@@ -15,8 +13,7 @@ from pmon.checkout.api_checkout import ApiCheckout
 logger = logging.getLogger(__name__)
 
 # Directory to store browser session data (cookies, etc.)
-_data_dir = Path(os.environ.get("PMON_DATA_DIR", Path(__file__).parent.parent.parent))
-SESSION_DIR = _data_dir / ".sessions"
+SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 
 
 class CheckoutEngine:
