@@ -9,7 +9,8 @@ from pathlib import Path
 import yaml
 
 
-CONFIG_DIR = Path(__file__).parent.parent / "config"
+DATA_DIR = Path(os.environ.get("PMON_DATA_DIR", Path(__file__).parent.parent / "config"))
+CONFIG_DIR = DATA_DIR
 CONFIG_PATH = CONFIG_DIR / "config.yaml"
 
 

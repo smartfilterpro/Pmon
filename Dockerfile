@@ -11,16 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy everything needed
-COPY pyproject.toml requirements.txt ./
-COPY pmon/ pmon/
-COPY config/ config/
+# Copy project files
+COPY . .
 
 # Install Python deps + Playwright Chromium
 RUN pip install --no-cache-dir . \
     && playwright install chromium
 
 # Persistent data lives on Railway volume at /data
+RUN mkdir -p /data
 ENV PMON_DATA_DIR=/data
 
 EXPOSE 8888
