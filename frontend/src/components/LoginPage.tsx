@@ -37,16 +37,27 @@ export default function LoginPage({ onLogin }: Props) {
         if (res.error) { setError(res.error); return; }
         // Auto-login after register
         const loginRes = await login(username, password);
-        if (loginRes.error) { setError(loginRes.error); return; }
-        onLogin({ user_id: loginRes.user_id, username: loginRes.username, totp_enabled: false });
+        if (loginRes.error) {
+          if (loginRes.pending) {
+            setError('Account created! Waiting for admin approval.');
+          } else {
+            setError(loginRes.error);
+          }
+          return;
+        }
+        onLogin({ user_id: loginRes.user_id, username: loginRes.username, is_admin: false, totp_enabled: false });
       } else {
         const res = await login(username, password, needsTotp ? totpCode : undefined);
         if (res.needs_totp) {
           setNeedsTotp(true);
           return;
         }
+        if (res.pending) {
+          setError('Account pending admin approval.');
+          return;
+        }
         if (res.error) { setError(res.error); return; }
-        onLogin({ user_id: res.user_id, username: res.username, totp_enabled: res.totp_enabled });
+        onLogin({ user_id: res.user_id, username: res.username, is_admin: res.is_admin, totp_enabled: res.totp_enabled });
       }
     } finally {
       setLoading(false);

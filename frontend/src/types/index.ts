@@ -30,7 +30,17 @@ export interface StatusResponse {
 export interface User {
   user_id: number;
   username: string;
+  is_admin: boolean;
   totp_enabled: boolean;
+}
+
+export interface ManagedUser {
+  id: number;
+  username: string;
+  is_admin: number;
+  approved: number;
+  created_at: string;
+  last_login: string | null;
 }
 
 export interface ErrorEntry {

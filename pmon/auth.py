@@ -1,9 +1,8 @@
-"""Authentication: JWT tokens + TOTP 2FA."""
+"""Authentication: JWT tokens + TOTP 2FA + admin approval."""
 
 from __future__ import annotations
 
 import os
-import time
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -29,10 +28,11 @@ def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
-def create_token(user_id: int, username: str) -> str:
+def create_token(user_id: int, username: str, is_admin: bool) -> str:
     payload = {
         "user_id": user_id,
         "username": username,
+        "is_admin": is_admin,
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
         "iat": datetime.now(timezone.utc),
     }
@@ -49,7 +49,7 @@ def decode_token(token: str) -> dict | None:
 
 
 def register_user(username: str, password: str) -> dict:
-    """Register a new user. Returns user dict or raises ValueError."""
+    """Register a new user. First user auto-becomes approved admin."""
     existing = db.get_user(username)
     if existing:
         raise ValueError("Username already taken")
@@ -58,8 +58,17 @@ def register_user(username: str, password: str) -> dict:
         raise ValueError("Password must be at least 8 characters")
 
     pw_hash = hash_password(password)
-    user_id = db.create_user(username, pw_hash)
-    return {"user_id": user_id, "username": username}
+
+    # First user is auto-admin + auto-approved
+    is_first = db.get_user_count() == 0
+    user_id = db.create_user(
+        username, pw_hash,
+        is_admin=is_first,
+        approved=is_first,
+    )
+
+    status = "approved" if is_first else "pending"
+    return {"user_id": user_id, "username": username, "status": status}
 
 
 def login_user(username: str, password: str, totp_code: str | None = None) -> dict:
@@ -71,6 +80,10 @@ def login_user(username: str, password: str, totp_code: str | None = None) -> di
     if not verify_password(password, user["password_hash"]):
         raise ValueError("Invalid username or password")
 
+    # Check if account is approved
+    if not user["approved"]:
+        raise ValueError("Account pending admin approval")
+
     # Check 2FA if enabled
     if user["totp_enabled"]:
         if not totp_code:
@@ -80,17 +93,18 @@ def login_user(username: str, password: str, totp_code: str | None = None) -> di
             raise ValueError("Invalid 2FA code")
 
     db.update_last_login(user["id"])
-    token = create_token(user["id"], user["username"])
+    token = create_token(user["id"], user["username"], bool(user["is_admin"]))
     return {
         "token": token,
         "user_id": user["id"],
         "username": user["username"],
+        "is_admin": bool(user["is_admin"]),
         "totp_enabled": bool(user["totp_enabled"]),
     }
 
 
 def setup_totp(user_id: int) -> dict:
-    """Generate a TOTP secret for 2FA setup. Returns secret + provisioning URI."""
+    """Generate a TOTP secret for 2FA setup."""
     user = db.get_user_by_id(user_id)
     if not user:
         raise ValueError("User not found")

@@ -35,6 +35,8 @@ def _init_tables(conn: sqlite3.Connection):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            is_admin INTEGER DEFAULT 0,
+            approved INTEGER DEFAULT 0,
             totp_secret TEXT,
             totp_enabled INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -96,14 +98,28 @@ def _init_tables(conn: sqlite3.Connection):
     """)
     conn.commit()
 
+    # Migrate: add columns if missing (for existing databases)
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection):
+    """Add columns that may not exist in older databases."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "is_admin" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
+    if "approved" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
+    conn.commit()
+
 
 # --- User operations ---
 
-def create_user(username: str, password_hash: str) -> int:
+def create_user(username: str, password_hash: str,
+                is_admin: bool = False, approved: bool = False) -> int:
     db = get_db()
     cursor = db.execute(
-        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-        (username, password_hash),
+        "INSERT INTO users (username, password_hash, is_admin, approved) VALUES (?, ?, ?, ?)",
+        (username, password_hash, int(is_admin), int(approved)),
     )
     user_id = cursor.lastrowid
     db.execute("INSERT INTO user_settings (user_id) VALUES (?)", (user_id,))
@@ -145,6 +161,41 @@ def get_user_count() -> int:
     db = get_db()
     row = db.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
     return row["cnt"]
+
+
+def approve_user(user_id: int):
+    db = get_db()
+    db.execute("UPDATE users SET approved = 1 WHERE id = ?", (user_id,))
+    db.commit()
+
+
+def reject_user(user_id: int):
+    """Delete a pending user."""
+    db = get_db()
+    db.execute("DELETE FROM users WHERE id = ? AND approved = 0", (user_id,))
+    db.commit()
+
+
+def get_pending_users() -> list[dict]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, username, created_at FROM users WHERE approved = 0 ORDER BY created_at"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_users() -> list[dict]:
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, username, is_admin, approved, created_at, last_login FROM users ORDER BY created_at"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_user_admin(user_id: int, is_admin: bool):
+    db = get_db()
+    db.execute("UPDATE users SET is_admin = ? WHERE id = ?", (int(is_admin), user_id))
+    db.commit()
 
 
 # --- Product operations ---

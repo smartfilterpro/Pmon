@@ -81,6 +81,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             status = 401
             if "2FA code required" in error_msg:
                 return JSONResponse({"error": error_msg, "needs_totp": True}, 401)
+            if "pending admin approval" in error_msg:
+                return JSONResponse({"error": error_msg, "pending": True}, 403)
             return JSONResponse({"error": error_msg}, status)
 
     @app.get("/api/auth/check")
@@ -89,6 +91,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "ok": True,
             "user_id": user["id"],
             "username": user["username"],
+            "is_admin": bool(user.get("is_admin", 0)),
             "totp_enabled": bool(user["totp_enabled"]),
         }
 
@@ -256,6 +259,44 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     async def api_errors(user: dict = Depends(get_current_user)):
         errors = db.get_error_log(user["id"], limit=100)
         return {"errors": errors}
+
+    # --- Admin endpoints ---
+
+    def require_admin(user: dict = Depends(get_current_user)) -> dict:
+        if not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return user
+
+    @app.get("/api/admin/users")
+    async def api_admin_users(user: dict = Depends(require_admin)):
+        users = db.get_all_users()
+        return {"users": users}
+
+    @app.get("/api/admin/pending")
+    async def api_admin_pending(user: dict = Depends(require_admin)):
+        pending = db.get_pending_users()
+        return {"pending": pending}
+
+    @app.post("/api/admin/approve")
+    async def api_admin_approve(request: Request, user: dict = Depends(require_admin)):
+        data = await request.json()
+        db.approve_user(data["user_id"])
+        return {"ok": True}
+
+    @app.post("/api/admin/reject")
+    async def api_admin_reject(request: Request, user: dict = Depends(require_admin)):
+        data = await request.json()
+        db.reject_user(data["user_id"])
+        return {"ok": True}
+
+    @app.post("/api/admin/set_admin")
+    async def api_admin_set_admin(request: Request, user: dict = Depends(require_admin)):
+        data = await request.json()
+        target_id = data["user_id"]
+        if target_id == user["id"]:
+            return JSONResponse({"error": "Cannot change your own admin status"}, 400)
+        db.set_user_admin(target_id, data.get("is_admin", False))
+        return {"ok": True}
 
     # --- Monitor control ---
 

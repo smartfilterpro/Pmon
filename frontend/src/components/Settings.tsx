@@ -4,7 +4,8 @@ import {
   setupTotp, confirmTotp, disableTotp,
 } from '../hooks/useApi';
 import type { User } from '../types';
-import { Save, Bell, Clock, Shield, ShieldCheck, Store } from 'lucide-react';
+import { Save, Bell, Clock, Shield, ShieldCheck, Store, Users } from 'lucide-react';
+import AdminPanel from './AdminPanel';
 import './Settings.css';
 
 interface Props {
@@ -99,6 +100,15 @@ export default function Settings({ user }: Props) {
   return (
     <div className="settings">
       <h2>Settings</h2>
+
+      {/* Admin Panel - only visible to admins */}
+      {user.is_admin && (
+        <div className="settings-section">
+          <h3><Users size={16} /> User Management</h3>
+          <p className="section-desc">Approve or reject new account registrations. Manage admin roles.</p>
+          <AdminPanel />
+        </div>
+      )}
 
       {/* Monitor Settings */}
       <div className="settings-section">

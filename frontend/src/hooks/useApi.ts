@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { StatusResponse, User, ErrorEntry } from '../types';
+import type { StatusResponse, User, ErrorEntry, ManagedUser } from '../types';
 
 const API = '/api';
 
@@ -194,4 +194,39 @@ export async function getErrors(): Promise<ErrorEntry[]> {
   const resp = await apiFetch('/errors');
   const data = await resp.json();
   return data.errors;
+}
+
+// --- Admin ---
+
+export async function getAdminUsers(): Promise<ManagedUser[]> {
+  const resp = await apiFetch('/admin/users');
+  const data = await resp.json();
+  return data.users;
+}
+
+export async function getPendingUsers(): Promise<ManagedUser[]> {
+  const resp = await apiFetch('/admin/pending');
+  const data = await resp.json();
+  return data.pending;
+}
+
+export async function approveUser(userId: number) {
+  return (await apiFetch('/admin/approve', {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  })).json();
+}
+
+export async function rejectUser(userId: number) {
+  return (await apiFetch('/admin/reject', {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId }),
+  })).json();
+}
+
+export async function setUserAdmin(userId: number, isAdmin: boolean) {
+  return (await apiFetch('/admin/set_admin', {
+    method: 'POST',
+    body: JSON.stringify({ user_id: userId, is_admin: isAdmin }),
+  })).json();
 }
