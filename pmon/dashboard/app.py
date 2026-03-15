@@ -1,151 +1,280 @@
-"""FastAPI dashboard for managing the Pokemon card bot."""
+"""FastAPI dashboard with auth and per-user data."""
 
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+import qrcode
+import qrcode.constants
+from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
+from pmon import database as db
+from pmon.auth import (
+    register_user, login_user, setup_totp, confirm_totp,
+    disable_totp, decode_token, create_initial_admin,
+)
+from pmon.config import detect_retailer
+
 if TYPE_CHECKING:
     from pmon.engine import PmonEngine
+
+logger = logging.getLogger(__name__)
 
 DASHBOARD_DIR = Path(__file__).parent
 DIST_DIR = DASHBOARD_DIR / "static" / "dist"
 
 
+def get_current_user(request: Request) -> dict:
+    """Extract and validate JWT from Authorization header."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = auth[7:]
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = db.get_user_by_id(payload["user_id"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
 def create_app(engine: "PmonEngine") -> FastAPI:
     app = FastAPI(title="Pmon Dashboard")
 
-    # --- API routes ---
+    # Initialize DB and create admin from env vars
+    db.get_db()
+    create_initial_admin()
+
+    # --- Auth endpoints (no auth required) ---
+
+    @app.post("/api/auth/register")
+    async def api_register(request: Request):
+        data = await request.json()
+        username = data.get("username", "").strip()
+        password = data.get("password", "")
+        if not username or not password:
+            return JSONResponse({"error": "Username and password required"}, 400)
+        try:
+            result = register_user(username, password)
+            return {"ok": True, **result}
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, 400)
+
+    @app.post("/api/auth/login")
+    async def api_login(request: Request):
+        data = await request.json()
+        username = data.get("username", "").strip()
+        password = data.get("password", "")
+        totp_code = data.get("totp_code")
+        try:
+            result = login_user(username, password, totp_code)
+            return {"ok": True, **result}
+        except ValueError as e:
+            error_msg = str(e)
+            status = 401
+            if "2FA code required" in error_msg:
+                return JSONResponse({"error": error_msg, "needs_totp": True}, 401)
+            return JSONResponse({"error": error_msg}, status)
+
+    @app.get("/api/auth/check")
+    async def api_auth_check(user: dict = Depends(get_current_user)):
+        return {
+            "ok": True,
+            "user_id": user["id"],
+            "username": user["username"],
+            "totp_enabled": bool(user["totp_enabled"]),
+        }
+
+    @app.get("/api/auth/has-users")
+    async def api_has_users():
+        """Check if any users exist (for showing register vs login)."""
+        return {"has_users": db.get_user_count() > 0}
+
+    # --- 2FA endpoints ---
+
+    @app.post("/api/auth/totp/setup")
+    async def api_totp_setup(user: dict = Depends(get_current_user)):
+        result = setup_totp(user["id"])
+        return {"ok": True, "secret": result["secret"], "uri": result["uri"]}
+
+    @app.get("/api/auth/totp/qr")
+    async def api_totp_qr(user: dict = Depends(get_current_user)):
+        result = setup_totp(user["id"])
+        img = qrcode.make(result["uri"], error_correction=qrcode.constants.ERROR_CORRECT_L)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="image/png")
+
+    @app.post("/api/auth/totp/confirm")
+    async def api_totp_confirm(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        code = data.get("code", "")
+        if confirm_totp(user["id"], code):
+            return {"ok": True}
+        return JSONResponse({"error": "Invalid code"}, 400)
+
+    @app.post("/api/auth/totp/disable")
+    async def api_totp_disable(user: dict = Depends(get_current_user)):
+        disable_totp(user["id"])
+        return {"ok": True}
+
+    # --- Product endpoints (per-user) ---
 
     @app.get("/api/status")
-    async def status():
-        products = []
-        for url, result in engine.state.products.items():
-            # Find the config product to get auto_checkout flag
-            config_product = next((p for p in engine.config.products if p.url == url), None)
-            products.append({
-                "url": result.url,
-                "name": result.product_name,
-                "retailer": result.retailer,
-                "status": result.status.value,
-                "price": result.price,
-                "timestamp": result.timestamp.isoformat(),
-                "error": result.error_message,
-                "auto_checkout": config_product.auto_checkout if config_product else False,
+    async def api_status(user: dict = Depends(get_current_user)):
+        user_id = user["id"]
+        products = db.get_user_products(user_id)
+
+        product_list = []
+        for p in products:
+            # Get live stock status if available
+            stock = engine.state.products.get(p["url"])
+            product_list.append({
+                "url": p["url"],
+                "name": p["name"],
+                "retailer": p["retailer"],
+                "quantity": p["quantity"],
+                "auto_checkout": bool(p["auto_checkout"]),
+                "status": stock.status.value if stock else "unknown",
+                "price": stock.price if stock else "",
+                "timestamp": stock.timestamp.isoformat() if stock else "",
+                "error": stock.error_message if stock else "",
             })
 
-        # Also include configured products that haven't been checked yet
-        checked_urls = set(engine.state.products.keys())
-        for p in engine.config.products:
-            if p.url not in checked_urls:
-                products.append({
-                    "url": p.url,
-                    "name": p.name,
-                    "retailer": p.retailer,
-                    "status": "unknown",
-                    "price": "",
-                    "timestamp": "",
-                    "error": "",
-                    "auto_checkout": p.auto_checkout,
-                })
-
-        checkouts = []
-        for c in engine.state.checkout_attempts[-20:]:
-            checkouts.append({
-                "url": c.url,
-                "name": c.product_name,
-                "retailer": c.retailer,
-                "status": c.status.value,
-                "order_number": c.order_number,
-                "error": c.error_message,
-                "timestamp": c.timestamp.isoformat(),
-            })
+        checkouts = db.get_checkout_log(user_id, limit=30)
 
         return {
             "is_running": engine.state.is_running,
             "started_at": engine.state.started_at.isoformat() if engine.state.started_at else None,
-            "products": products,
+            "products": product_list,
             "checkouts": checkouts,
         }
 
     @app.post("/api/products")
-    async def add_product(request: Request):
+    async def api_add_product(request: Request, user: dict = Depends(get_current_user)):
         data = await request.json()
-        from pmon.config import Product, save_config
-        product = Product(
-            url=data["url"],
-            name=data.get("name", ""),
-            auto_checkout=data.get("auto_checkout", False),
-        )
-        engine.config.products.append(product)
-        save_config(engine.config)
-        return {"ok": True, "product": {"url": product.url, "name": product.name, "retailer": product.retailer}}
+        url = data.get("url", "").strip()
+        if not url:
+            return JSONResponse({"error": "URL required"}, 400)
 
-    @app.delete("/api/products")
-    async def remove_product(request: Request):
-        data = await request.json()
-        url = data["url"]
-        engine.config.products = [p for p in engine.config.products if p.url != url]
-        from pmon.config import save_config
-        save_config(engine.config)
-        engine.state.products.pop(url, None)
+        name = data.get("name", "")
+        retailer = detect_retailer(url)
+        quantity = max(1, int(data.get("quantity", 1)))
+        auto = bool(data.get("auto_checkout", False))
+
+        db.add_product(user["id"], url, name, retailer, quantity, auto)
+        engine.sync_products_from_db()
         return {"ok": True}
 
-    @app.post("/api/products/{action}")
-    async def product_action(action: str, request: Request):
+    @app.delete("/api/products")
+    async def api_remove_product(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        db.remove_product(user["id"], data["url"])
+        engine.state.products.pop(data["url"], None)
+        engine.sync_products_from_db()
+        return {"ok": True}
+
+    @app.post("/api/products/toggle_auto")
+    async def api_toggle_auto(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        new_val = db.toggle_product_auto(user["id"], data["url"])
+        engine.sync_products_from_db()
+        return {"ok": True, "auto_checkout": new_val}
+
+    @app.post("/api/products/set_quantity")
+    async def api_set_quantity(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        qty = max(1, int(data.get("quantity", 1)))
+        db.update_product_quantity(user["id"], data["url"], qty)
+        engine.sync_products_from_db()
+        return {"ok": True, "quantity": qty}
+
+    @app.post("/api/products/checkout_now")
+    async def api_checkout_now(request: Request, user: dict = Depends(get_current_user)):
         data = await request.json()
         url = data["url"]
+        products = db.get_user_products(user["id"])
+        product = next((p for p in products if p["url"] == url), None)
+        if not product:
+            return JSONResponse({"error": "Product not found"}, 404)
 
-        if action == "toggle_auto":
-            for p in engine.config.products:
-                if p.url == url:
-                    p.auto_checkout = not p.auto_checkout
-                    from pmon.config import save_config
-                    save_config(engine.config)
-                    return {"ok": True, "auto_checkout": p.auto_checkout}
+        from pmon.config import Product
+        p = Product(url=url, name=product["name"], auto_checkout=True)
+        asyncio.create_task(engine.manual_checkout(p, user_id=user["id"]))
+        return {"ok": True, "message": "Checkout attempt started"}
 
-        if action == "checkout_now":
-            product = next((p for p in engine.config.products if p.url == url), None)
-            if product:
-                asyncio.create_task(engine.manual_checkout(product))
-                return {"ok": True, "message": "Checkout attempt started"}
+    # --- Retailer accounts ---
 
-        return JSONResponse({"ok": False, "error": "Unknown action"}, status_code=400)
+    @app.get("/api/accounts")
+    async def api_get_accounts(user: dict = Depends(get_current_user)):
+        accounts = db.get_retailer_accounts(user["id"])
+        # Don't send passwords back
+        safe = {}
+        for retailer, acc in accounts.items():
+            safe[retailer] = {"email": acc["email"], "has_password": bool(acc["password"])}
+        return {"accounts": safe}
+
+    @app.post("/api/accounts")
+    async def api_set_account(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        retailer = data.get("retailer", "").strip()
+        email = data.get("email", "").strip()
+        password = data.get("password", "")
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+            return JSONResponse({"error": "Invalid retailer"}, 400)
+        db.set_retailer_account(user["id"], retailer, email, password)
+        return {"ok": True}
+
+    # --- Settings ---
+
+    @app.get("/api/settings")
+    async def api_get_settings(user: dict = Depends(get_current_user)):
+        settings = db.get_user_settings(user["id"])
+        return {"settings": settings}
+
+    @app.post("/api/settings")
+    async def api_update_settings(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        db.update_user_settings(
+            user["id"],
+            poll_interval=data.get("poll_interval"),
+            discord_webhook=data.get("discord_webhook"),
+        )
+        return {"ok": True}
+
+    # --- Error log ---
+
+    @app.get("/api/errors")
+    async def api_errors(user: dict = Depends(get_current_user)):
+        errors = db.get_error_log(user["id"], limit=100)
+        return {"errors": errors}
+
+    # --- Monitor control ---
 
     @app.post("/api/monitor/{action}")
-    async def monitor_action(action: str):
+    async def api_monitor_action(action: str, user: dict = Depends(get_current_user)):
         if action == "start":
             asyncio.create_task(engine.start_monitoring())
             return {"ok": True}
         elif action == "stop":
             engine.stop_monitoring()
             return {"ok": True}
-        return JSONResponse({"ok": False}, status_code=400)
-
-    @app.post("/api/settings")
-    async def update_settings(request: Request):
-        data = await request.json()
-        if "poll_interval" in data:
-            engine.config.poll_interval = int(data["poll_interval"])
-        if "discord_webhook" in data:
-            engine.config.discord_webhook = data["discord_webhook"]
-        from pmon.config import save_config
-        save_config(engine.config)
-        return {"ok": True}
+        return JSONResponse({"ok": False}, 400)
 
     # --- Serve React app ---
-    # Static assets (JS, CSS)
     if DIST_DIR.exists():
         assets_dir = DIST_DIR / "assets"
         if assets_dir.exists():
             app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
-    # Catch-all: serve index.html for any non-API route (SPA routing)
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         index = DIST_DIR / "index.html"

@@ -1,0 +1,82 @@
+.error-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.error-log-header h2 { font-size: 18px; color: var(--text-primary); }
+
+.refresh-btn {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--bg-secondary); color: var(--text-secondary);
+  padding: 6px 14px; font-size: 13px;
+  border: 1px solid var(--border);
+}
+
+.error-log-empty {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary);
+}
+.error-log-empty svg { margin-bottom: 16px; opacity: 0.3; }
+
+.error-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.error-entry {
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border-left: 3px solid var(--orange);
+}
+.error-entry.level-warning { border-left-color: var(--accent-yellow); }
+.error-entry.level-error { border-left-color: var(--red); }
+.error-entry.level-critical { border-left-color: #ff0000; }
+
+.error-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.error-level {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+.error-level.level-warning { background: rgba(255, 203, 5, 0.2); color: var(--accent-yellow); }
+.error-level.level-error { background: rgba(255, 23, 68, 0.2); color: var(--red); }
+.error-level.level-critical { background: rgba(255, 0, 0, 0.2); color: #ff0000; }
+
+.error-source { font-size: 12px; color: var(--text-secondary); }
+.error-time { font-size: 11px; color: var(--text-secondary); margin-left: auto; }
+.error-message { font-size: 13px; color: var(--text-primary); }
+
+.error-details { margin-top: 8px; }
+.error-details summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.error-details pre {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.error-log-loading {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-secondary);
+}

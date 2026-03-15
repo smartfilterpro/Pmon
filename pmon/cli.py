@@ -28,6 +28,9 @@ def setup_logging(verbose: bool = False):
         format="%(message)s",
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
+    # Also capture WARNING+ to database
+    from pmon.log_handler import DatabaseLogHandler
+    logging.getLogger().addHandler(DatabaseLogHandler())
 
 
 def main():

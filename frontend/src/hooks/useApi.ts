@@ -1,7 +1,81 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import type { StatusResponse } from '../types';
+import { useState, useEffect, useCallback } from 'react';
+import type { StatusResponse, User, ErrorEntry } from '../types';
 
-const API_BASE = '/api';
+const API = '/api';
+
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem('pmon_token');
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function apiFetch(path: string, opts: RequestInit = {}) {
+  const resp = await fetch(`${API}${path}`, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...(opts.headers || {}),
+    },
+  });
+  if (resp.status === 401) {
+    localStorage.removeItem('pmon_token');
+    window.location.reload();
+    throw new Error('Unauthorized');
+  }
+  return resp;
+}
+
+// --- Auth ---
+
+export async function checkAuth(): Promise<User | null> {
+  const token = localStorage.getItem('pmon_token');
+  if (!token) return null;
+  try {
+    const resp = await apiFetch('/auth/check');
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data as User;
+  } catch {
+    return null;
+  }
+}
+
+export async function hasUsers(): Promise<boolean> {
+  const resp = await fetch(`${API}/auth/has-users`);
+  const data = await resp.json();
+  return data.has_users;
+}
+
+export async function login(username: string, password: string, totpCode?: string) {
+  const resp = await fetch(`${API}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, totp_code: totpCode }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) return { error: data.error, needs_totp: data.needs_totp };
+  localStorage.setItem('pmon_token', data.token);
+  return data;
+}
+
+export async function register(username: string, password: string) {
+  const resp = await fetch(`${API}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) return { error: data.error };
+  return data;
+}
+
+export function logout() {
+  localStorage.removeItem('pmon_token');
+  window.location.reload();
+}
+
+// --- Status ---
 
 export function useStatus(pollInterval = 3000) {
   const [data, setData] = useState<StatusResponse | null>(null);
@@ -9,10 +83,9 @@ export function useStatus(pollInterval = 3000) {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const resp = await fetch(`${API_BASE}/status`);
+      const resp = await apiFetch('/status');
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const json = await resp.json();
-      setData(json);
+      setData(await resp.json());
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -28,52 +101,97 @@ export function useStatus(pollInterval = 3000) {
   return { data, error, refresh: fetchStatus };
 }
 
-export async function addProduct(url: string, name: string, autoCheckout: boolean) {
-  const resp = await fetch(`${API_BASE}/products`, {
+// --- Products ---
+
+export async function addProduct(url: string, name: string, quantity: number, autoCheckout: boolean) {
+  const resp = await apiFetch('/products', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, name, auto_checkout: autoCheckout }),
+    body: JSON.stringify({ url, name, quantity, auto_checkout: autoCheckout }),
   });
   return resp.json();
 }
 
 export async function removeProduct(url: string) {
-  const resp = await fetch(`${API_BASE}/products`, {
+  return (await apiFetch('/products', {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
-  });
-  return resp.json();
+  })).json();
 }
 
 export async function toggleAutoCheckout(url: string) {
-  const resp = await fetch(`${API_BASE}/products/toggle_auto`, {
+  return (await apiFetch('/products/toggle_auto', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
-  });
-  return resp.json();
+  })).json();
+}
+
+export async function setQuantity(url: string, quantity: number) {
+  return (await apiFetch('/products/set_quantity', {
+    method: 'POST',
+    body: JSON.stringify({ url, quantity }),
+  })).json();
 }
 
 export async function checkoutNow(url: string) {
-  const resp = await fetch(`${API_BASE}/products/checkout_now`, {
+  return (await apiFetch('/products/checkout_now', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
-  });
-  return resp.json();
+  })).json();
 }
 
+// --- Monitor ---
+
 export async function controlMonitor(action: 'start' | 'stop') {
-  const resp = await fetch(`${API_BASE}/monitor/${action}`, { method: 'POST' });
-  return resp.json();
+  return (await apiFetch(`/monitor/${action}`, { method: 'POST' })).json();
+}
+
+// --- Settings ---
+
+export async function getSettings() {
+  return (await apiFetch('/settings')).json();
 }
 
 export async function updateSettings(settings: { poll_interval?: number; discord_webhook?: string }) {
-  const resp = await fetch(`${API_BASE}/settings`, {
+  return (await apiFetch('/settings', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(settings),
-  });
-  return resp.json();
+  })).json();
+}
+
+// --- Accounts ---
+
+export async function getAccounts() {
+  return (await apiFetch('/accounts')).json();
+}
+
+export async function setAccount(retailer: string, email: string, password: string) {
+  return (await apiFetch('/accounts', {
+    method: 'POST',
+    body: JSON.stringify({ retailer, email, password }),
+  })).json();
+}
+
+// --- 2FA ---
+
+export async function setupTotp() {
+  return (await apiFetch('/auth/totp/setup', { method: 'POST' })).json();
+}
+
+export async function confirmTotp(code: string) {
+  return (await apiFetch('/auth/totp/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  })).json();
+}
+
+export async function disableTotp() {
+  return (await apiFetch('/auth/totp/disable', { method: 'POST' })).json();
+}
+
+// --- Errors ---
+
+export async function getErrors(): Promise<ErrorEntry[]> {
+  const resp = await apiFetch('/errors');
+  const data = await resp.json();
+  return data.errors;
 }

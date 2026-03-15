@@ -46,3 +46,17 @@
 }
 .toggle-btn.start { background: var(--green); color: #000; }
 .toggle-btn.stop { background: var(--red); color: #fff; }
+
+.user-info {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--text-secondary);
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.logout-btn {
+  background: none; padding: 4px;
+  color: var(--text-secondary);
+  display: flex; align-items: center;
+}
+.logout-btn:hover { color: var(--red); }

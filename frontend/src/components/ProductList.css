@@ -113,6 +113,32 @@
 
 .link-btn { padding: 6px 8px; }
 
+.qty-control {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+}
+.qty-btn {
+  padding: 4px 6px;
+  background: none;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+}
+.qty-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.qty-value {
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 20px;
+  text-align: center;
+  color: var(--text-primary);
+}
+
 .empty-state {
   text-align: center;
   padding: 60px 20px;

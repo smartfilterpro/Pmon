@@ -13,6 +13,7 @@ from pmon.monitors.base import BaseMonitor
 from pmon.notifications.console import ConsoleNotifier
 from pmon.notifications.discord import DiscordNotifier
 from pmon.checkout.engine import CheckoutEngine
+from pmon import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +32,38 @@ class PmonEngine:
         # Monitor instances (cached per retailer)
         self._monitors: dict[str, BaseMonitor] = {}
 
-        # Notifiers
-        self._notifiers = []
-        if config.console_notifications:
-            self._notifiers.append(ConsoleNotifier())
-        if config.discord_webhook:
-            self._notifiers.append(DiscordNotifier(config.discord_webhook))
+        # Console notifier (always on)
+        self._console_notifier = ConsoleNotifier()
+
+        # Per-user discord notifiers, keyed by webhook URL
+        self._discord_notifiers: dict[str, DiscordNotifier] = {}
 
         self._running = False
-        self._task: asyncio.Task | None = None
+
+        # All products across all users (synced from DB)
+        self._all_products: list[dict] = []
+
+    def sync_products_from_db(self):
+        """Reload all products from the database."""
+        all_products = []
+        # Get all users' products
+        conn = db.get_db()
+        rows = conn.execute(
+            "SELECT p.*, u.id as owner_id FROM products p JOIN users u ON p.user_id = u.id"
+        ).fetchall()
+        self._all_products = [dict(r) for r in rows]
+
+        # Also sync into config.products for the monitor loop
+        self.config.products = []
+        seen_urls = set()
+        for p in self._all_products:
+            if p["url"] not in seen_urls:
+                seen_urls.add(p["url"])
+                self.config.products.append(Product(
+                    url=p["url"],
+                    name=p["name"],
+                    auto_checkout=bool(p["auto_checkout"]),
+                ))
 
     def _get_monitor(self, retailer: str) -> BaseMonitor:
         if retailer not in self._monitors:
@@ -47,12 +71,20 @@ class PmonEngine:
             self._monitors[retailer] = monitor_class()
         return self._monitors[retailer]
 
+    def _get_discord_notifier(self, webhook: str) -> DiscordNotifier | None:
+        if not webhook:
+            return None
+        if webhook not in self._discord_notifiers:
+            self._discord_notifiers[webhook] = DiscordNotifier(webhook)
+        return self._discord_notifiers[webhook]
+
     async def start_monitoring(self):
         """Start the monitoring loop."""
         if self._running:
             logger.warning("Monitor is already running")
             return
 
+        self.sync_products_from_db()
         self._running = True
         self.state.is_running = True
         self.state.started_at = datetime.now()
@@ -60,6 +92,7 @@ class PmonEngine:
                      f"polling every {self.config.poll_interval}s")
 
         while self._running:
+            self.sync_products_from_db()
             await self._check_all()
             await asyncio.sleep(self.config.poll_interval)
 
@@ -88,41 +121,102 @@ class PmonEngine:
         self.state.update_stock(result)
 
         if result.status == StockStatus.IN_STOCK:
-            # Only notify if we haven't already for this product
             if product.url not in self._notified:
                 self._notified.add(product.url)
                 logger.info(f"IN STOCK: {product.name} at {product.retailer}")
 
-                for notifier in self._notifiers:
-                    await notifier.notify_in_stock(result)
+                # Notify console
+                await self._console_notifier.notify_in_stock(result)
 
-                # Auto-checkout if enabled
-                if product.auto_checkout:
-                    await self._auto_checkout(product)
+                # Find all users watching this product and notify/auto-buy
+                for p in self._all_products:
+                    if p["url"] == product.url:
+                        user_id = p["owner_id"]
+                        settings = db.get_user_settings(user_id)
+
+                        # Discord notification per user
+                        webhook = settings.get("discord_webhook", "")
+                        notifier = self._get_discord_notifier(webhook)
+                        if notifier:
+                            await notifier.notify_in_stock(result)
+
+                        # Auto-checkout if enabled for this user's product
+                        if p["auto_checkout"]:
+                            await self._auto_checkout_for_user(p, user_id)
 
         elif result.status == StockStatus.OUT_OF_STOCK:
-            # Reset notification flag when product goes OOS
             self._notified.discard(product.url)
 
-    async def _auto_checkout(self, product: Product):
+        if result.status == StockStatus.ERROR:
+            db.add_error_log(
+                user_id=None,
+                level="ERROR",
+                source=f"monitor.{product.retailer}",
+                message=f"Failed to check {product.name}: {result.error_message}",
+            )
+
+    async def _auto_checkout_for_user(self, product_row: dict, user_id: int):
+        """Auto-checkout a product for a specific user."""
         if not self.checkout_engine:
             self.checkout_engine = CheckoutEngine(self.config)
             await self.checkout_engine.start()
 
-        logger.info(f"Attempting auto-checkout for {product.name}")
+        logger.info(f"Auto-checkout for user {user_id}: {product_row['name']}")
+
+        # Load user's retailer credentials
+        accounts = db.get_retailer_accounts(user_id)
+        retailer = product_row["retailer"]
+
+        checkout_result = await self.checkout_engine.attempt_checkout(
+            url=product_row["url"],
+            retailer=retailer,
+            product_name=product_row["name"],
+        )
+
+        # Log to database
+        db.add_checkout_log(
+            user_id=user_id,
+            url=product_row["url"],
+            retailer=retailer,
+            product_name=product_row["name"],
+            status=checkout_result.status.value,
+            order_number=checkout_result.order_number,
+            error_message=checkout_result.error_message,
+        )
+
+        self.state.add_checkout(checkout_result)
+
+        # Notify
+        await self._console_notifier.notify_checkout(checkout_result)
+        settings = db.get_user_settings(user_id)
+        notifier = self._get_discord_notifier(settings.get("discord_webhook", ""))
+        if notifier:
+            await notifier.notify_checkout(checkout_result)
+
+    async def manual_checkout(self, product: Product, user_id: int | None = None):
+        """Trigger a manual checkout attempt."""
+        if not self.checkout_engine:
+            self.checkout_engine = CheckoutEngine(self.config)
+            await self.checkout_engine.start()
+
         checkout_result = await self.checkout_engine.attempt_checkout(
             url=product.url,
             retailer=product.retailer,
             product_name=product.name,
         )
+
+        if user_id:
+            db.add_checkout_log(
+                user_id=user_id,
+                url=product.url,
+                retailer=product.retailer,
+                product_name=product.name,
+                status=checkout_result.status.value,
+                order_number=checkout_result.order_number,
+                error_message=checkout_result.error_message,
+            )
+
         self.state.add_checkout(checkout_result)
-
-        for notifier in self._notifiers:
-            await notifier.notify_checkout(checkout_result)
-
-    async def manual_checkout(self, product: Product):
-        """Trigger a manual checkout attempt."""
-        await self._auto_checkout(product)
 
     async def init_checkout(self):
         """Initialize the checkout engine (API + optional browser)."""
@@ -135,6 +229,5 @@ class PmonEngine:
             await monitor.close()
         if self.checkout_engine:
             await self.checkout_engine.stop()
-        for notifier in self._notifiers:
-            if hasattr(notifier, 'close'):
-                await notifier.close()
+        for notifier in self._discord_notifiers.values():
+            await notifier.close()

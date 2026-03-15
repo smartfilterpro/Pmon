@@ -6,7 +6,7 @@ interface Props {
   checkouts: CheckoutEntry[];
 }
 
-const STATUS_CONFIG = {
+const STATUS_CONFIG: Record<string, { icon: typeof CheckCircle; color: string; label: string }> = {
   success: { icon: CheckCircle, color: 'var(--green)', label: 'Success' },
   failed: { icon: XCircle, color: 'var(--red)', label: 'Failed' },
   attempting: { icon: Loader, color: 'var(--accent-yellow)', label: 'Attempting' },
@@ -19,14 +19,10 @@ export default function CheckoutLog({ checkouts }: Props) {
       <div className="log-empty">
         <Clock size={48} strokeWidth={1} />
         <p>No checkout attempts yet</p>
-        <p className="log-hint">
-          Checkout attempts will appear here when products are purchased
-        </p>
+        <p className="log-hint">Checkout attempts will appear here when products are purchased</p>
       </div>
     );
   }
-
-  const sorted = [...checkouts].reverse();
 
   return (
     <div className="checkout-log">
@@ -34,27 +30,24 @@ export default function CheckoutLog({ checkouts }: Props) {
         <h2>Recent Checkout Attempts</h2>
         <span className="log-count">{checkouts.length} total</span>
       </div>
-
       <div className="log-entries">
-        {sorted.map((c, i) => {
+        {checkouts.map((c, i) => {
           const cfg = STATUS_CONFIG[c.status] || STATUS_CONFIG.idle;
           const Icon = cfg.icon;
           return (
-            <div key={`${c.url}-${c.timestamp}-${i}`} className="log-entry">
+            <div key={`${c.url}-${c.created_at}-${i}`} className="log-entry">
               <Icon size={18} color={cfg.color} className={c.status === 'attempting' ? 'spin' : ''} />
               <div className="log-info">
                 <div className="log-product">
-                  <strong>{c.name || 'Unknown'}</strong>
+                  <strong>{c.product_name || 'Unknown'}</strong>
                   <span className="log-retailer">{c.retailer}</span>
                 </div>
-                {c.order_number && (
-                  <div className="log-order">Order #{c.order_number}</div>
-                )}
-                {c.error && <div className="log-error">{c.error}</div>}
+                {c.order_number && <div className="log-order">Order #{c.order_number}</div>}
+                {c.error_message && <div className="log-error">{c.error_message}</div>}
               </div>
               <div className="log-meta">
                 <span className="log-status" style={{ color: cfg.color }}>{cfg.label}</span>
-                <span className="log-time">{new Date(c.timestamp).toLocaleString()}</span>
+                <span className="log-time">{new Date(c.created_at).toLocaleString()}</span>
               </div>
             </div>
           );

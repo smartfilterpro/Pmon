@@ -2,21 +2,22 @@ export interface Product {
   url: string;
   name: string;
   retailer: string;
+  quantity: number;
+  auto_checkout: boolean;
   status: 'in_stock' | 'out_of_stock' | 'unknown' | 'error';
   price: string;
   timestamp: string;
   error: string;
-  auto_checkout: boolean;
 }
 
 export interface CheckoutEntry {
   url: string;
-  name: string;
+  product_name: string;
   retailer: string;
-  status: 'idle' | 'attempting' | 'success' | 'failed';
+  status: string;
   order_number: string;
-  error: string;
-  timestamp: string;
+  error_message: string;
+  created_at: string;
 }
 
 export interface StatusResponse {
@@ -26,7 +27,17 @@ export interface StatusResponse {
   checkouts: CheckoutEntry[];
 }
 
-export interface Settings {
-  poll_interval: number;
-  discord_webhook: string;
+export interface User {
+  user_id: number;
+  username: string;
+  totp_enabled: boolean;
+}
+
+export interface ErrorEntry {
+  id: number;
+  level: string;
+  source: string;
+  message: string;
+  details: string;
+  created_at: string;
 }

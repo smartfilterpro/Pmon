@@ -1,5 +1,5 @@
-import { removeProduct, toggleAutoCheckout, checkoutNow } from '../hooks/useApi';
-import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff } from 'lucide-react';
+import { removeProduct, toggleAutoCheckout, checkoutNow, setQuantity } from '../hooks/useApi';
+import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus } from 'lucide-react';
 import type { Product } from '../types';
 import './ProductList.css';
 
@@ -38,6 +38,12 @@ export default function ProductList({ products, refresh }: Props) {
     refresh();
   };
 
+  const handleQty = async (url: string, current: number, delta: number) => {
+    const newQty = Math.max(1, current + delta);
+    await setQuantity(url, newQty);
+    refresh();
+  };
+
   if (products.length === 0) {
     return (
       <div className="empty-state">
@@ -68,11 +74,21 @@ export default function ProductList({ products, refresh }: Props) {
             {p.error && <p className="product-error">{p.error}</p>}
 
             <p className="product-time">
-              Last checked: {new Date(p.timestamp).toLocaleTimeString()}
+              {p.timestamp ? `Last checked: ${new Date(p.timestamp).toLocaleTimeString()}` : 'Not checked yet'}
             </p>
           </div>
 
           <div className="product-actions">
+            <div className="qty-control">
+              <button className="qty-btn" onClick={() => handleQty(p.url, p.quantity, -1)}>
+                <Minus size={12} />
+              </button>
+              <span className="qty-value">{p.quantity}</span>
+              <button className="qty-btn" onClick={() => handleQty(p.url, p.quantity, 1)}>
+                <Plus size={12} />
+              </button>
+            </div>
+
             <button
               className={`action-btn auto-btn ${p.auto_checkout ? 'on' : 'off'}`}
               onClick={() => handleToggleAuto(p.url)}

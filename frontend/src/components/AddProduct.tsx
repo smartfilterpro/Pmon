@@ -10,6 +10,7 @@ interface Props {
 export default function AddProduct({ refresh }: Props) {
   const [url, setUrl] = useState('');
   const [name, setName] = useState('');
+  const [quantity, setQuantity] = useState(1);
   const [auto, setAuto] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -19,9 +20,10 @@ export default function AddProduct({ refresh }: Props) {
 
     setLoading(true);
     try {
-      await addProduct(url.trim(), name.trim(), auto);
+      await addProduct(url.trim(), name.trim(), quantity, auto);
       setUrl('');
       setName('');
+      setQuantity(1);
       setAuto(false);
       refresh();
     } finally {
@@ -46,12 +48,17 @@ export default function AddProduct({ refresh }: Props) {
         value={name}
         onChange={(e) => setName(e.target.value)}
       />
+      <input
+        type="number"
+        className="add-qty"
+        min={1}
+        max={10}
+        value={quantity}
+        onChange={(e) => setQuantity(Number(e.target.value))}
+        title="Quantity"
+      />
       <label className="auto-label">
-        <input
-          type="checkbox"
-          checked={auto}
-          onChange={(e) => setAuto(e.target.checked)}
-        />
+        <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
         Auto-buy
       </label>
       <button type="submit" className="add-btn" disabled={loading || !url.trim()}>

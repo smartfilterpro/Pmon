@@ -1,89 +1,212 @@
 import { useState, useEffect } from 'react';
-import { updateSettings } from '../hooks/useApi';
-import { Save, Bell, Clock, Webhook } from 'lucide-react';
+import {
+  getSettings, updateSettings, getAccounts, setAccount,
+  setupTotp, confirmTotp, disableTotp,
+} from '../hooks/useApi';
+import type { User } from '../types';
+import { Save, Bell, Clock, Shield, ShieldCheck, Store } from 'lucide-react';
 import './Settings.css';
 
-export default function Settings() {
+interface Props {
+  user: User;
+}
+
+const RETAILERS = [
+  { id: 'target', name: 'Target' },
+  { id: 'walmart', name: 'Walmart' },
+  { id: 'bestbuy', name: 'Best Buy' },
+  { id: 'pokemoncenter', name: 'Pokemon Center' },
+];
+
+export default function Settings({ user }: Props) {
   const [pollInterval, setPollInterval] = useState(30);
   const [discordWebhook, setDiscordWebhook] = useState('');
   const [saved, setSaved] = useState(false);
-  const [loading, setLoading] = useState(false);
 
-  // Load current settings
+  // Retailer accounts
+  const [accounts, setAccounts] = useState<Record<string, { email: string; has_password: boolean }>>({});
+  const [editRetailer, setEditRetailer] = useState('');
+  const [retailerEmail, setRetailerEmail] = useState('');
+  const [retailerPassword, setRetailerPassword] = useState('');
+  const [accountSaved, setAccountSaved] = useState('');
+
+  // 2FA
+  const [totpEnabled, setTotpEnabled] = useState(user.totp_enabled);
+  const [totpUri, setTotpUri] = useState('');
+  const [totpSecret, setTotpSecret] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [totpError, setTotpError] = useState('');
+  const [totpSuccess, setTotpSuccess] = useState('');
+
   useEffect(() => {
-    fetch('/api/status').then(r => r.json()).then(data => {
-      // We'll get these from the status endpoint or a dedicated settings endpoint
-    }).catch(() => {});
+    getSettings().then(data => {
+      setPollInterval(data.settings.poll_interval);
+      setDiscordWebhook(data.settings.discord_webhook || '');
+    });
+    getAccounts().then(data => setAccounts(data.accounts || {}));
   }, []);
 
-  const handleSave = async () => {
-    setLoading(true);
-    try {
-      await updateSettings({
-        poll_interval: pollInterval,
-        discord_webhook: discordWebhook,
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } finally {
-      setLoading(false);
+  const handleSaveSettings = async () => {
+    await updateSettings({ poll_interval: pollInterval, discord_webhook: discordWebhook });
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleSaveAccount = async () => {
+    if (!editRetailer) return;
+    await setAccount(editRetailer, retailerEmail, retailerPassword);
+    setAccountSaved(editRetailer);
+    setTimeout(() => setAccountSaved(''), 2000);
+    setRetailerPassword('');
+    const data = await getAccounts();
+    setAccounts(data.accounts || {});
+  };
+
+  const handleStartTotp = async () => {
+    setTotpError('');
+    const data = await setupTotp();
+    setTotpUri(data.uri);
+    setTotpSecret(data.secret);
+  };
+
+  const handleConfirmTotp = async () => {
+    setTotpError('');
+    const data = await confirmTotp(totpCode);
+    if (data.ok) {
+      setTotpEnabled(true);
+      setTotpUri('');
+      setTotpSecret('');
+      setTotpCode('');
+      setTotpSuccess('2FA enabled successfully!');
+      setTimeout(() => setTotpSuccess(''), 3000);
+    } else {
+      setTotpError('Invalid code. Try again.');
     }
+  };
+
+  const handleDisableTotp = async () => {
+    await disableTotp();
+    setTotpEnabled(false);
+  };
+
+  const startEditAccount = (retailerId: string) => {
+    setEditRetailer(retailerId);
+    const acc = accounts[retailerId];
+    setRetailerEmail(acc?.email || '');
+    setRetailerPassword('');
   };
 
   return (
     <div className="settings">
       <h2>Settings</h2>
 
-      <div className="settings-grid">
-        <div className="setting-card">
-          <div className="setting-icon">
-            <Clock size={20} />
+      {/* Monitor Settings */}
+      <div className="settings-section">
+        <h3><Clock size={16} /> Monitor Settings</h3>
+        <div className="settings-grid">
+          <div className="setting-field">
+            <label>Poll Interval (seconds)</label>
+            <input type="number" min={5} max={300} value={pollInterval}
+              onChange={e => setPollInterval(Number(e.target.value))} />
           </div>
-          <div className="setting-body">
-            <label className="setting-label">Poll Interval (seconds)</label>
-            <p className="setting-desc">How often to check each product for stock</p>
-            <input
-              type="number"
-              min={5}
-              max={300}
-              value={pollInterval}
-              onChange={(e) => setPollInterval(Number(e.target.value))}
-            />
+          <div className="setting-field">
+            <label>Discord Webhook</label>
+            <input type="url" placeholder="https://discord.com/api/webhooks/..."
+              value={discordWebhook} onChange={e => setDiscordWebhook(e.target.value)} />
           </div>
         </div>
-
-        <div className="setting-card">
-          <div className="setting-icon">
-            <Bell size={20} />
-          </div>
-          <div className="setting-body">
-            <label className="setting-label">Discord Webhook</label>
-            <p className="setting-desc">Get notified in Discord when items are in stock</p>
-            <input
-              type="url"
-              placeholder="https://discord.com/api/webhooks/..."
-              value={discordWebhook}
-              onChange={(e) => setDiscordWebhook(e.target.value)}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-actions">
-        <button className="save-btn" onClick={handleSave} disabled={loading}>
-          <Save size={14} />
-          {saved ? 'Saved!' : 'Save Settings'}
+        <button className="save-btn" onClick={handleSaveSettings}>
+          <Save size={14} /> {saved ? 'Saved!' : 'Save Settings'}
         </button>
       </div>
 
-      <div className="settings-info">
-        <h3>How It Works</h3>
-        <ul>
-          <li><strong>Monitor:</strong> Checks each product URL at the poll interval for stock availability</li>
-          <li><strong>Notify:</strong> When a product goes in-stock, sends a Discord alert and console notification</li>
-          <li><strong>Auto-buy:</strong> If enabled per product, attempts checkout via API or browser automation</li>
-          <li><strong>Manual buy:</strong> Click "Buy" on any in-stock product to trigger an immediate checkout attempt</li>
-        </ul>
+      {/* Retailer Accounts */}
+      <div className="settings-section">
+        <h3><Store size={16} /> Retailer Accounts</h3>
+        <p className="section-desc">
+          Add your retailer login credentials for auto-checkout. Make sure you have a payment method saved in each account.
+        </p>
+        <div className="retailer-list">
+          {RETAILERS.map(r => {
+            const acc = accounts[r.id];
+            return (
+              <div key={r.id} className="retailer-row">
+                <div className="retailer-info">
+                  <strong>{r.name}</strong>
+                  {acc?.email ? (
+                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}</span>
+                  ) : (
+                    <span className="retailer-none">Not configured</span>
+                  )}
+                </div>
+                <button className="action-btn" onClick={() => startEditAccount(r.id)}>
+                  {acc?.email ? 'Edit' : 'Add'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {editRetailer && (
+          <div className="retailer-edit">
+            <h4>Edit {RETAILERS.find(r => r.id === editRetailer)?.name} Account</h4>
+            <div className="setting-field">
+              <label>Email</label>
+              <input type="email" value={retailerEmail} onChange={e => setRetailerEmail(e.target.value)} />
+            </div>
+            <div className="setting-field">
+              <label>Password</label>
+              <input type="password" value={retailerPassword}
+                onChange={e => setRetailerPassword(e.target.value)}
+                placeholder="Enter password" />
+            </div>
+            <div className="retailer-edit-actions">
+              <button className="save-btn" onClick={handleSaveAccount}>
+                <Save size={14} /> {accountSaved === editRetailer ? 'Saved!' : 'Save'}
+              </button>
+              <button className="cancel-btn" onClick={() => setEditRetailer('')}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 2FA */}
+      <div className="settings-section">
+        <h3>{totpEnabled ? <ShieldCheck size={16} /> : <Shield size={16} />} Two-Factor Authentication</h3>
+        {totpSuccess && <div className="totp-success">{totpSuccess}</div>}
+
+        {totpEnabled ? (
+          <div>
+            <p className="section-desc totp-status-on">2FA is enabled. Your account is protected.</p>
+            <button className="danger-btn" onClick={handleDisableTotp}>Disable 2FA</button>
+          </div>
+        ) : !totpUri ? (
+          <div>
+            <p className="section-desc">
+              Protect your account with an authenticator app (Microsoft Authenticator, Google Authenticator, Duo, etc.)
+            </p>
+            <button className="save-btn" onClick={handleStartTotp}>
+              <Shield size={14} /> Set Up 2FA
+            </button>
+          </div>
+        ) : (
+          <div className="totp-setup">
+            <p className="section-desc">Scan this QR code with your authenticator app, then enter the 6-digit code below.</p>
+            <div className="totp-qr">
+              <img src="/api/auth/totp/qr" alt="TOTP QR Code" width={200} height={200} />
+            </div>
+            <p className="totp-manual">
+              Manual entry: <code>{totpSecret}</code>
+            </p>
+            {totpError && <div className="totp-error">{totpError}</div>}
+            <div className="totp-confirm">
+              <input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={6}
+                placeholder="Enter 6-digit code" value={totpCode}
+                onChange={e => setTotpCode(e.target.value)} />
+              <button className="save-btn" onClick={handleConfirmTotp}>Verify & Enable</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

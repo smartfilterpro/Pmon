@@ -4,85 +4,172 @@
   margin-bottom: 20px;
 }
 
+.settings-section {
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.settings-section h3 {
+  font-size: 15px;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: 14px;
+  margin-bottom: 14px;
 }
 @media (max-width: 700px) { .settings-grid { grid-template-columns: 1fr; } }
 
-.setting-card {
-  display: flex;
-  gap: 14px;
-  padding: 20px;
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  border: 1px solid var(--border);
-}
-
-.setting-icon {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-tertiary);
-  border-radius: 10px;
-  color: var(--accent-yellow);
-}
-
-.setting-body { flex: 1; }
-
-.setting-label {
+.setting-field { margin-bottom: 10px; }
+.setting-field label {
   display: block;
-  font-size: 15px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   margin-bottom: 4px;
 }
-.setting-desc {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-bottom: 10px;
-}
-
-.setting-body input { width: 100%; }
-
-.settings-actions {
-  margin-bottom: 30px;
-}
+.setting-field input { width: 100%; }
 
 .save-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   background: var(--accent-blue);
   color: #fff;
-  padding: 10px 24px;
+  padding: 8px 18px;
+  font-size: 13px;
 }
 
-.settings-info {
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  padding: 20px;
+.cancel-btn {
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  padding: 8px 18px;
+  font-size: 13px;
   border: 1px solid var(--border);
 }
-.settings-info h3 {
-  font-size: 15px;
-  color: var(--text-primary);
-  margin-bottom: 12px;
+
+.danger-btn {
+  background: rgba(255, 23, 68, 0.15);
+  color: var(--red);
+  padding: 8px 18px;
+  font-size: 13px;
+  border: 1px solid var(--red);
 }
-.settings-info ul {
-  list-style: none;
+
+/* Retailer accounts */
+.retailer-list {
   display: flex;
   flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.retailer-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+.retailer-info { display: flex; flex-direction: column; gap: 2px; }
+.retailer-info strong { font-size: 14px; }
+.retailer-email { font-size: 12px; color: var(--green); }
+.retailer-none { font-size: 12px; color: var(--text-secondary); }
+
+.retailer-edit {
+  padding: 14px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  margin-top: 10px;
+}
+.retailer-edit h4 {
+  font-size: 14px;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+.retailer-edit-actions {
+  display: flex;
   gap: 8px;
+  margin-top: 10px;
 }
-.settings-info li {
-  font-size: 13px;
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+/* 2FA */
+.totp-status-on { color: var(--green) !important; }
+
+.totp-setup { text-align: center; }
+
+.totp-qr {
+  display: flex;
+  justify-content: center;
+  margin: 16px 0;
+  padding: 16px;
+  background: #fff;
+  border-radius: 12px;
+  display: inline-block;
+}
+
+.totp-manual {
+  font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.5;
+  margin-bottom: 14px;
 }
-.settings-info li strong { color: var(--text-primary); }
+.totp-manual code {
+  font-size: 13px;
+  background: var(--bg-tertiary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  letter-spacing: 2px;
+  color: var(--accent-yellow);
+  user-select: all;
+}
+
+.totp-confirm {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  max-width: 300px;
+  margin: 0 auto;
+}
+.totp-confirm input { flex: 1; text-align: center; font-size: 18px; letter-spacing: 4px; }
+
+.totp-error {
+  color: var(--red);
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.totp-success {
+  background: rgba(0, 200, 83, 0.15);
+  border: 1px solid var(--green);
+  color: var(--green);
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}

@@ -6,6 +6,9 @@ build/
 venv/
 .env
 config/config.yaml
+data/
+*.db
 *.log
+.sessions/
 .playwright/
 node_modules/
