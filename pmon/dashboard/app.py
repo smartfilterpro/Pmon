@@ -255,7 +255,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            return {"ok": False, "message": "Playwright not installed — run: pip install playwright && playwright install chromium"}
+            return {"ok": False, "message": "Playwright package not installed — run: pip install playwright && playwright install chromium"}
 
         LOGIN_URLS = {
             "target": "https://www.target.com/login",
@@ -362,6 +362,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 await pw.stop()
 
         except Exception as e:
+            err_str = str(e).lower()
+            if "executable" in err_str and "exist" in err_str:
+                msg = "Chromium browser not installed on server — run: playwright install chromium"
+                logger.error("Playwright Chromium binary missing")
+                db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
+                return {"ok": False, "message": msg}
             msg = f"Error testing {retailer_name}: {str(e)}"
             logger.error("Test login error for %s: %s", retailer_name, e, exc_info=True)
             db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
