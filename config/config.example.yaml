@@ -1,0 +1,66 @@
+# Pmon Configuration
+# Copy this file to config.yaml and fill in your details
+
+# How often to check for stock (seconds)
+poll_interval: 30
+
+# Notification settings
+notifications:
+  # Discord webhook URL (create one in your server settings)
+  discord_webhook: ""
+  # Log to console as well
+  console: true
+
+# Products to monitor
+# Each product needs a URL and optionally a retailer hint
+products:
+  - url: "https://www.pokemoncenter.com/product/example-etb"
+    name: "Example Pokemon Center ETB"
+    auto_checkout: false
+
+  - url: "https://www.target.com/p/example-pokemon/-/A-12345678"
+    name: "Example Target Product"
+    auto_checkout: false
+
+  - url: "https://www.bestbuy.com/site/example/1234567.p"
+    name: "Example Best Buy Product"
+    auto_checkout: false
+
+  - url: "https://www.walmart.com/ip/example/123456789"
+    name: "Example Walmart Product"
+    auto_checkout: false
+
+# Checkout profiles (for auto-checkout)
+profiles:
+  default:
+    first_name: ""
+    last_name: ""
+    email: ""
+    phone: ""
+    address_line1: ""
+    address_line2: ""
+    city: ""
+    state: ""
+    zip_code: ""
+    # Payment info is entered via the dashboard for security
+    # Never store card numbers in config files
+
+# Retailer-specific account credentials
+accounts:
+  target:
+    email: ""
+    password: ""
+  walmart:
+    email: ""
+    password: ""
+  bestbuy:
+    email: ""
+    password: ""
+  pokemoncenter:
+    email: ""
+    password: ""
+
+# Dashboard settings
+dashboard:
+  host: "127.0.0.1"
+  port: 8888

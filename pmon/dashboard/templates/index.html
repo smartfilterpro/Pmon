@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pmon - Pokemon Card Monitor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f23;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 20px 0; border-bottom: 1px solid #333;
+            margin-bottom: 30px;
+        }
+        h1 { color: #ffcb05; font-size: 28px; }
+        h1 span { color: #3b4cca; }
+        .status-badge {
+            padding: 6px 16px; border-radius: 20px; font-size: 14px; font-weight: 600;
+        }
+        .status-running { background: #00c853; color: #000; }
+        .status-stopped { background: #ff1744; color: #fff; }
+
+        .controls { display: flex; gap: 10px; margin-bottom: 30px; }
+        button {
+            padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer;
+            font-size: 14px; font-weight: 600; transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.85; }
+        .btn-primary { background: #3b4cca; color: #fff; }
+        .btn-success { background: #00c853; color: #000; }
+        .btn-danger { background: #ff1744; color: #fff; }
+        .btn-secondary { background: #333; color: #e0e0e0; }
+        .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+
+        .card {
+            background: #1a1a2e; border-radius: 12px; padding: 20px;
+            border: 1px solid #333;
+        }
+        .card h2 { color: #ffcb05; margin-bottom: 15px; font-size: 18px; }
+
+        .product-list { list-style: none; }
+        .product-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px; margin-bottom: 8px; background: #16213e;
+            border-radius: 8px; border-left: 4px solid #555;
+        }
+        .product-item.in-stock { border-left-color: #00c853; }
+        .product-item.out-of-stock { border-left-color: #ff1744; }
+        .product-item.error { border-left-color: #ff9100; }
+        .product-item.unknown { border-left-color: #666; }
+
+        .product-info { flex: 1; }
+        .product-name { font-weight: 600; margin-bottom: 4px; }
+        .product-meta { font-size: 12px; color: #888; }
+        .product-actions { display: flex; gap: 6px; align-items: center; }
+
+        .retailer-tag {
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+        }
+        .retailer-pokemoncenter { background: #ffcb05; color: #000; }
+        .retailer-target { background: #cc0000; color: #fff; }
+        .retailer-bestbuy { background: #0046be; color: #fff; }
+        .retailer-walmart { background: #0071dc; color: #fff; }
+
+        .stock-label {
+            font-size: 12px; font-weight: 600; padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .stock-in_stock { background: #00c853; color: #000; }
+        .stock-out_of_stock { background: #ff1744; color: #fff; }
+        .stock-error { background: #ff9100; color: #000; }
+        .stock-unknown { background: #666; color: #fff; }
+
+        .checkout-log { max-height: 300px; overflow-y: auto; }
+        .checkout-entry {
+            padding: 8px; margin-bottom: 6px; border-radius: 6px;
+            font-size: 13px; background: #16213e;
+        }
+
+        .add-form {
+            display: flex; gap: 8px; margin-top: 15px; flex-wrap: wrap;
+        }
+        .add-form input {
+            flex: 1; min-width: 200px; padding: 8px 12px; border: 1px solid #333;
+            border-radius: 8px; background: #16213e; color: #e0e0e0;
+            font-size: 14px;
+        }
+
+        .settings-form { display: grid; gap: 12px; }
+        .settings-form label { font-size: 13px; color: #888; }
+        .settings-form input {
+            width: 100%; padding: 8px 12px; border: 1px solid #333;
+            border-radius: 8px; background: #16213e; color: #e0e0e0;
+        }
+
+        .auto-badge {
+            font-size: 10px; padding: 1px 6px; border-radius: 3px;
+            background: #3b4cca; color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>P<span>mon</span></h1>
+            <div>
+                <span id="status-badge" class="status-badge status-stopped">Stopped</span>
+            </div>
+        </header>
+
+        <div class="controls">
+            <button class="btn-success" onclick="controlMonitor('start')">Start Monitor</button>
+            <button class="btn-danger" onclick="controlMonitor('stop')">Stop Monitor</button>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Monitored Products</h2>
+                <ul id="product-list" class="product-list">
+                    <li class="product-item unknown">
+                        <div class="product-info">
+                            <div class="product-name">Loading...</div>
+                        </div>
+                    </li>
+                </ul>
+
+                <div class="add-form">
+                    <input type="text" id="add-url" placeholder="Product URL">
+                    <input type="text" id="add-name" placeholder="Product name">
+                    <label style="display:flex;align-items:center;gap:4px;font-size:13px;">
+                        <input type="checkbox" id="add-auto"> Auto
+                    </label>
+                    <button class="btn-primary btn-sm" onclick="addProduct()">Add</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Checkout Log</h2>
+                <div id="checkout-log" class="checkout-log">
+                    <div class="checkout-entry" style="color:#888;">No checkout attempts yet.</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Settings</h2>
+                <div class="settings-form">
+                    <div>
+                        <label>Poll Interval (seconds)</label>
+                        <input type="number" id="poll-interval" value="{{ config.poll_interval }}" min="5">
+                    </div>
+                    <div>
+                        <label>Discord Webhook URL</label>
+                        <input type="text" id="discord-webhook" value="{{ config.discord_webhook }}"
+                               placeholder="https://discord.com/api/webhooks/...">
+                    </div>
+                    <button class="btn-secondary btn-sm" onclick="saveSettings()">Save Settings</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function fetchStatus() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) {
+                console.error('Failed to fetch status:', e);
+            }
+        }
+
+        function updateUI(data) {
+            const badge = document.getElementById('status-badge');
+            badge.className = 'status-badge ' + (data.is_running ? 'status-running' : 'status-stopped');
+            badge.textContent = data.is_running ? 'Running' : 'Stopped';
+
+            const list = document.getElementById('product-list');
+            if (data.products.length === 0) {
+                list.innerHTML = '<li class="product-item unknown"><div class="product-info"><div class="product-name" style="color:#888">No products added yet. Add a URL below.</div></div></li>';
+            } else {
+                list.innerHTML = data.products.map(p => `
+                    <li class="product-item ${p.status}">
+                        <div class="product-info">
+                            <div class="product-name">
+                                ${escHtml(p.name || 'Unnamed')}
+                                ${p.auto_checkout ? '<span class="auto-badge">AUTO</span>' : ''}
+                            </div>
+                            <div class="product-meta">
+                                <span class="retailer-tag retailer-${p.retailer}">${p.retailer}</span>
+                                <span class="stock-label stock-${p.status}">${p.status.replace('_', ' ')}</span>
+                                ${p.price ? ' &middot; ' + escHtml(p.price) : ''}
+                                ${p.error ? ' &middot; <span style="color:#ff9100">' + escHtml(p.error) + '</span>' : ''}
+                                &middot; ${new Date(p.timestamp).toLocaleTimeString()}
+                            </div>
+                        </div>
+                        <div class="product-actions">
+                            <a href="${escHtml(p.url)}" target="_blank" class="btn-secondary btn-sm" style="text-decoration:none;display:inline-block;">Open</a>
+                            <button class="btn-primary btn-sm" onclick="checkoutNow('${escHtml(p.url)}')">Buy</button>
+                            <button class="btn-danger btn-sm" onclick="removeProduct('${escHtml(p.url)}')">X</button>
+                        </div>
+                    </li>
+                `).join('');
+            }
+
+            const log = document.getElementById('checkout-log');
+            if (data.checkouts.length === 0) {
+                log.innerHTML = '<div class="checkout-entry" style="color:#888;">No checkout attempts yet.</div>';
+            } else {
+                log.innerHTML = data.checkouts.reverse().map(c => `
+                    <div class="checkout-entry">
+                        <strong style="color:${c.status === 'success' ? '#00c853' : '#ff1744'}">${c.status.toUpperCase()}</strong>
+                        ${escHtml(c.name)} @ ${c.retailer}
+                        ${c.order_number ? ' - Order #' + escHtml(c.order_number) : ''}
+                        ${c.error ? ' - ' + escHtml(c.error) : ''}
+                        <span style="color:#888;font-size:11px;">${new Date(c.timestamp).toLocaleString()}</span>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function escHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        async function controlMonitor(action) {
+            await fetch(`/api/monitor/${action}`, { method: 'POST' });
+            setTimeout(fetchStatus, 500);
+        }
+
+        async function addProduct() {
+            const url = document.getElementById('add-url').value.trim();
+            const name = document.getElementById('add-name').value.trim();
+            const auto = document.getElementById('add-auto').checked;
+            if (!url) return;
+            await fetch('/api/products', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, name, auto_checkout: auto }),
+            });
+            document.getElementById('add-url').value = '';
+            document.getElementById('add-name').value = '';
+            document.getElementById('add-auto').checked = false;
+            fetchStatus();
+        }
+
+        async function removeProduct(url) {
+            await fetch('/api/products', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            fetchStatus();
+        }
+
+        async function checkoutNow(url) {
+            await fetch('/api/products/checkout_now', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url }),
+            });
+            fetchStatus();
+        }
+
+        async function saveSettings() {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    poll_interval: document.getElementById('poll-interval').value,
+                    discord_webhook: document.getElementById('discord-webhook').value,
+                }),
+            });
+        }
+
+        // Poll for updates
+        setInterval(fetchStatus, 3000);
+        fetchStatus();
+    </script>
+</body>
+</html>
