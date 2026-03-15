@@ -14,7 +14,7 @@ WORKDIR /app
 # Install Python deps + Playwright Chromium
 COPY pyproject.toml .
 COPY pmon/ pmon/
-RUN pip install --no-cache-dir -e . \
+RUN pip install --no-cache-dir . \
     && playwright install chromium
 
 # Persistent data lives on Railway volume at /data
