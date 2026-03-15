@@ -281,15 +281,24 @@ def set_retailer_account(user_id: int, retailer: str, email: str, password: str)
 
 def get_user_settings(user_id: int) -> dict:
     db = get_db()
+    # Ensure the row exists (handles users created before settings table)
+    db.execute(
+        "INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING",
+        (user_id,),
+    )
+    db.commit()
     row = db.execute("SELECT * FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    if row:
-        return dict(row)
-    return {"user_id": user_id, "poll_interval": 30, "discord_webhook": ""}
+    return dict(row)
 
 
 def update_user_settings(user_id: int, poll_interval: int | None = None,
                          discord_webhook: str | None = None):
     db = get_db()
+    # Ensure the row exists first (handles users created before settings table)
+    db.execute(
+        "INSERT INTO user_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING",
+        (user_id,),
+    )
     if poll_interval is not None:
         db.execute("UPDATE user_settings SET poll_interval = ? WHERE user_id = ?",
                    (poll_interval, user_id))
