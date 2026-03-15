@@ -86,6 +86,19 @@ The web dashboard lets you:
 2. **Notifications**: When a product goes from out-of-stock to in-stock, you get notified via Discord and/or console
 3. **Auto-checkout**: If enabled for a product, the bot launches a browser and attempts to complete the purchase using your saved profile and credentials
 
+## Deploying to Railway
+
+Railway's filesystem is **ephemeral** — everything is wiped on each deploy.
+To keep your database (accounts, products, settings) you **must** attach a
+persistent volume:
+
+1. In your Railway project, go to your service → **Settings → Volumes**
+2. Add a volume and set the mount path to `/data`
+3. Deploy — the app auto-detects the Railway volume and stores its database at `/data/pmon.db`
+
+If you prefer a different mount path, set the `PMON_DB_PATH` environment variable
+(e.g. `PMON_DB_PATH=/mnt/myvolume/pmon.db`).
+
 ## Important Notes
 
 - **Best Buy invitation system**: Best Buy now uses an invitation-only system for many Pokemon TCG releases. The monitor will detect this and notify you, but auto-checkout won't work for invitation-only products.

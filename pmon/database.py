@@ -12,7 +12,28 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(os.environ.get("PMON_DB_PATH", Path(__file__).parent.parent / "data" / "pmon.db"))
+def _default_db_path() -> Path:
+    """Pick a persistent DB path.
+
+    On Railway, the ephemeral filesystem is wiped every deploy.  If the user
+    attaches a volume (recommended mount: /data), we store the DB there so it
+    survives redeploys.  Falls back to the project-local ./data/ directory for
+    local development.
+    """
+    explicit = os.environ.get("PMON_DB_PATH")
+    if explicit:
+        return Path(explicit)
+
+    # Railway volume mount — conventional path
+    railway_volume = Path("/data")
+    if os.environ.get("RAILWAY_ENVIRONMENT") and railway_volume.is_dir():
+        return railway_volume / "pmon.db"
+
+    # Local development fallback
+    return Path(__file__).parent.parent / "data" / "pmon.db"
+
+
+DB_PATH = _default_db_path()
 
 _conn: sqlite3.Connection | None = None
 
