@@ -267,7 +267,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         # Selectors for each retailer's login form
         SELECTORS = {
             "target": {
-                "email": '#username, input[name="username"], input[type="email"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"]',
+                "email": '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]',
                 "password": '#password, input[name="password"], input[type="password"], input[id*="password" i]',
                 "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
                 "success": '#account, [data-test="accountNav"], a[href*="/account"], [data-test="@web/AccountLink"]',
