@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { removeProduct, toggleAutoCheckout, checkoutNow, setQuantity } from '../hooks/useApi';
-import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus } from 'lucide-react';
+import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus, AlertTriangle } from 'lucide-react';
 import type { Product } from '../types';
 import './ProductList.css';
 
@@ -23,8 +24,12 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export default function ProductList({ products, refresh }: Props) {
+  const [checkoutFailed, setCheckoutFailed] = useState<Record<string, string>>({});
+  const [checkoutLoading, setCheckoutLoading] = useState<Record<string, boolean>>({});
+
   const handleRemove = async (url: string) => {
     await removeProduct(url);
+    setCheckoutFailed(prev => { const n = { ...prev }; delete n[url]; return n; });
     refresh();
   };
 
@@ -34,8 +39,22 @@ export default function ProductList({ products, refresh }: Props) {
   };
 
   const handleCheckout = async (url: string) => {
-    await checkoutNow(url);
-    refresh();
+    setCheckoutLoading(prev => ({ ...prev, [url]: true }));
+    setCheckoutFailed(prev => { const n = { ...prev }; delete n[url]; return n; });
+    try {
+      const result = await checkoutNow(url);
+      if (result.error || result.status === 'failed') {
+        setCheckoutFailed(prev => ({
+          ...prev,
+          [url]: result.error || result.error_message || 'Checkout failed',
+        }));
+      }
+    } catch {
+      setCheckoutFailed(prev => ({ ...prev, [url]: 'Checkout request failed' }));
+    } finally {
+      setCheckoutLoading(prev => ({ ...prev, [url]: false }));
+      refresh();
+    }
   };
 
   const handleQty = async (url: string, current: number, delta: number) => {
@@ -73,6 +92,16 @@ export default function ProductList({ products, refresh }: Props) {
 
             {p.error && <p className="product-error">{p.error}</p>}
 
+            {checkoutFailed[p.url] && (
+              <div className="checkout-failed">
+                <AlertTriangle size={12} />
+                <span>{checkoutFailed[p.url]}</span>
+                <a href={p.url} target="_blank" rel="noopener noreferrer" className="open-buy-link">
+                  Open &amp; buy manually
+                </a>
+              </div>
+            )}
+
             <p className="product-time">
               {p.timestamp ? `Last checked: ${new Date(p.timestamp).toLocaleTimeString()}` : 'Not checked yet'}
             </p>
@@ -101,15 +130,16 @@ export default function ProductList({ products, refresh }: Props) {
             <button
               className="action-btn buy-btn"
               onClick={() => handleCheckout(p.url)}
-              disabled={p.status !== 'in_stock'}
+              disabled={p.status !== 'in_stock' || checkoutLoading[p.url]}
               title="Buy now"
             >
               <ShoppingCart size={14} />
-              Buy
+              {checkoutLoading[p.url] ? 'Buying...' : 'Buy'}
             </button>
 
-            <a href={p.url} target="_blank" rel="noopener noreferrer" className="action-btn link-btn">
+            <a href={p.url} target="_blank" rel="noopener noreferrer" className="action-btn open-btn" title="Open product page">
               <ExternalLink size={14} />
+              Open
             </a>
 
             <button

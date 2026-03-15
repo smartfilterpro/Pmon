@@ -113,6 +113,37 @@
 
 .link-btn { padding: 6px 8px; }
 
+.open-btn {
+  background: rgba(59, 76, 202, 0.1);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+.open-btn:hover {
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+.checkout-failed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--orange);
+  background: rgba(255, 145, 0, 0.1);
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin: 4px 0;
+  flex-wrap: wrap;
+}
+.checkout-failed svg { flex-shrink: 0; }
+.open-buy-link {
+  color: var(--accent-blue);
+  text-decoration: underline;
+  font-weight: 600;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .qty-control {
   display: flex;
   align-items: center;
