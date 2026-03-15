@@ -35,6 +35,8 @@ def main():
         prog="pmon",
         description="Pmon - Pokemon card stock monitor and auto-checkout bot",
     )
+    parser.add_argument("command", nargs="?", default="run",
+                        choices=["run", "init"], help="Command to execute (default: run)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument("--config", type=Path, help="Path to config file")
     parser.add_argument("--no-dashboard", action="store_true", help="Disable the web dashboard")
@@ -42,21 +44,12 @@ def main():
     parser.add_argument("--host", default=None, help="Dashboard host")
     parser.add_argument("--port", type=int, default=None, help="Dashboard port")
 
-    sub = parser.add_subparsers(dest="command")
-
-    # Run command (default)
-    sub.add_parser("run", help="Start monitoring and dashboard")
-
-    # Init command
-    sub.add_parser("init", help="Create a config file from the example")
-
     args = parser.parse_args()
     setup_logging(args.verbose)
 
     if args.command == "init":
         return cmd_init(args)
 
-    # Default to "run"
     return cmd_run(args)
 
 
