@@ -402,7 +402,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "bestbuy": {
                 "email": '#fld-e, input[id="user.emailAddress"], input[type="email"], input[name="email"]',
                 "password": '#fld-p1, input[type="password"], input[name="password"]',
-                "submit": 'button[type="submit"], button:has-text("Sign In")',
+                "submit": 'button[type="submit"], button:has-text("Sign In"), button:has-text("Verify"), button:has-text("Continue")',
                 "success": 'a[href*="/account"], .account-menu, .v-p-right-xxs',
                 "error": '.c-alert, .error-message, [class*="error" i], [role="alert"]',
             },
@@ -475,9 +475,30 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com"]
                 landed_on_login = any(ind in current_url.lower() for ind in login_indicators)
 
-                # Check for bot-block pages
+                # Check for bot-block pages (URL or page content)
                 if "blocked" in current_url or "captcha" in current_url or "challenge" in current_url:
                     landed_on_login = False
+
+                # Content-level bot block detection (e.g. Pokemon Center IP block)
+                if landed_on_login:
+                    try:
+                        body_text = await page.locator("body").first.inner_text(timeout=2000)
+                        body_lower = body_text.lower() if body_text else ""
+                        block_phrases = [
+                            "unusual activity",
+                            "access to this page has been denied",
+                            "temporarily restricted",
+                            "bot activity",
+                            "your ip",
+                        ]
+                        if any(phrase in body_lower for phrase in block_phrases):
+                            page_desc = await vision_read_page(page)
+                            msg = f"{retailer_name}: access blocked (bot/IP detection)"
+                            if page_desc:
+                                msg += f" — {page_desc}"
+                            return {"ok": False, "message": msg}
+                    except Exception:
+                        pass
 
                 # --- Fallback: if redirected away from login, go to homepage and find sign-in link ---
                 if not landed_on_login or nav_failed:
@@ -577,9 +598,20 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             await page.wait_for_timeout(300)
                     except Exception:
                         pass
-                    # Try selector click, fall back to vision
-                    if not await click_visible_button(page, submit_sel):
-                        await vision_click(page, "Sign In / Continue button")
+                    # Try selector click, then get_by_role, then vision
+                    single_submit_clicked = await click_visible_button(page, submit_sel)
+                    if not single_submit_clicked:
+                        for btn_text in ["Sign In", "Sign in", "Verify", "Continue", "Log In", "Submit"]:
+                            try:
+                                btn = page.get_by_role("button", name=btn_text, exact=False)
+                                if await btn.first.is_visible(timeout=500):
+                                    await btn.first.click()
+                                    single_submit_clicked = True
+                                    break
+                            except Exception:
+                                continue
+                    if not single_submit_clicked:
+                        await vision_click(page, "Sign In / Continue / Verify button")
                 else:
                     # Multi-step: submit email/phone first
                     # Use multiple strategies to find and click the submit/continue button
@@ -725,13 +757,27 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 await page.wait_for_timeout(300)
                         except Exception:
                             pass
-                        if not await click_visible_button(page, submit_sel):
-                            await vision_click(page, "Sign In / Continue button")
+                        # Multi-strategy submit after password entry
+                        pw_submit_clicked = await click_visible_button(page, submit_sel)
+                        if not pw_submit_clicked:
+                            for btn_text in ["Sign In", "Sign in", "Verify", "Continue", "Log In", "Submit"]:
+                                try:
+                                    btn = page.get_by_role("button", name=btn_text, exact=False)
+                                    if await btn.first.is_visible(timeout=500):
+                                        await btn.first.click()
+                                        pw_submit_clicked = True
+                                        logger.info("Test login %s: clicked post-password submit via get_by_role('%s')", retailer_name, btn_text)
+                                        break
+                                except Exception:
+                                    continue
+                        if not pw_submit_clicked:
+                            logger.info("Test login %s: trying vision for post-password submit", retailer_name)
+                            await vision_click(page, "Sign In / Continue / Verify button")
                     else:
                         # Vision fallback for password entry
                         if await vision_fill(page, "password input", password):
                             await page.wait_for_timeout(500)
-                            await vision_click(page, "Sign In / Continue button")
+                            await vision_click(page, "Sign In / Continue / Verify button")
                         else:
                             page_desc = await vision_read_page(page)
                             msg = f"{retailer_name} login: submitted email but password field did not appear"
