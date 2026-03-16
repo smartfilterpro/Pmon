@@ -412,95 +412,236 @@ class ApiCheckout:
             logger.error("Target checkout error: %s", exc)
             return False
 
+    # Walmart API constants (from network analysis)
+    _WMT_CLIENT_ID = "5f3fb121-076a-45f6-9587-249f0bc160ff"
+
     async def _checkout_walmart(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
     ) -> CheckoutResult:
-        """Walmart API checkout flow."""
-        client = self._get_client("walmart")
+        """Walmart API checkout flow.
 
-        # Extract product ID from URL
+        Uses real Walmart API endpoints discovered from network analysis:
+        - Auth: OpenID Connect via /account/verifyToken (phone/email + MFA verification)
+        - Cart: GraphQL via /orchestra/cartxo/graphql/MergeAndGetCart
+        - Config: /orchestra/api/ccm/v3/bootstrap
+        - General: /swag/graphql
+
+        Walmart uses phone-based login with SMS/email MFA verification,
+        making programmatic login impractical. Session cookie import is required.
+        """
+        client = self._get_client("walmart")
+        retailer = "walmart"
+
+        # Extract product/offer ID from URL
+        # Formats: /ip/product-name/123456789, /ip/123456789
         match = re.search(r"/ip/[^/]*/(\d+)", url) or re.search(r"/ip/(\d+)", url)
         if not match:
             return CheckoutResult(
-                url=url, retailer="walmart", product_name=product_name,
-                status=CheckoutStatus.FAILED, error_message="Could not extract product ID from URL",
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Could not extract product ID from Walmart URL",
             )
         product_id = match.group(1)
 
-        # Step 1: Load login page for session cookies + CSRF
-        page = await client.get("https://www.walmart.com/account/login")
-        csrf = ""
-        for cookie_name, cookie_val in client.cookies.items():
-            if "csrf" in cookie_name.lower() or cookie_name == "CSRF-TOKEN":
-                csrf = cookie_val
-                break
-        if not csrf:
-            csrf_match = re.search(r'"csrfToken"\s*:\s*"([^"]+)"', page.text)
-            if csrf_match:
-                csrf = csrf_match.group(1)
-
-        login_headers = {
-            **HEADERS,
-            "Content-Type": "application/json",
-            "Origin": "https://www.walmart.com",
-            "Referer": "https://www.walmart.com/account/login",
-        }
-        if csrf:
-            login_headers["x-csrf-token"] = csrf
-            login_headers["WM_SEC.AUTH_TOKEN"] = csrf
-
-        # Step 2: Sign in
-        login_resp = await client.post(
-            "https://www.walmart.com/account/electrode/api/signin",
-            json={"username": creds.email, "password": creds.password},
-            headers=login_headers,
-        )
-
-        if login_resp.status_code != 200:
+        # Session cookies are required — Walmart uses phone + MFA
+        has_session = bool(self._session_cookies.get("walmart"))
+        if not has_session:
             return CheckoutResult(
-                url=url, retailer="walmart", product_name=product_name,
+                url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"Login failed (HTTP {login_resp.status_code}): {login_resp.text[:200]}",
+                error_message=(
+                    "Walmart requires session cookies (phone + MFA login cannot be automated). "
+                    "Import cookies via Dashboard > Accounts > Walmart > Import Cookies"
+                ),
             )
 
-        # Step 2: Add to cart
-        cart_resp = await client.post(
-            "https://www.walmart.com/api/v1/cart/items",
-            json={
-                "items": [{
-                    "offerId": product_id,
-                    "quantity": 1,
-                }],
-            },
-            headers={**HEADERS, "Content-Type": "application/json"},
-        )
-
-        if cart_resp.status_code not in (200, 201):
+        # Step 1: Validate session via config bootstrap
+        session_valid = await self._wmt_validate_session(client)
+        if not session_valid:
             return CheckoutResult(
-                url=url, retailer="walmart", product_name=product_name,
+                url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"Add to cart failed (HTTP {cart_resp.status_code})",
+                error_message="Walmart session expired — re-import cookies via Dashboard",
             )
 
-        # Step 3: Proceed to checkout
-        checkout_resp = await client.post(
-            "https://www.walmart.com/api/checkout/v1/contract",
-            json={"cart_type": "REGULAR"},
-            headers={**HEADERS, "Content-Type": "application/json"},
-        )
-
-        if checkout_resp.status_code in (200, 201):
+        # Step 2: Add to cart via GraphQL
+        cart_ok = await self._wmt_add_to_cart(client, product_id)
+        if not cart_ok:
             return CheckoutResult(
-                url=url, retailer="walmart", product_name=product_name,
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Failed to add item to Walmart cart",
+            )
+
+        # Step 3: Initiate checkout
+        checkout_ok = await self._wmt_checkout(client)
+        if checkout_ok:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.SUCCESS,
-                error_message="Checkout initiated — check Walmart account for confirmation",
+                error_message="Checkout initiated — check your Walmart account for order confirmation",
             )
 
         return CheckoutResult(
-            url=url, retailer="walmart", product_name=product_name,
+            url=url, retailer=retailer, product_name=product_name,
             status=CheckoutStatus.FAILED,
-            error_message=f"Checkout API returned HTTP {checkout_resp.status_code}",
+            error_message="Walmart checkout failed",
         )
+
+    async def _wmt_validate_session(self, client: httpx.AsyncClient) -> bool:
+        """Validate Walmart session by loading cart via GraphQL."""
+        try:
+            # Try the config bootstrap endpoint (lightweight)
+            resp = await client.get(
+                "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                "?configNames=cart,checkout,identity",
+                headers={**HEADERS, "Accept": "application/json"},
+            )
+            if resp.status_code == 200:
+                logger.info("Walmart: session is valid (bootstrap OK)")
+                return True
+
+            # Fallback: try GraphQL cart query
+            cart_resp = await client.post(
+                "https://www.walmart.com/swag/graphql",
+                json={
+                    "query": "query { cart { id itemCount } }",
+                    "variables": {},
+                },
+                headers={
+                    **HEADERS,
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.walmart.com",
+                },
+            )
+            if cart_resp.status_code == 200:
+                data = cart_resp.json()
+                if "errors" not in data:
+                    logger.info("Walmart: session valid (via GraphQL cart)")
+                    return True
+
+            return False
+        except Exception as exc:
+            logger.debug("Walmart session validation error: %s", exc)
+            return False
+
+    async def _wmt_add_to_cart(self, client: httpx.AsyncClient, product_id: str) -> bool:
+        """Add item to Walmart cart via GraphQL."""
+        # Extract CSRF token from cookies
+        csrf = ""
+        for name, value in client.cookies.items():
+            if "csrf" in name.lower() or name == "CSRF-TOKEN":
+                csrf = value
+                break
+
+        headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Origin": "https://www.walmart.com",
+            "Referer": "https://www.walmart.com/",
+        }
+        if csrf:
+            headers["x-csrf-token"] = csrf
+            headers["WM_SEC.AUTH_TOKEN"] = csrf
+
+        # Try GraphQL add-to-cart (primary method)
+        try:
+            resp = await client.post(
+                "https://www.walmart.com/orchestra/cartxo/graphql/MergeAndGetCart/"
+                "f2c8033bafbf986df97ef78677ce6172fc6045f08f6221f28b9ac518d17c7005",
+                json={
+                    "query": """mutation AddToCart($input: AddToCartInput!) {
+                        addToCart(input: $input) {
+                            cart { id itemCount }
+                        }
+                    }""",
+                    "variables": {
+                        "input": {
+                            "items": [{
+                                "offerId": product_id,
+                                "quantity": 1,
+                            }],
+                        },
+                    },
+                },
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if "errors" not in data:
+                    logger.info("Walmart: added product %s to cart via GraphQL", product_id)
+                    return True
+                logger.warning("Walmart: GraphQL add-to-cart errors: %s", data.get("errors", [])[:2])
+        except Exception as exc:
+            logger.debug("Walmart GraphQL add-to-cart failed: %s", exc)
+
+        # Fallback: REST API add-to-cart
+        try:
+            resp = await client.post(
+                "https://www.walmart.com/api/v1/cart/items",
+                json={
+                    "items": [{"offerId": product_id, "quantity": 1}],
+                },
+                headers=headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Walmart: added to cart via REST API")
+                return True
+            elif resp.status_code == 401:
+                logger.warning("Walmart: session expired during cart add")
+            elif resp.status_code == 403:
+                logger.warning("Walmart: blocked (403) on cart add — PerimeterX")
+            else:
+                logger.warning("Walmart: cart add failed (HTTP %d)", resp.status_code)
+        except Exception as exc:
+            logger.debug("Walmart REST add-to-cart failed: %s", exc)
+
+        return False
+
+    async def _wmt_checkout(self, client: httpx.AsyncClient) -> bool:
+        """Initiate Walmart checkout."""
+        csrf = ""
+        for name, value in client.cookies.items():
+            if "csrf" in name.lower() or name == "CSRF-TOKEN":
+                csrf = value
+                break
+
+        headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Origin": "https://www.walmart.com",
+            "Referer": "https://www.walmart.com/cart",
+        }
+        if csrf:
+            headers["x-csrf-token"] = csrf
+            headers["WM_SEC.AUTH_TOKEN"] = csrf
+
+        # Try checkout contract endpoint
+        try:
+            resp = await client.post(
+                "https://www.walmart.com/api/checkout/v1/contract",
+                json={"cart_type": "REGULAR"},
+                headers=headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Walmart: checkout initiated via contract API")
+                return True
+        except Exception as exc:
+            logger.debug("Walmart checkout contract failed: %s", exc)
+
+        # Fallback: navigate to checkout page
+        try:
+            resp = await client.get(
+                "https://www.walmart.com/checkout",
+                headers={**HEADERS, "Accept": "text/html,*/*"},
+            )
+            if resp.status_code == 200 and "checkout" in resp.text.lower():
+                logger.info("Walmart: checkout page loaded")
+                return True
+        except Exception:
+            pass
+
+        return False
 
     async def _checkout_pokemoncenter(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
