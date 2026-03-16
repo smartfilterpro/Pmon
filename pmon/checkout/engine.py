@@ -294,6 +294,23 @@ class CheckoutEngine:
         if self._playwright:
             await self._playwright.stop()
 
+    def _load_user_sessions(self, retailer: str, user_id: int | None = None):
+        """Load stored session cookies from database for API checkout."""
+        if user_id is None:
+            return
+        try:
+            from pmon import database as db
+            import json
+            session = db.get_retailer_session(user_id, retailer)
+            if session and session.get("cookies_json"):
+                cookies = json.loads(session["cookies_json"])
+                if cookies:
+                    self._api.load_session_cookies(retailer, cookies)
+                    self._api.reset_client(retailer)
+                    logger.info("Loaded %d stored session cookies for %s", len(cookies), retailer)
+        except Exception as exc:
+            logger.debug("Failed to load session cookies for %s: %s", retailer, exc)
+
     async def attempt_checkout(
         self,
         url: str,
@@ -301,6 +318,7 @@ class CheckoutEngine:
         product_name: str,
         profile_name: str = "default",
         dry_run: bool = False,
+        user_id: int | None = None,
     ) -> CheckoutResult:
         """Attempt checkout: API first, browser fallback.
 
@@ -310,6 +328,9 @@ class CheckoutEngine:
         """
         profile = self.config.profiles.get(profile_name) or Profile()
         creds = self.config.accounts.get(retailer)
+
+        # Load stored session cookies for API checkout
+        self._load_user_sessions(retailer, user_id)
 
         if not creds:
             return CheckoutResult(

@@ -171,6 +171,7 @@ class PmonEngine:
             url=product_row["url"],
             retailer=retailer,
             product_name=product_row["name"],
+            user_id=user_id,
         )
 
         # Log to database
@@ -204,6 +205,7 @@ class PmonEngine:
             retailer=product.retailer,
             product_name=product.name,
             dry_run=dry_run,
+            user_id=user_id,
         )
 
         if user_id:

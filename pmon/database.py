@@ -116,6 +116,17 @@ def _init_tables(conn: sqlite3.Connection):
             details TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS retailer_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            retailer TEXT NOT NULL,
+            cookies_json TEXT DEFAULT '{}',
+            headers_json TEXT DEFAULT '{}',
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(user_id, retailer)
+        );
     """)
     conn.commit()
 
@@ -370,6 +381,43 @@ def add_error_log(user_id: int | None, level: str, source: str,
         """INSERT INTO error_log (user_id, level, source, message, details)
            VALUES (?, ?, ?, ?, ?)""",
         (user_id, level, source, message, details),
+    )
+    db.commit()
+
+
+# --- Retailer session operations ---
+
+def get_retailer_session(user_id: int, retailer: str) -> dict | None:
+    """Get stored session (cookies + headers) for a retailer."""
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM retailer_sessions WHERE user_id = ? AND retailer = ?",
+        (user_id, retailer),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_retailer_session(user_id: int, retailer: str,
+                         cookies_json: str, headers_json: str = "{}"):
+    """Store session cookies and headers for a retailer."""
+    db = get_db()
+    db.execute(
+        """INSERT INTO retailer_sessions (user_id, retailer, cookies_json, headers_json, updated_at)
+           VALUES (?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id, retailer) DO UPDATE SET
+             cookies_json=excluded.cookies_json,
+             headers_json=excluded.headers_json,
+             updated_at=datetime('now')""",
+        (user_id, retailer, cookies_json, headers_json),
+    )
+    db.commit()
+
+
+def delete_retailer_session(user_id: int, retailer: str):
+    db = get_db()
+    db.execute(
+        "DELETE FROM retailer_sessions WHERE user_id = ? AND retailer = ?",
+        (user_id, retailer),
     )
     db.commit()
 
