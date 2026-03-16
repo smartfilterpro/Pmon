@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 # Directory to store browser session data (cookies, etc.)
 SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 
+# Stealth JS to inject into every page to reduce bot detection
+STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = {runtime: {}};
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) =>
+    parameters.name === 'notifications'
+        ? Promise.resolve({state: Notification.permission})
+        : originalQuery(parameters);
+"""
+
 
 class CheckoutEngine:
     """API-first checkout with browser fallback and Claude vision assist."""
@@ -214,6 +227,44 @@ class CheckoutEngine:
         except (json.JSONDecodeError, TypeError):
             return None
 
+    async def _multi_strategy_click(self, page, description: str, button_texts: list[str], css_fallback: str, timeout: int = 3000) -> bool:
+        """Multi-strategy button click: get_by_role → get_by_text → CSS → vision.
+
+        Matches the robust approach used in test login.
+        """
+        # Strategy 1: CSS selectors (fast path)
+        if css_fallback:
+            try:
+                elem = page.locator(css_fallback)
+                if await elem.first.is_visible(timeout=min(timeout, 1000)):
+                    await elem.first.click()
+                    return True
+            except Exception:
+                pass
+
+        # Strategy 2: get_by_role with each text variation
+        for btn_text in button_texts:
+            try:
+                btn = page.get_by_role("button", name=btn_text, exact=False)
+                if await btn.first.is_visible(timeout=500):
+                    await btn.first.click()
+                    return True
+            except Exception:
+                continue
+
+        # Strategy 3: get_by_text (catches links/divs acting as buttons)
+        for btn_text in button_texts:
+            try:
+                link = page.get_by_text(btn_text, exact=False)
+                if await link.first.is_visible(timeout=500):
+                    await link.first.click()
+                    return True
+            except Exception:
+                continue
+
+        # Strategy 4: Vision fallback
+        return await self._smart_click(page, description, "", timeout=1000)
+
     async def start(self):
         """Try to launch the browser for fallback. Not required."""
         try:
@@ -224,6 +275,9 @@ class CheckoutEngine:
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor",
                 ],
             )
             self._browser_available = True
@@ -246,8 +300,14 @@ class CheckoutEngine:
         retailer: str,
         product_name: str,
         profile_name: str = "default",
+        dry_run: bool = False,
     ) -> CheckoutResult:
-        """Attempt checkout: API first, browser fallback."""
+        """Attempt checkout: API first, browser fallback.
+
+        If dry_run=True, runs the full checkout flow but stops right before
+        clicking "Place order". Useful for testing the entire flow without
+        actually purchasing.
+        """
         profile = self.config.profiles.get(profile_name) or Profile()
         creds = self.config.accounts.get(retailer)
 
@@ -260,20 +320,25 @@ class CheckoutEngine:
                 error_message=f"No credentials for {retailer}. Add them in config.",
             )
 
-        # Try API checkout first (fast, headless, works on cloud)
-        logger.info(f"Trying API checkout for {product_name}...")
-        result = await self._api.attempt(url, retailer, product_name, profile, creds)
+        if dry_run:
+            logger.info(f"DRY RUN: testing checkout flow for {product_name} (will NOT place order)")
 
-        if result.status == CheckoutStatus.SUCCESS:
-            return result
+        # Try API checkout first (fast, headless, works on cloud) — skip in dry-run
+        if not dry_run:
+            logger.info(f"Trying API checkout for {product_name}...")
+            result = await self._api.attempt(url, retailer, product_name, profile, creds)
 
-        # If API failed and browser is available, try browser fallback
+            if result.status == CheckoutStatus.SUCCESS:
+                return result
+
+        # If API failed (or dry-run) and browser is available, try browser fallback
         if self._browser_available:
-            logger.info(f"API failed, trying browser fallback for {product_name}...")
+            if not dry_run:
+                logger.info(f"API failed, trying browser fallback for {product_name}...")
             try:
                 handler = getattr(self, f"_checkout_{retailer}", None)
                 if handler:
-                    return await handler(url, product_name, profile, creds)
+                    return await handler(url, product_name, profile, creds, dry_run=dry_run)
             except Exception as e:
                 logger.error(f"Browser checkout also failed: {e}")
                 return CheckoutResult(
@@ -284,35 +349,32 @@ class CheckoutEngine:
                     error_message=f"Both API and browser checkout failed: {e}",
                 )
 
-        # Return the API result (which has the error details)
+        # Return failure — API failed and no browser fallback
         return CheckoutResult(
             url=url,
             retailer=retailer,
             product_name=product_name,
             status=CheckoutStatus.FAILED,
-                error_message=str(e),
-            )
+            error_message=f"Checkout failed for {retailer} — no browser fallback available",
+        )
 
     async def _get_context(self, retailer: str):
-        """Get or create a browser context with persistent cookies."""
+        """Get or create a browser context with persistent cookies and stealth."""
         storage_path = SESSION_DIR / f"{retailer}.json"
+        ctx_kwargs = dict(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1366, "height": 768},
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
         if storage_path.exists():
-            context = await self._browser.new_context(
-                storage_state=str(storage_path),
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
-            )
-        else:
-            context = await self._browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                ),
-            )
+            ctx_kwargs["storage_state"] = str(storage_path)
+        context = await self._browser.new_context(**ctx_kwargs)
+        await context.add_init_script(STEALTH_JS)
         return context
 
     async def _save_context(self, context, retailer: str):
@@ -321,7 +383,7 @@ class CheckoutEngine:
         await context.storage_state(path=str(storage_path))
 
     async def _checkout_target(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
         """Target checkout flow."""
         context = await self._get_context("target")
@@ -377,6 +439,32 @@ class CheckoutEngine:
             await page.wait_for_timeout(3000)
 
             # Place order — assumes saved payment on Target account
+            if dry_run:
+                # Verify the "Place your order" button is visible, but don't click it
+                try:
+                    btn = page.locator('button:has-text("Place your order")')
+                    if await btn.first.is_visible(timeout=10000):
+                        logger.info("DRY RUN: 'Place your order' button found — checkout flow verified")
+                        await self._save_context(context, "target")
+                        return CheckoutResult(
+                            url=url,
+                            retailer="target",
+                            product_name=product_name,
+                            status=CheckoutStatus.SUCCESS,
+                            error_message="DRY RUN: stopped before placing order — full flow verified",
+                        )
+                except Exception:
+                    pass
+                error = await self._smart_read_error(page)
+                await self._save_context(context, "target")
+                return CheckoutResult(
+                    url=url,
+                    retailer="target",
+                    product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message=error or "DRY RUN: 'Place your order' button not found",
+                )
+
             if await self._smart_click(
                 page, "Place your order",
                 'button:has-text("Place your order")',
@@ -428,13 +516,14 @@ class CheckoutEngine:
         )
         await page.wait_for_timeout(2000)
 
-        email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"]'
-        pass_sel = '#password, input[name="password"], input[type="password"]'
-        submit_sel = 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")'
+        email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
+        pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'
 
-        # Step 1: Enter email/phone
+        # Step 1: Enter email/phone using keyboard.type() for human-like input
         await page.locator(email_sel).first.wait_for(state="visible", timeout=10000)
-        await page.fill(email_sel, creds.email)
+        await page.locator(email_sel).first.click()
+        await page.locator(email_sel).first.press("Control+a")
+        await page.keyboard.type(creds.email, delay=40)
 
         # Check if password is already visible (single-step) or multi-step
         pass_visible = False
@@ -444,30 +533,80 @@ class CheckoutEngine:
             pass
 
         if pass_visible:
-            await page.fill(pass_sel, creds.password)
-            await page.click(submit_sel)
+            # Single-step: fill password and submit
+            await page.locator(pass_sel).first.click()
+            await page.keyboard.type(creds.password, delay=40)
+            await self._multi_strategy_click(page, "Sign in", [
+                "Sign in", "Continue", "Log in",
+            ], 'button[type="submit"], button:has-text("Sign in")')
         else:
-            # Step 2: Submit email, then select password auth method
-            await page.click(submit_sel)
-            await page.wait_for_timeout(2000)
+            # Step 2: Submit email — multi-strategy click for "Continue with email"
+            await self._multi_strategy_click(page, "Continue with email", [
+                "Continue with email", "Continue", "Sign in", "Next",
+            ], 'button[type="submit"], button:has-text("Continue")')
+            await page.wait_for_timeout(3000)
 
-            password_option = page.locator('button:has-text("Password"), a:has-text("Password"), [data-test*="password" i], button:has-text("Use password")')
-            try:
-                if await password_option.first.is_visible(timeout=3000):
-                    await password_option.first.click()
-                    await page.wait_for_timeout(1000)
-            except Exception:
-                pass
+            # Step 3: Auth method picker — Target shows "Enter your password"
+            pw_option_clicked = False
 
-            # Step 3: Enter password
+            # Strategy 1: get_by_role
+            for option_text in ["Enter your password", "Enter password", "Password", "Use password"]:
+                try:
+                    opt = page.get_by_role("button", name=option_text, exact=False)
+                    if await opt.first.is_visible(timeout=500):
+                        await opt.first.click()
+                        pw_option_clicked = True
+                        break
+                except Exception:
+                    continue
+
+            # Strategy 2: get_by_text (catches divs/links acting as buttons)
+            if not pw_option_clicked:
+                for option_text in ["Enter your password", "Enter password"]:
+                    try:
+                        opt = page.get_by_text(option_text, exact=False)
+                        if await opt.first.is_visible(timeout=500):
+                            await opt.first.click()
+                            pw_option_clicked = True
+                            break
+                    except Exception:
+                        continue
+
+            # Strategy 3: CSS selectors
+            if not pw_option_clicked:
+                password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password")')
+                try:
+                    if await password_option.first.is_visible(timeout=1000):
+                        await password_option.first.click()
+                        pw_option_clicked = True
+                except Exception:
+                    pass
+
+            # Strategy 4: Vision fallback
+            if not pw_option_clicked:
+                logger.info("Target sign-in: trying vision for auth method picker")
+                pw_option_clicked = await self._smart_click(page, "Enter your password option", "", timeout=1000)
+
+            if pw_option_clicked:
+                await page.wait_for_timeout(2000)
+
+            # Step 4: Enter password
             await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
-            await page.fill(pass_sel, creds.password)
-            await page.click(submit_sel)
+            await page.locator(pass_sel).first.click()
+            await page.keyboard.type(creds.password, delay=40)
+            await self._multi_strategy_click(page, "Sign in", [
+                "Sign in", "Continue", "Log in",
+            ], 'button[type="submit"], button:has-text("Sign in")')
 
         await page.wait_for_timeout(3000)
 
+        # Verify we navigated away from login page (success heuristic)
+        final_url = page.url
+        if "/login" in final_url or "/signin" in final_url or "/identity" in final_url:
+            logger.warning("Target sign-in may have failed — still on login page: %s", final_url)
+
     async def _checkout_walmart(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
         """Walmart checkout flow."""
         context = await self._get_context("walmart")
@@ -505,10 +644,14 @@ class CheckoutEngine:
                 pass
 
             if sign_in_visible:
-                email_filled = await self._smart_fill(page, "email", 'input[name="email"], input[type="email"]', creds.email)
-                pass_filled = await self._smart_fill(page, "password", 'input[type="password"], input[name="password"]', creds.password)
+                email_sel = 'input[name="email"], input[type="email"], input[id*="email" i]'
+                pass_sel = 'input[type="password"], input[name="password"]'
+                email_filled = await self._smart_fill(page, "email", email_sel, creds.email)
+                pass_filled = await self._smart_fill(page, "password", pass_sel, creds.password)
                 if email_filled and pass_filled:
-                    await self._smart_click(page, "Sign in submit", 'button[type="submit"]')
+                    await self._multi_strategy_click(page, "Sign in", [
+                        "Sign in", "Log in", "Continue",
+                    ], 'button[type="submit"]')
                     await page.wait_for_timeout(3000)
                 else:
                     # Full vision-assisted sign-in
@@ -522,6 +665,31 @@ class CheckoutEngine:
             )
 
             # Wait for user to handle captcha if present, then place order
+            if dry_run:
+                try:
+                    btn = page.locator('button:has-text("Place order")')
+                    if await btn.first.is_visible(timeout=15000):
+                        logger.info("DRY RUN: 'Place order' button found — checkout flow verified")
+                        await self._save_context(context, "walmart")
+                        return CheckoutResult(
+                            url=url,
+                            retailer="walmart",
+                            product_name=product_name,
+                            status=CheckoutStatus.SUCCESS,
+                            error_message="DRY RUN: stopped before placing order — full flow verified",
+                        )
+                except Exception:
+                    pass
+                error = await self._smart_read_error(page)
+                await self._save_context(context, "walmart")
+                return CheckoutResult(
+                    url=url,
+                    retailer="walmart",
+                    product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message=error or "DRY RUN: 'Place order' button not found",
+                )
+
             if await self._smart_click(
                 page, "Place order",
                 'button:has-text("Place order")',
@@ -558,7 +726,7 @@ class CheckoutEngine:
             await context.close()
 
     async def _checkout_pokemoncenter(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
         """Pokemon Center checkout flow."""
         context = await self._get_context("pokemoncenter")
@@ -601,23 +769,48 @@ class CheckoutEngine:
             if "access.pokemon.com" in current_url or "sso.pokemon.com" in current_url:
                 email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
                 pass_sel = 'input[type="password"], input[name="password"]'
-                submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
             else:
-                email_sel = 'input[type="email"], input[name="email"], input[id*="email" i], input[id*="login" i], input[name*="email" i]'
+                email_sel = 'input[type="email"], input[name="email"], input[type="text"][autocomplete="email"], input[type="text"][autocomplete="username"], input[id*="email" i], input[id*="login" i], input[name*="email" i], input[name*="login" i]'
                 pass_sel = 'input[type="password"], input[name="password"], input[id*="password" i]'
-                submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
 
             # Try selector-based sign-in, fall back to vision
             email_filled = await self._smart_fill(page, "email", email_sel, creds.email, timeout=5000)
             if email_filled:
                 await self._smart_fill(page, "password", pass_sel, creds.password)
-                await self._smart_click(page, "Sign In", submit_sel)
+                await self._multi_strategy_click(page, "Sign In", [
+                    "Sign In", "Log In", "Continue",
+                ], 'button[type="submit"], button:has-text("Sign In")')
                 await page.wait_for_timeout(5000)
             else:
                 # No email field found by selectors — try full vision sign-in
                 await self._smart_sign_in(page, creds, "pokemoncenter")
 
             # Place order — assumes saved payment on account
+            if dry_run:
+                try:
+                    btn = page.locator('button:has-text("Place Order"), button:has-text("Submit Order")')
+                    if await btn.first.is_visible(timeout=15000):
+                        logger.info("DRY RUN: 'Place Order' button found — checkout flow verified")
+                        await self._save_context(context, "pokemoncenter")
+                        return CheckoutResult(
+                            url=url,
+                            retailer="pokemoncenter",
+                            product_name=product_name,
+                            status=CheckoutStatus.SUCCESS,
+                            error_message="DRY RUN: stopped before placing order — full flow verified",
+                        )
+                except Exception:
+                    pass
+                error = await self._smart_read_error(page)
+                await self._save_context(context, "pokemoncenter")
+                return CheckoutResult(
+                    url=url,
+                    retailer="pokemoncenter",
+                    product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message=error or "DRY RUN: 'Place Order' button not found",
+                )
+
             if await self._smart_click(
                 page, "Place Order",
                 'button:has-text("Place Order"), button:has-text("Submit Order")',
@@ -654,7 +847,7 @@ class CheckoutEngine:
             await context.close()
 
     async def _checkout_bestbuy(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
         """Best Buy checkout flow (limited due to invitation system)."""
         context = await self._get_context("bestbuy")
@@ -711,11 +904,13 @@ class CheckoutEngine:
 
             # Sign in if needed — selectors first, vision fallback
             email_filled = await self._smart_fill(
-                page, "email", 'input#fld-e, input[id="user.emailAddress"], input[type="email"]', creds.email, timeout=3000,
+                page, "email", 'input#fld-e, input[id="user.emailAddress"], input[type="email"], input[name="email"]', creds.email, timeout=3000,
             )
             if email_filled:
-                await self._smart_fill(page, "password", 'input#fld-p1, input[type="password"]', creds.password)
-                await self._smart_click(page, "Sign In", 'button:has-text("Sign In"), button[type="submit"]')
+                await self._smart_fill(page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password)
+                await self._multi_strategy_click(page, "Sign In", [
+                    "Sign In", "Log In", "Continue",
+                ], 'button[type="submit"], button:has-text("Sign In")')
                 await page.wait_for_timeout(3000)
             else:
                 # Try full vision-assisted sign-in
@@ -727,6 +922,31 @@ class CheckoutEngine:
                 'button.cia-guest-content__continue.guest, button:has-text("Continue as Guest"), button:has-text("Guest")',
                 timeout=2000,
             )
+
+            if dry_run:
+                try:
+                    btn = page.locator('button:has-text("Place Your Order"), button:has-text("Place Order")')
+                    if await btn.first.is_visible(timeout=15000):
+                        logger.info("DRY RUN: 'Place Your Order' button found — checkout flow verified")
+                        await self._save_context(context, "bestbuy")
+                        return CheckoutResult(
+                            url=url,
+                            retailer="bestbuy",
+                            product_name=product_name,
+                            status=CheckoutStatus.SUCCESS,
+                            error_message="DRY RUN: stopped before placing order — full flow verified",
+                        )
+                except Exception:
+                    pass
+                error = await self._smart_read_error(page)
+                await self._save_context(context, "bestbuy")
+                return CheckoutResult(
+                    url=url,
+                    retailer="bestbuy",
+                    product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message=error or "DRY RUN: 'Place Your Order' button not found",
+                )
 
             if await self._smart_click(
                 page, "Place Your Order",
