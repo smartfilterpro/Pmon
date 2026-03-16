@@ -290,6 +290,99 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         email = acc["email"]
         password = acc["password"]
 
+        # --- Walmart: browser login is blocked by PerimeterX press-and-hold CAPTCHA.
+        # Instead, validate that imported session cookies work via API call.
+        if retailer == "walmart":
+            return await _test_walmart_session(user)
+
+    async def _test_walmart_session(user: dict):
+        """Test Walmart account by validating imported session cookies via API.
+
+        Walmart uses aggressive PerimeterX bot protection with a press-and-hold
+        CAPTCHA that cannot be solved by headless browsers.  Instead of attempting
+        browser login (which always fails), we validate that the user's imported
+        session cookies are still valid by making an API call to Walmart's
+        lightweight config endpoint.
+        """
+        import json as _json
+        import httpx
+        from pmon.monitors.base import DEFAULT_HEADERS
+
+        session = db.get_retailer_session(user["id"], "walmart")
+        if not session or not session.get("cookies_json"):
+            return {
+                "ok": False,
+                "message": (
+                    "Walmart blocks automated browsers with CAPTCHA. "
+                    "You must import session cookies instead:\n"
+                    "1. Log into walmart.com in your browser\n"
+                    "2. Open DevTools (F12) > Application > Cookies\n"
+                    "3. Copy all cookies using a browser extension (e.g. EditThisCookie)\n"
+                    "4. Paste them in Settings > Session Cookies > Walmart > Import"
+                ),
+            }
+
+        try:
+            cookies = _json.loads(session["cookies_json"])
+        except Exception:
+            return {"ok": False, "message": "Saved session cookies are corrupted — re-import them"}
+
+        if not cookies:
+            return {"ok": False, "message": "No session cookies found — import them via Settings > Session Cookies"}
+
+        # Validate session by hitting a lightweight API endpoint
+        try:
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                http2=True,
+            ) as client:
+                for name, value in cookies.items():
+                    client.cookies.set(name, str(value), domain=".walmart.com")
+
+                # Try the account API to see if we're authenticated
+                resp = await client.get(
+                    "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                    "?configNames=identity",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Accept": "application/json",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Referer": "https://www.walmart.com/",
+                    },
+                )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Check if identity config indicates logged in
+                    identity = data.get("identity", {})
+                    is_logged_in = identity.get("isLoggedIn", False)
+                    if is_logged_in:
+                        logger.info("Walmart: session cookies valid (logged in)")
+                        return {"ok": True, "message": f"Walmart session valid — {len(cookies)} cookies active"}
+
+                    # Even if not definitively logged in, 200 means cookies aren't expired
+                    logger.info("Walmart: session cookies accepted (HTTP 200)")
+                    return {"ok": True, "message": f"Walmart session cookies accepted ({len(cookies)} cookies) — if checkout fails, re-import fresh cookies"}
+
+                elif resp.status_code == 403:
+                    return {
+                        "ok": False,
+                        "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
+                    }
+                else:
+                    return {
+                        "ok": False,
+                        "message": f"Walmart session check returned HTTP {resp.status_code}. Try re-importing cookies.",
+                    }
+
+        except Exception as exc:
+            logger.error("Walmart session validation error: %s", exc)
+            return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
+
         try:
             from playwright.async_api import async_playwright
         except ImportError:

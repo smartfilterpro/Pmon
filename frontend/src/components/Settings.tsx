@@ -227,7 +227,9 @@ export default function Settings({ user }: Props) {
                       onClick={() => handleTestLogin(r.id)}
                       disabled={testLoading[r.id]}
                     >
-                      {testLoading[r.id] ? <><Loader size={12} className="spin" /> Testing...</> : 'Test Login'}
+                      {testLoading[r.id]
+                        ? <><Loader size={12} className="spin" /> Testing...</>
+                        : r.id === 'walmart' ? 'Test Session' : 'Test Login'}
                     </button>
                   )}
                   <button className="action-btn" onClick={() => startEditAccount(r.id)}>
