@@ -393,8 +393,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "error": '[data-test="error"], .error-message, #error, [class*="error" i], [role="alert"]',
             },
             "walmart": {
-                "email": 'input[name="email"], input[type="email"], input[id*="email" i]',
-                "password": 'input[type="password"], input[name="password"]',
+                "email": 'input[name="email"], input[type="email"], input[id*="email" i], input[type="tel"], input[name="phone"], input[id*="phone" i], #phone-number, input[autocomplete="tel"]',
+                "password": 'input[type="password"], input[name="password"], input[id*="password" i]',
                 "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
                 "success": 'a[href*="/account"], [data-automation-id="account"], [data-tl-id*="account"]',
                 "error": '[data-automation-id="error"], .error-message, [class*="error" i], [role="alert"]',
@@ -472,7 +472,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 current_url = page.url
 
                 # Determine if we actually landed on a login page
-                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com"]
+                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com"]
                 landed_on_login = any(ind in current_url.lower() for ind in login_indicators)
 
                 # Check for bot-block pages (URL or page content)
@@ -490,6 +490,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             "temporarily restricted",
                             "bot activity",
                             "your ip",
+                            "technical issues",
+                            "technical difficulties",
                         ]
                         if any(phrase in body_lower for phrase in block_phrases):
                             page_desc = await vision_read_page(page)
@@ -613,97 +615,132 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     if not single_submit_clicked:
                         await vision_click(page, "Sign In / Continue / Verify button")
                 else:
-                    # Multi-step: submit email/phone first
-                    # Use multiple strategies to find and click the submit/continue button
-                    submit_clicked = await click_visible_button(page, submit_sel)
-                    if submit_clicked:
-                        logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
-                    if not submit_clicked:
-                        # Try Playwright's get_by_role which handles text matching much better
-                        for btn_text in ["Continue with email", "Continue", "Sign in", "Next"]:
-                            try:
-                                btn = page.get_by_role("button", name=btn_text, exact=False)
-                                if await btn.first.is_visible(timeout=500):
-                                    await btn.first.click()
-                                    submit_clicked = True
-                                    logger.info("Test login %s: clicked submit via get_by_role('%s')", retailer_name, btn_text)
-                                    break
-                            except Exception:
-                                continue
-                    if not submit_clicked:
-                        # Try any visible link with matching text
-                        for link_text in ["Continue with email", "Continue"]:
-                            try:
-                                link = page.get_by_text(link_text, exact=False)
-                                if await link.first.is_visible(timeout=500):
-                                    await link.first.click()
-                                    submit_clicked = True
-                                    logger.info("Test login %s: clicked submit via get_by_text('%s')", retailer_name, link_text)
-                                    break
-                            except Exception:
-                                continue
-                    if not submit_clicked:
-                        # Last resort: vision
-                        logger.info("Test login %s: all selectors failed, trying vision click for submit button", retailer_name)
-                        clicked = await vision_click(page, "Continue with email button (NOT passkey)")
-                        logger.info("Test login %s: vision click result: %s", retailer_name, clicked)
-
-                    await page.wait_for_timeout(3000)
-
-                    # Log what page we're on after submit attempt
-                    post_submit_url = page.url
-                    logger.info("Test login %s: after submit, URL is %s", retailer_name, post_submit_url)
-
-                    # Check for "Something went wrong" error and retry once
-                    error_banner = page.locator('[role="alert"], .error-message, [class*="error" i], [data-test="error"]')
+                    # Check if auth method picker is already visible (e.g. Walmart with pre-filled phone)
+                    # If so, skip email submit and go straight to auth method selection
+                    auth_picker_already_visible = False
                     try:
-                        if await error_banner.first.is_visible(timeout=2000):
-                            banner_text = await error_banner.first.inner_text(timeout=1000)
-                            if "something went wrong" in banner_text.lower() or "try again" in banner_text.lower():
-                                logger.info("Test login %s: server error on first attempt, retrying", retailer_name)
-                                await page.wait_for_timeout(2000)
-                                # Clear and re-type email, then submit again
-                                try:
-                                    await page.locator(email_sel).first.click()
-                                    await page.locator(email_sel).first.press("Control+a")
-                                    await page.keyboard.type(email, delay=40)
-                                    await page.wait_for_timeout(500)
-                                    # Re-use the same multi-strategy click
-                                    for btn_text in ["Continue with email", "Continue", "Sign in"]:
-                                        try:
-                                            btn = page.get_by_role("button", name=btn_text, exact=False)
-                                            if await btn.first.is_visible(timeout=500):
-                                                await btn.first.click()
-                                                break
-                                        except Exception:
-                                            continue
-                                    await page.wait_for_timeout(3000)
-                                except Exception:
-                                    pass
+                        picker_text = page.get_by_text("Choose a sign in method", exact=False)
+                        if await picker_text.first.is_visible(timeout=1000):
+                            auth_picker_already_visible = True
+                            logger.info("Test login %s: auth method picker already visible (skipping email submit)", retailer_name)
                     except Exception:
                         pass
+                    if not auth_picker_already_visible:
+                        try:
+                            pw_radio = page.get_by_role("radio", name="Password", exact=False)
+                            if await pw_radio.first.is_visible(timeout=500):
+                                auth_picker_already_visible = True
+                                logger.info("Test login %s: password radio already visible (skipping email submit)", retailer_name)
+                        except Exception:
+                            pass
 
-                    # Some sites (e.g. Target) show an auth method picker
-                    # Target shows: "Use a passkey", "Get a code", "Enter your password"
+                    # Multi-step: submit email/phone first (unless auth picker already showing)
+                    if not auth_picker_already_visible:
+                        # Use multiple strategies to find and click the submit/continue button
+                        submit_clicked = await click_visible_button(page, submit_sel)
+                        if submit_clicked:
+                            logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
+                        if not submit_clicked:
+                            # Try Playwright's get_by_role which handles text matching much better
+                            for btn_text in ["Continue with email", "Continue", "Sign in", "Next"]:
+                                try:
+                                    btn = page.get_by_role("button", name=btn_text, exact=False)
+                                    if await btn.first.is_visible(timeout=500):
+                                        await btn.first.click()
+                                        submit_clicked = True
+                                        logger.info("Test login %s: clicked submit via get_by_role('%s')", retailer_name, btn_text)
+                                        break
+                                except Exception:
+                                    continue
+                        if not submit_clicked:
+                            # Try any visible link with matching text
+                            for link_text in ["Continue with email", "Continue"]:
+                                try:
+                                    link = page.get_by_text(link_text, exact=False)
+                                    if await link.first.is_visible(timeout=500):
+                                        await link.first.click()
+                                        submit_clicked = True
+                                        logger.info("Test login %s: clicked submit via get_by_text('%s')", retailer_name, link_text)
+                                        break
+                                except Exception:
+                                    continue
+                        if not submit_clicked:
+                            # Last resort: vision
+                            logger.info("Test login %s: all selectors failed, trying vision click for submit button", retailer_name)
+                            clicked = await vision_click(page, "Continue with email button (NOT passkey)")
+                            logger.info("Test login %s: vision click result: %s", retailer_name, clicked)
+
+                        await page.wait_for_timeout(3000)
+
+                        # Log what page we're on after submit attempt
+                        post_submit_url = page.url
+                        logger.info("Test login %s: after submit, URL is %s", retailer_name, post_submit_url)
+
+                        # Check for "Something went wrong" error and retry once
+                        error_banner = page.locator('[role="alert"], .error-message, [class*="error" i], [data-test="error"]')
+                        try:
+                            if await error_banner.first.is_visible(timeout=2000):
+                                banner_text = await error_banner.first.inner_text(timeout=1000)
+                                if "something went wrong" in banner_text.lower() or "try again" in banner_text.lower():
+                                    logger.info("Test login %s: server error on first attempt, retrying", retailer_name)
+                                    await page.wait_for_timeout(2000)
+                                    # Clear and re-type email, then submit again
+                                    try:
+                                        await page.locator(email_sel).first.click()
+                                        await page.locator(email_sel).first.press("Control+a")
+                                        await page.keyboard.type(email, delay=40)
+                                        await page.wait_for_timeout(500)
+                                        # Re-use the same multi-strategy click
+                                        for btn_text in ["Continue with email", "Continue", "Sign in"]:
+                                            try:
+                                                btn = page.get_by_role("button", name=btn_text, exact=False)
+                                                if await btn.first.is_visible(timeout=500):
+                                                    await btn.first.click()
+                                                    break
+                                            except Exception:
+                                                continue
+                                        await page.wait_for_timeout(3000)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+
+                    # Some sites show an auth method picker before the password field:
+                    # - Target: buttons "Use a passkey", "Get a code", "Enter your password"
+                    # - Walmart: radio buttons "Text me a verification code", "Email me a verification code", "Password"
+                    # - Best Buy: tabs/options for text code, email code, Google, password
                     pw_option_clicked = False
 
-                    # Strategy 1: get_by_role with exact text variations
+                    # Strategy 1: get_by_role("button") for button-style pickers (Target, Best Buy)
                     for option_text in ["Enter your password", "Enter password", "Password", "Use password"]:
                         try:
                             opt = page.get_by_role("button", name=option_text, exact=False)
                             if await opt.first.is_visible(timeout=500):
                                 await opt.first.click()
                                 pw_option_clicked = True
-                                logger.info("Test login %s: clicked auth method via get_by_role('%s')", retailer_name, option_text)
+                                logger.info("Test login %s: clicked auth method via get_by_role('button', '%s')", retailer_name, option_text)
                                 break
                         except Exception:
                             continue
 
-                    # Strategy 2: get_by_text (catches divs/links acting as buttons)
+                    # Strategy 2: get_by_role("radio") for radio-button pickers (Walmart)
                     if not pw_option_clicked:
-                        for option_text in ["Enter your password", "Enter password"]:
+                        for option_text in ["Password"]:
                             try:
-                                opt = page.get_by_text(option_text, exact=False)
+                                opt = page.get_by_role("radio", name=option_text, exact=False)
+                                if await opt.first.is_visible(timeout=500):
+                                    await opt.first.click()
+                                    pw_option_clicked = True
+                                    logger.info("Test login %s: clicked auth method via get_by_role('radio', '%s')", retailer_name, option_text)
+                                    break
+                            except Exception:
+                                continue
+
+                    # Strategy 3: get_by_text (catches divs/links/labels acting as buttons)
+                    if not pw_option_clicked:
+                        for option_text in ["Enter your password", "Enter password", "Password"]:
+                            try:
+                                opt = page.get_by_text(option_text, exact=True)
                                 if await opt.first.is_visible(timeout=500):
                                     await opt.first.click()
                                     pw_option_clicked = True
@@ -712,9 +749,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             except Exception:
                                 continue
 
-                    # Strategy 3: CSS selectors
+                    # Strategy 4: CSS selectors (labels for radio, buttons, links)
                     if not pw_option_clicked:
-                        password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password")')
+                        password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password"), label:has-text("Password"), input[type="radio"][value*="password" i]')
                         try:
                             if await password_option.first.is_visible(timeout=1000):
                                 await password_option.first.click()
@@ -723,10 +760,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         except Exception:
                             pass
 
-                    # Strategy 4: Vision fallback
+                    # Strategy 5: Vision fallback
                     if not pw_option_clicked:
                         logger.info("Test login %s: trying vision for auth method picker", retailer_name)
-                        pw_option_clicked = await vision_click(page, "Enter your password option")
+                        pw_option_clicked = await vision_click(page, "Password option (radio button or link to select password sign-in method)")
 
                     if pw_option_clicked:
                         await page.wait_for_timeout(2000)

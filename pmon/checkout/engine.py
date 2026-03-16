@@ -549,7 +549,7 @@ class CheckoutEngine:
             # Step 3: Auth method picker — Target shows "Enter your password"
             pw_option_clicked = False
 
-            # Strategy 1: get_by_role
+            # Strategy 1: get_by_role("button") for button-style pickers
             for option_text in ["Enter your password", "Enter password", "Password", "Use password"]:
                 try:
                     opt = page.get_by_role("button", name=option_text, exact=False)
@@ -560,11 +560,21 @@ class CheckoutEngine:
                 except Exception:
                     continue
 
-            # Strategy 2: get_by_text (catches divs/links acting as buttons)
+            # Strategy 2: get_by_role("radio") for radio-button pickers (Walmart)
             if not pw_option_clicked:
-                for option_text in ["Enter your password", "Enter password"]:
+                try:
+                    opt = page.get_by_role("radio", name="Password", exact=False)
+                    if await opt.first.is_visible(timeout=500):
+                        await opt.first.click()
+                        pw_option_clicked = True
+                except Exception:
+                    pass
+
+            # Strategy 3: get_by_text (catches divs/links/labels acting as buttons)
+            if not pw_option_clicked:
+                for option_text in ["Enter your password", "Enter password", "Password"]:
                     try:
-                        opt = page.get_by_text(option_text, exact=False)
+                        opt = page.get_by_text(option_text, exact=True)
                         if await opt.first.is_visible(timeout=500):
                             await opt.first.click()
                             pw_option_clicked = True
@@ -572,9 +582,9 @@ class CheckoutEngine:
                     except Exception:
                         continue
 
-            # Strategy 3: CSS selectors
+            # Strategy 4: CSS selectors (labels for radio, buttons, links)
             if not pw_option_clicked:
-                password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password")')
+                password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password"), label:has-text("Password"), input[type="radio"][value*="password" i]')
                 try:
                     if await password_option.first.is_visible(timeout=1000):
                         await password_option.first.click()
@@ -582,10 +592,10 @@ class CheckoutEngine:
                 except Exception:
                     pass
 
-            # Strategy 4: Vision fallback
+            # Strategy 5: Vision fallback
             if not pw_option_clicked:
-                logger.info("Target sign-in: trying vision for auth method picker")
-                pw_option_clicked = await self._smart_click(page, "Enter your password option", "", timeout=1000)
+                logger.info("Sign-in: trying vision for auth method picker")
+                pw_option_clicked = await self._smart_click(page, "Password option (radio button or link)", "", timeout=1000)
 
             if pw_option_clicked:
                 await page.wait_for_timeout(2000)
@@ -644,11 +654,41 @@ class CheckoutEngine:
                 pass
 
             if sign_in_visible:
-                email_sel = 'input[name="email"], input[type="email"], input[id*="email" i]'
-                pass_sel = 'input[type="password"], input[name="password"]'
-                email_filled = await self._smart_fill(page, "email", email_sel, creds.email)
+                email_sel = 'input[name="email"], input[type="email"], input[id*="email" i], input[type="tel"], input[name="phone"], input[id*="phone" i], #phone-number, input[autocomplete="tel"]'
+                pass_sel = 'input[type="password"], input[name="password"], input[id*="password" i]'
+
+                # Check if auth method picker is already showing (Walmart with pre-filled phone)
+                auth_picker_visible = False
+                try:
+                    pw_radio = page.get_by_role("radio", name="Password", exact=False)
+                    if await pw_radio.first.is_visible(timeout=1000):
+                        auth_picker_visible = True
+                        await pw_radio.first.click()
+                        await page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+                if not auth_picker_visible:
+                    # Standard flow: fill email/phone and submit
+                    email_filled = await self._smart_fill(page, "email/phone", email_sel, creds.email)
+                    if email_filled:
+                        await self._multi_strategy_click(page, "Continue", [
+                            "Continue", "Sign in", "Next",
+                        ], 'button[type="submit"]')
+                        await page.wait_for_timeout(3000)
+
+                        # Check for auth method picker after submit
+                        try:
+                            pw_radio = page.get_by_role("radio", name="Password", exact=False)
+                            if await pw_radio.first.is_visible(timeout=2000):
+                                await pw_radio.first.click()
+                                await page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
+
+                # Now enter password
                 pass_filled = await self._smart_fill(page, "password", pass_sel, creds.password)
-                if email_filled and pass_filled:
+                if pass_filled:
                     await self._multi_strategy_click(page, "Sign in", [
                         "Sign in", "Log in", "Continue",
                     ], 'button[type="submit"]')
