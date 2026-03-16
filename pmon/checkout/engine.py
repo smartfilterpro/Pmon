@@ -829,11 +829,30 @@ class CheckoutEngine:
         email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
         pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'
 
-        # Step 1: Enter email/phone using keyboard.type() for human-like input
-        await page.locator(email_sel).first.wait_for(state="visible", timeout=10000)
-        await page.locator(email_sel).first.click()
-        await page.locator(email_sel).first.press("Control+a")
+        # Step 1: Enter email/phone
+        email_input = page.locator(email_sel).first
+        await email_input.wait_for(state="visible", timeout=10000)
+
+        # Try keyboard.type() first (human-like), verify it worked, fall back to fill()
+        await email_input.click(force=True)
+        await page.wait_for_timeout(300)
+        await email_input.press("Control+a")
         await page.keyboard.type(creds.email, delay=40)
+        await page.wait_for_timeout(500)
+
+        # Verify the value actually got entered — Target's JS can clear it
+        try:
+            actual_value = await email_input.input_value(timeout=1000)
+            if actual_value != creds.email:
+                logger.warning("Target sign-in: keyboard.type() produced '%s', expected '%s' — using fill()",
+                              actual_value[:20], creds.email[:20])
+                await email_input.fill(creds.email)
+                await page.wait_for_timeout(300)
+        except Exception:
+            # If we can't read the value, try fill() as backup
+            logger.warning("Target sign-in: could not verify email input — using fill() as backup")
+            await email_input.fill(creds.email)
+            await page.wait_for_timeout(300)
 
         # Check if password is already visible (single-step) or multi-step
         pass_visible = False

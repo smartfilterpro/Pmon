@@ -562,35 +562,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 ],
             )
 
-            # Load previously saved session cookies for this retailer (if any).
-            # This lets test-login pick up where a previous session left off,
-            # avoiding PerimeterX challenges that only appear on fresh sessions.
-            storage_state = None
-            try:
-                existing_session = db.get_retailer_session(user["id"], retailer)
-                if existing_session and existing_session.get("cookies_json"):
-                    import json as _json
-                    saved_cookies = _json.loads(existing_session["cookies_json"])
-                    if saved_cookies:
-                        # Convert {name: value} dict to Playwright cookie format
-                        domain_map = {
-                            "target": ".target.com",
-                            "walmart": ".walmart.com",
-                            "bestbuy": ".bestbuy.com",
-                            "pokemoncenter": ".pokemoncenter.com",
-                        }
-                        pw_cookies = []
-                        for name, value in saved_cookies.items():
-                            pw_cookies.append({
-                                "name": name, "value": str(value),
-                                "domain": domain_map.get(retailer, f".{retailer}.com"),
-                                "path": "/",
-                            })
-                        storage_state = {"cookies": pw_cookies, "origins": []}
-                        logger.info("Test login %s: loading %d saved session cookies", retailer_name, len(pw_cookies))
-            except Exception as exc:
-                logger.debug("Could not load saved session for test login: %s", exc)
-
+            # Create browser context WITHOUT storage_state first (avoids blank page
+            # caused by malformed cookies).  We'll add cookies AFTER context creation
+            # which is more resilient to bad data.
             context = await browser.new_context(
                 user_agent=(
                     f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -605,9 +579,37 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "Sec-Ch-Ua-Mobile": "?0",
                     "Sec-Ch-Ua-Platform": '"Windows"',
                 },
-                storage_state=storage_state,
             )
             await context.add_init_script(STEALTH_JS)
+
+            # Load previously saved session cookies AFTER context creation.
+            # Using add_cookies() instead of storage_state avoids blank page issues
+            # when cookie data is malformed or has unexpected fields.
+            try:
+                existing_session = db.get_retailer_session(user["id"], retailer)
+                if existing_session and existing_session.get("cookies_json"):
+                    import json as _json
+                    saved_cookies = _json.loads(existing_session["cookies_json"])
+                    if saved_cookies:
+                        domain_map = {
+                            "target": ".target.com",
+                            "walmart": ".walmart.com",
+                            "bestbuy": ".bestbuy.com",
+                            "pokemoncenter": ".pokemoncenter.com",
+                        }
+                        pw_cookies = []
+                        for name, value in saved_cookies.items():
+                            pw_cookies.append({
+                                "name": str(name),
+                                "value": str(value),
+                                "domain": domain_map.get(retailer, f".{retailer}.com"),
+                                "path": "/",
+                            })
+                        await context.add_cookies(pw_cookies)
+                        logger.info("Test login %s: loaded %d saved session cookies", retailer_name, len(pw_cookies))
+            except Exception as exc:
+                logger.debug("Could not load saved session for test login: %s (continuing without)", exc)
+
             page = await context.new_page()
 
             try:
@@ -633,6 +635,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                 if not nav_failed:
                     await page.wait_for_timeout(3000)
+
+                    # Check for blank page — can happen when cookies/session cause
+                    # a redirect loop or when PerimeterX blocks with an empty response
+                    try:
+                        page_content = await page.content()
+                        if not page_content or len(page_content.strip()) < 100 or page_content.strip() == "<html><head></head><body></body></html>":
+                            logger.warning("Test login %s: blank page detected after navigation — retrying without cookies", retailer_name)
+                            # Clear cookies and retry
+                            await context.clear_cookies()
+                            await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
+                            await page.wait_for_timeout(3000)
+                    except Exception:
+                        pass
 
                 current_url = page.url
 
@@ -813,12 +828,26 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             msg += f" (page shows: {page_desc})"
                         return {"ok": False, "message": msg}
 
-                # Use keyboard.type() for human-like input instead of fill() which is a bot tell
+                # Enter email — try keyboard.type() first, verify, fall back to fill()
                 if email_found and not await _page_has_value(page, email_sel, email):
+                    email_input = page.locator(email_sel).first
                     # Use force=True to bypass any remaining overlay interception
-                    await page.locator(email_sel).first.click(force=True)
-                    await page.locator(email_sel).first.press("Control+a")
+                    await email_input.click(force=True)
+                    await page.wait_for_timeout(300)
+                    await email_input.press("Control+a")
                     await page.keyboard.type(email, delay=40)
+                    await page.wait_for_timeout(500)
+
+                    # Verify it actually took — Target's JS can clear or reset the field
+                    if not await _page_has_value(page, email_sel, email):
+                        logger.warning("Test login %s: keyboard.type() did not fill email — using fill()", retailer_name)
+                        await email_input.fill(email)
+                        await page.wait_for_timeout(300)
+                        # Final check — if still empty, try triple-click + type
+                        if not await _page_has_value(page, email_sel, email):
+                            await email_input.click(click_count=3, force=True)
+                            await page.keyboard.type(email, delay=30)
+                            await page.wait_for_timeout(300)
 
                 # Check if password field is visible yet (single-step) or needs submit first (multi-step)
                 pass_visible = False
