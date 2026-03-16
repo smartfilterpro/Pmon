@@ -12,17 +12,25 @@ import httpx
 
 from pmon.config import AccountCredentials, Profile
 from pmon.models import CheckoutResult, CheckoutStatus
+from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
 
 logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
+        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        f"AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Chrome/{_CHROME_FULL} Safari/537.36"
     ),
     "Accept": "application/json, text/html, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
+    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
 }
 
 
@@ -44,6 +52,7 @@ class ApiCheckout:
                 headers=HEADERS,
                 follow_redirects=True,
                 timeout=httpx.Timeout(20.0),
+                http2=True,
             )
             # Apply stored session cookies if available
             if retailer in self._session_cookies:

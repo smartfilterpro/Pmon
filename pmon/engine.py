@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 
 from pmon.config import Config, Product
@@ -94,7 +95,10 @@ class PmonEngine:
         while self._running:
             self.sync_products_from_db()
             await self._check_all()
-            await asyncio.sleep(self.config.poll_interval)
+            # Add ±20% jitter to poll interval to avoid exact-interval bot fingerprint.
+            # e.g. 30s → sleeps between 24s and 36s each cycle.
+            jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
+            await asyncio.sleep(self.config.poll_interval + jitter)
 
         self.state.is_running = False
 
@@ -105,16 +109,33 @@ class PmonEngine:
         logger.info("Monitor stopped")
 
     async def _check_all(self):
-        """Check stock on all monitored products."""
+        """Check stock on all monitored products.
+
+        Adds small random delays between requests to avoid burst patterns
+        that PerimeterX flags as bot traffic.
+        """
         if not self.config.products:
             return
 
+        # Shuffle order each cycle so we don't always hit the same retailer first
+        products = list(self.config.products)
+        random.shuffle(products)
+
+        # Stagger requests with small delays (0.5-2s between each) to look human.
+        # Simultaneous burst requests to the same retailer from one IP = instant flag.
         tasks = []
-        for product in self.config.products:
+        for i, product in enumerate(products):
             monitor = self._get_monitor(product.retailer)
-            tasks.append(self._check_product(monitor, product))
+            delay = i * random.uniform(0.5, 2.0)
+            tasks.append(self._delayed_check(monitor, product, delay))
 
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _delayed_check(self, monitor, product, delay: float):
+        """Check a product after a short delay."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await self._check_product(monitor, product)
 
     async def _check_product(self, monitor: BaseMonitor, product: Product):
         result = await monitor.safe_check(product.url, product.name)

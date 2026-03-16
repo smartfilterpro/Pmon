@@ -18,17 +18,52 @@ logger = logging.getLogger(__name__)
 # Directory to store browser session data (cookies, etc.)
 SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 
-# Stealth JS to inject into every page to reduce bot detection
+# Stealth JS to inject into every page to reduce bot detection.
+# This patches the most common signals that PerimeterX/DataDome look for.
 STEALTH_JS = """
+// Remove webdriver flag (Playwright sets this by default)
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+delete navigator.__proto__.webdriver;
+
+// Languages & plugins must look realistic
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-window.chrome = {runtime: {}};
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        // Return realistic plugin array (Chrome PDF plugins)
+        const plugins = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+            {name: 'Native Client', filename: 'internal-nacl-plugin'},
+        ];
+        plugins.refresh = () => {};
+        return plugins;
+    }
+});
+
+// Chrome object must exist and look real
+window.chrome = {
+    runtime: {
+        onMessage: {addListener: () => {}, removeListener: () => {}},
+        sendMessage: () => {},
+        connect: () => ({onMessage: {addListener: () => {}}, postMessage: () => {}}),
+    },
+    loadTimes: () => ({}),
+    csi: () => ({}),
+};
+
+// Permissions API patch
 const originalQuery = window.navigator.permissions.query;
 window.navigator.permissions.query = (parameters) =>
     parameters.name === 'notifications'
         ? Promise.resolve({state: Notification.permission})
         : originalQuery(parameters);
+
+// Prevent detection via iframe contentWindow checks
+const origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+Object.getOwnPropertyDescriptor = function(obj, prop) {
+    if (prop === 'webdriver') return undefined;
+    return origGetOwnPropertyDescriptor(obj, prop);
+};
 """
 
 
