@@ -220,6 +220,7 @@ class PmonEngine:
             )
 
         self.state.add_checkout(checkout_result)
+        return checkout_result
 
     async def init_checkout(self):
         """Initialize the checkout engine (API + optional browser)."""

@@ -232,22 +232,20 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return JSONResponse({"error": "Product not found"}, 404)
 
         from pmon.config import Product
+        from pmon.models import CheckoutStatus
         p = Product(url=url, name=product["name"], auto_checkout=True)
         try:
-            await engine.manual_checkout(p, user_id=user["id"], dry_run=True)
+            result = await engine.manual_checkout(p, user_id=user["id"], dry_run=True)
         except Exception as e:
             logger.error("Test cart failed for %s: %s", url, e)
             return {"ok": False, "message": f"Test cart failed: {e}"}
 
-        # Get the most recent checkout log entry for this URL
-        checkouts = db.get_checkout_log(user["id"], limit=5)
-        recent = next((c for c in checkouts if c.get("url") == url), None)
-        if recent and recent.get("status") == "success":
-            return {"ok": True, "message": f"Test cart passed — dry run completed successfully for {product['name']}"}
-        elif recent and recent.get("error_message"):
-            return {"ok": False, "message": f"Test cart failed: {recent['error_message']}"}
+        if result and result.status == CheckoutStatus.SUCCESS:
+            return {"ok": True, "message": f"Test cart passed — dry run completed for {product['name']}"}
+        elif result and result.error_message:
+            return {"ok": False, "message": f"Test cart failed: {result.error_message}"}
         else:
-            status = recent.get("status", "unknown") if recent else "unknown"
+            status = result.status.value if result else "unknown"
             return {"ok": False, "message": f"Test cart finished with status: {status}"}
 
     # --- Retailer accounts ---
