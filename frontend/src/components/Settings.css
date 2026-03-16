@@ -149,6 +149,19 @@
   border: 1px solid var(--border);
 }
 
+/* Session cookie import */
+.cookie-input {
+  width: 100%;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  resize: vertical;
+}
+
 /* 2FA */
 .totp-status-on { color: var(--green) !important; }
 

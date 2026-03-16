@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import uuid
 
 from bs4 import BeautifulSoup
 
 from pmon.models import StockResult, StockStatus
-from .base import BaseMonitor
+from .base import API_HEADERS, BaseMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +30,58 @@ class TargetMonitor(BaseMonitor):
         "ff457966e64d5e877fdbad070f276d18ecec4a01",
     ]
 
+    def __init__(self):
+        super().__init__()
+        # Generate a stable visitor ID for the session (UUID without dashes).
+        # Target's frontend generates this on first visit and sends it with
+        # every Redsky API call.  Without it, PerimeterX flags the request.
+        self._visitor_id: str = uuid.uuid4().hex
+        # Track whether we've "warmed up" by visiting the site first
+        self._warmed_up: bool = False
+
     def _extract_tcin(self, url: str) -> str | None:
         """Extract TCIN (Target product ID) from URL."""
         # Target URLs look like: /p/product-name/-/A-12345678
         match = re.search(r"A-(\d+)", url)
         return match.group(1) if match else None
+
+    async def _warm_up(self, client):
+        """Make an initial page visit to establish cookies/session like a real browser.
+
+        PerimeterX tracks whether a visitor has loaded the real Target page before
+        hitting API endpoints.  Skipping this step causes API calls to get 403'd
+        after a few requests.
+        """
+        if self._warmed_up:
+            return
+        try:
+            resp = await client.get(
+                "https://www.target.com/",
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                },
+            )
+            if resp.status_code == 200:
+                self._warmed_up = True
+                logger.debug("Target: warm-up visit OK, cookies established")
+        except Exception as e:
+            logger.debug(f"Target: warm-up visit failed: {e}")
+
+    def _redsky_headers(self, url: str) -> dict:
+        """Build headers that match what Target's frontend sends to Redsky."""
+        return {
+            **API_HEADERS,
+            "Referer": url,
+            "Origin": "https://www.target.com",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "x-application-name": "web",
+        }
 
     async def check_stock(self, url: str, product_name: str) -> StockResult:
         tcin = self._extract_tcin(url)
@@ -47,29 +96,38 @@ class TargetMonitor(BaseMonitor):
 
         client = await self.get_client()
 
+        # Warm up session on first request (establishes PerimeterX cookies)
+        await self._warm_up(client)
+
         # Try the Redsky PDP API first (faster and more reliable)
         for api_key in self.API_KEYS:
             params = {
                 "key": api_key,
                 "tcin": tcin,
                 "channel": "WEB",
+                "visitor_id": self._visitor_id,
+                "has_financing_options": "true",
+                "pricing_store_id": "3991",
             }
 
             try:
                 resp = await client.get(
                     self.PDP_URL,
                     params=params,
-                    headers={
-                        "Referer": url,
-                        "Origin": "https://www.target.com",
-                        "Accept": "application/json",
-                    },
+                    headers=self._redsky_headers(url),
                 )
                 if resp.status_code == 200:
                     data = resp.json()
                     result = self._parse_pdp(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
                         return result
+                elif resp.status_code == 403:
+                    logger.warning(
+                        f"Target: Redsky returned 403 for {tcin} — rotating visitor_id"
+                    )
+                    # PerimeterX flagged us — rotate visitor ID and reset warm-up
+                    self._visitor_id = uuid.uuid4().hex
+                    self._warmed_up = False
                 elif resp.status_code == 410:
                     logger.debug(f"Redsky pdp_client_v1 returned 410 for {tcin} with key ...{api_key[-6:]}")
             except Exception as e:
@@ -149,9 +207,22 @@ class TargetMonitor(BaseMonitor):
             url,
             headers={
                 "Referer": "https://www.target.com/",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
             },
         )
+        if resp.status_code == 403:
+            logger.warning("Target: 403 on page scrape — PerimeterX blocked, rotating session")
+            self._visitor_id = uuid.uuid4().hex
+            self._warmed_up = False
+            return StockResult(
+                url=url, retailer=self.retailer_name, product_name=product_name,
+                status=StockStatus.ERROR,
+                error_message="Blocked by PerimeterX (403) — will retry with new session",
+            )
         resp.raise_for_status()
         html = resp.text
 
