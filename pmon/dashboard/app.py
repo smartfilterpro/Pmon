@@ -303,14 +303,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 f'{{"x": N, "y": N}}. If not visible, return {{"x": null, "y": null}}.',
             )
             if not answer:
+                logger.info("vision_click('%s'): no response from API", description)
                 return False
+            logger.info("vision_click('%s'): raw response: %s", description, answer.strip()[:200])
             try:
                 coords = json.loads(answer.strip())
                 if coords.get("x") is not None and coords.get("y") is not None:
+                    logger.info("vision_click('%s'): clicking at (%s, %s)", description, coords["x"], coords["y"])
                     await pg.mouse.click(int(coords["x"]), int(coords["y"]))
                     return True
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
+                else:
+                    logger.info("vision_click('%s'): element not visible per vision", description)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                logger.warning("vision_click('%s'): failed to parse JSON: %s", description, exc)
             return False
 
         async def vision_fill(pg, description: str, value: str) -> bool:
@@ -579,6 +584,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # Multi-step: submit email/phone first
                     # Use multiple strategies to find and click the submit/continue button
                     submit_clicked = await click_visible_button(page, submit_sel)
+                    if submit_clicked:
+                        logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
                     if not submit_clicked:
                         # Try Playwright's get_by_role which handles text matching much better
                         for btn_text in ["Continue with email", "Continue", "Sign in", "Next"]:
@@ -587,6 +594,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 if await btn.first.is_visible(timeout=500):
                                     await btn.first.click()
                                     submit_clicked = True
+                                    logger.info("Test login %s: clicked submit via get_by_role('%s')", retailer_name, btn_text)
                                     break
                             except Exception:
                                 continue
@@ -598,14 +606,21 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 if await link.first.is_visible(timeout=500):
                                     await link.first.click()
                                     submit_clicked = True
+                                    logger.info("Test login %s: clicked submit via get_by_text('%s')", retailer_name, link_text)
                                     break
                             except Exception:
                                 continue
                     if not submit_clicked:
                         # Last resort: vision
-                        await vision_click(page, "Continue with email button (NOT passkey)")
+                        logger.info("Test login %s: all selectors failed, trying vision click for submit button", retailer_name)
+                        clicked = await vision_click(page, "Continue with email button (NOT passkey)")
+                        logger.info("Test login %s: vision click result: %s", retailer_name, clicked)
 
                     await page.wait_for_timeout(3000)
+
+                    # Log what page we're on after submit attempt
+                    post_submit_url = page.url
+                    logger.info("Test login %s: after submit, URL is %s", retailer_name, post_submit_url)
 
                     # Check for "Something went wrong" error and retry once
                     error_banner = page.locator('[role="alert"], .error-message, [class*="error" i], [data-test="error"]')
