@@ -495,11 +495,13 @@ class CheckoutEngine:
                     await page.goto(url, wait_until="domcontentloaded")
                     await page.wait_for_timeout(2000)
 
-            # Try to add to cart — decline coverage if offered
-            if not await self._smart_click(
-                page, "Add to cart / Ship it",
-                'button[data-test="shipItButton"], button:has-text("Add to cart"), button:has-text("Ship it")',
-            ):
+            # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
+            add_to_cart_clicked = await self._smart_click(
+                page, "Ship it / Add to cart",
+                'button[data-test="shipItButton"], button[data-test="shippingButton"], '
+                'button:has-text("Ship it"), button:has-text("Add to cart")',
+            )
+            if not add_to_cart_clicked:
                 error = await self._smart_read_error(page)
                 if error:
                     raise Exception(f"Cannot add to cart: {error}")
@@ -509,7 +511,8 @@ class CheckoutEngine:
             # Decline optional coverage/warranty if modal appears
             await self._smart_click(
                 page, "No thanks / Decline coverage",
-                'button[data-test="espModalContent-declineCoverageButton"], button:has-text("No thanks")',
+                'button[data-test="espModalContent-declineCoverageButton"], button:has-text("No thanks"), '
+                'button:has-text("No, thanks")',
                 timeout=2000,
             )
             await page.wait_for_timeout(500)
@@ -517,25 +520,43 @@ class CheckoutEngine:
             # Go to cart via modal button or direct navigation
             if not await self._smart_click(
                 page, "View cart & check out",
-                'button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"]',
+                'button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"], '
+                'button:has-text("View cart"), button:has-text("View cart & check out")',
                 timeout=3000,
             ):
                 await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                 await page.wait_for_timeout(2000)
 
+            # --- Handle delivery method selection on cart page ---
+            # Target requires choosing "Shipping" or "Pickup" for each item.
+            # If there's a "Choose delivery method" prompt, select shipping.
+            await self._target_select_delivery(page)
+
             # Click checkout
             if not await self._smart_click(
                 page, "Check out",
-                'button[data-test="checkout-button"], button:has-text("Check out"), a:has-text("Check out")',
+                'button[data-test="checkout-button"], button:has-text("Check out"), '
+                'a:has-text("Check out"), button[data-test="checkout-btn"]',
             ):
                 raise Exception("Checkout button not found")
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(5000)
+
+            # --- Handle checkout page steps ---
+            # Target's checkout can have multiple pages: delivery, payment, review.
+            # We need to navigate through them to reach "Place your order".
+            await self._target_navigate_checkout(page)
 
             # Place order — assumes saved payment on Target account
+            place_order_sel = (
+                'button:has-text("Place your order"), '
+                'button[data-test="placeOrderButton"], '
+                'button:has-text("Place order")'
+            )
+
             if dry_run:
                 # Verify the "Place your order" button is visible, but don't click it
                 try:
-                    btn = page.locator('button:has-text("Place your order")')
+                    btn = page.locator(place_order_sel)
                     if await btn.first.is_visible(timeout=10000):
                         logger.info("DRY RUN: 'Place your order' button found — checkout flow verified")
                         await self._save_context(context, "target")
@@ -560,7 +581,7 @@ class CheckoutEngine:
 
             if await self._smart_click(
                 page, "Place your order",
-                'button:has-text("Place your order")',
+                place_order_sel,
                 timeout=10000,
             ):
                 await page.wait_for_timeout(5000)
@@ -657,6 +678,143 @@ class CheckoutEngine:
                 logger.debug("Target overlay: no overlay detected")
         except Exception as exc:
             logger.debug("Target overlay dismiss failed (non-fatal): %s", exc)
+
+    async def _target_select_delivery(self, page):
+        """Select shipping/delivery method on Target cart page.
+
+        Target shows "Choose a delivery method" for each item in the cart.
+        We need to click "Shipping" (or the shipping radio/button) so the
+        checkout button becomes active.
+        """
+        try:
+            # Check if delivery method selection is needed
+            needs_delivery = False
+            for indicator in [
+                'text="Choose a delivery method"',
+                'text="Choose delivery method"',
+                '[data-test="fulfillment-cell"]',
+            ]:
+                try:
+                    loc = page.locator(indicator)
+                    if await loc.first.is_visible(timeout=2000):
+                        needs_delivery = True
+                        break
+                except Exception:
+                    continue
+
+            if not needs_delivery:
+                logger.debug("Target cart: delivery method already selected or not needed")
+                return
+
+            logger.info("Target cart: selecting delivery method (Shipping)")
+
+            # Try clicking shipping option — Target uses various UI patterns:
+            # 1. Radio button with "Shipping" / "Ship" label
+            # 2. Button/link with "Shipping" text
+            # 3. Fulfillment cell with shipping icon
+            shipping_clicked = False
+            shipping_selectors = [
+                'button[data-test="fulfillmentOptionShipping"]',
+                'button:has-text("Shipping")',
+                'button:has-text("Ship")',
+                '[data-test="shipping-option"]',
+                'label:has-text("Shipping")',
+                'div[data-test="fulfillment-cell"] button:first-child',
+                'input[type="radio"][value*="SHIP" i]',
+                'button:has-text("Standard")',
+            ]
+            for sel in shipping_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.is_visible(timeout=1000):
+                        await loc.click()
+                        shipping_clicked = True
+                        logger.info("Target cart: clicked shipping via %s", sel)
+                        break
+                except Exception:
+                    continue
+
+            if not shipping_clicked:
+                # Vision fallback
+                shipping_clicked = await self._smart_click(
+                    page, "Shipping delivery option",
+                    "",
+                    timeout=2000,
+                )
+
+            if shipping_clicked:
+                await page.wait_for_timeout(2000)
+
+                # Target sometimes shows a "Save" or "Apply" button after selecting delivery
+                for save_sel in [
+                    'button:has-text("Save")',
+                    'button:has-text("Apply")',
+                    'button:has-text("Update")',
+                ]:
+                    try:
+                        loc = page.locator(save_sel).first
+                        if await loc.is_visible(timeout=1000):
+                            await loc.click()
+                            await page.wait_for_timeout(1000)
+                            break
+                    except Exception:
+                        continue
+            else:
+                logger.warning("Target cart: could not select delivery method — checkout may fail")
+
+        except Exception as exc:
+            logger.debug("Target delivery selection error (non-fatal): %s", exc)
+
+    async def _target_navigate_checkout(self, page):
+        """Navigate through Target's multi-step checkout pages.
+
+        Target's checkout may have these steps:
+        1. Delivery address (if not saved)
+        2. Delivery method / shipping speed
+        3. Payment method (if not saved)
+        4. Order review with "Place your order" button
+
+        We try to click "Continue" / "Save and continue" through each step
+        until we reach the final review page.
+        """
+        continue_sel = (
+            'button[data-test="save-and-continue-button"], '
+            'button:has-text("Save and continue"), '
+            'button:has-text("Continue"), '
+            'button:has-text("Save & continue")'
+        )
+
+        # Click "Continue" / "Save and continue" up to 4 times to progress through steps
+        for step in range(4):
+            # Check if "Place your order" is already visible — we're done
+            try:
+                place_btn = page.locator('button:has-text("Place your order"), button:has-text("Place order")')
+                if await place_btn.first.is_visible(timeout=2000):
+                    logger.info("Target checkout: reached order review page (step %d)", step)
+                    return
+            except Exception:
+                pass
+
+            # Try clicking continue/save
+            try:
+                continue_btn = page.locator(continue_sel).first
+                if await continue_btn.is_visible(timeout=3000):
+                    await continue_btn.click()
+                    logger.info("Target checkout: clicked continue (step %d)", step + 1)
+                    await page.wait_for_timeout(3000)
+                else:
+                    # No continue button and no place order button — try vision
+                    clicked = await self._smart_click(
+                        page, "Continue or Save and continue button",
+                        continue_sel,
+                        timeout=2000,
+                    )
+                    if not clicked:
+                        logger.info("Target checkout: no more continue buttons found (step %d)", step)
+                        break
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                break
 
     async def _sign_in_target(self, page, creds: AccountCredentials):
         await page.goto(
