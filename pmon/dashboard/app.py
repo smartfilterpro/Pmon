@@ -746,6 +746,61 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         post_submit_url = page.url
                         logger.info("Test login %s: after submit, URL is %s", retailer_name, post_submit_url)
 
+                        # Check if we navigated away from login entirely (e.g. Target redirects to homepage)
+                        # This can mean: already logged in, or email accepted and session created
+                        login_path_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com"]
+                        still_on_login_after_email = any(ind in post_submit_url.lower() for ind in login_path_indicators)
+
+                        if not still_on_login_after_email:
+                            logger.info("Test login %s: navigated away from login after email submit (URL: %s) — checking if logged in", retailer_name, post_submit_url)
+                            # Check for success indicators on the page we landed on
+                            success_el = page.locator(sel["success"])
+                            try:
+                                if await success_el.first.is_visible(timeout=3000):
+                                    logger.info("Test login %s: success indicator found after email redirect — already logged in", retailer_name)
+                                    # Save cookies and return success
+                                    try:
+                                        browser_cookies = await context.cookies()
+                                        cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                                        if cookies_dict:
+                                            import json as _json
+                                            db.set_retailer_session(user["id"], retailer, cookies_json=_json.dumps(cookies_dict))
+                                            if engine.checkout_engine:
+                                                engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                                engine.checkout_engine._api.reset_client(retailer)
+                                            logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                                    except Exception as cookie_err:
+                                        logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+                                    return {"ok": True, "message": f"{retailer_name} login successful — already signed in, session cookies saved"}
+                            except Exception:
+                                pass
+
+                            # No success indicator but we're on the homepage — use vision to check
+                            page_desc = await vision_read_page(page)
+                            # If page looks like a normal homepage (not an error), treat as likely success
+                            # since Target redirects to homepage after successful auth
+                            if page_desc:
+                                desc_lower = page_desc.lower()
+                                error_phrases = ["error", "incorrect", "invalid", "denied", "blocked", "failed"]
+                                if not any(phrase in desc_lower for phrase in error_phrases):
+                                    logger.info("Test login %s: on homepage with no errors — treating as success (page: %s)", retailer_name, page_desc[:100])
+                                    try:
+                                        browser_cookies = await context.cookies()
+                                        cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                                        if cookies_dict:
+                                            import json as _json
+                                            db.set_retailer_session(user["id"], retailer, cookies_json=_json.dumps(cookies_dict))
+                                            if engine.checkout_engine:
+                                                engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                                engine.checkout_engine._api.reset_client(retailer)
+                                            logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                                    except Exception as cookie_err:
+                                        logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+                                    return {"ok": True, "message": f"{retailer_name} login successful — redirected to homepage, session cookies saved"}
+                                else:
+                                    msg = f"{retailer_name} login may have failed — redirected to: {page_desc[:200]}"
+                                    return {"ok": False, "message": msg}
+
                         # Check for "Something went wrong" error and retry once
                         error_banner = page.locator('[role="alert"], .error-message, [class*="error" i], [data-test="error"]')
                         try:

@@ -629,6 +629,14 @@ class CheckoutEngine:
             ], 'button[type="submit"], button:has-text("Continue")')
             await page.wait_for_timeout(3000)
 
+            # Check if we navigated away from login after email submit
+            # (e.g. Target may redirect to homepage if already authenticated)
+            post_email_url = page.url
+            login_indicators = ["/login", "/signin", "/sign-in", "/identity"]
+            if not any(ind in post_email_url.lower() for ind in login_indicators):
+                logger.info("Target sign-in: navigated away from login after email submit (%s) — may already be signed in", post_email_url)
+                return  # Let the caller check success via URL/cookies
+
             # Step 3: Auth method picker — Target shows "Enter your password"
             pw_option_clicked = False
 
