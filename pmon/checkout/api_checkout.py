@@ -347,75 +347,135 @@ class ApiCheckout:
         return None
 
     async def _tgt_add_to_cart(self, client: httpx.AsyncClient, tcin: str) -> bool:
-        """Add item to Target cart via carts.target.com API."""
-        try:
-            resp = await client.post(
-                f"https://carts.target.com/web_checkouts/v1/cart_items"
-                f"?key={self._TGT_API_KEY}",
-                json={
-                    "cart_type": "REGULAR",
-                    "channel_id": 10,
-                    "shopping_context": "DIGITAL",
-                    "cart_item": {
-                        "tcin": tcin,
-                        "quantity": 1,
-                        "item_channel_id": 10,
+        """Add item to Target cart via carts.target.com API.
+
+        Target requires a fulfillment method (STS = Ship To Store, DIGITAL = Ship
+        to address).  Without it the cart shows "Choose delivery method" errors.
+        """
+        # Try shipping first, then pickup as fallback
+        for fulfillment_type in ("DIGITAL", "STS"):
+            try:
+                resp = await client.post(
+                    f"https://carts.target.com/web_checkouts/v1/cart_items"
+                    f"?key={self._TGT_API_KEY}",
+                    json={
+                        "cart_type": "REGULAR",
+                        "channel_id": 10,
+                        "shopping_context": fulfillment_type,
+                        "cart_item": {
+                            "tcin": tcin,
+                            "quantity": 1,
+                            "item_channel_id": 10,
+                            "fulfillment": {
+                                "type": "SHIPT" if fulfillment_type == "DIGITAL" else "PICKUP",
+                                "shipping_method": "STANDARD",
+                            },
+                        },
                     },
-                },
-                headers={
-                    **HEADERS,
-                    "Content-Type": "application/json",
-                    "Origin": "https://www.target.com",
-                    "Referer": "https://www.target.com/",
-                },
-            )
-            if resp.status_code in (200, 201):
-                logger.info("Target: added TCIN %s to cart", tcin)
-                return True
-            elif resp.status_code == 401:
-                logger.warning("Target: session expired during cart add")
-            elif resp.status_code == 403:
-                logger.warning("Target: blocked (403) on cart add — PerimeterX")
-            else:
-                logger.warning("Target: cart add failed (HTTP %d): %s", resp.status_code, resp.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("Target cart add error: %s", exc)
-            return False
+                    headers={
+                        **HEADERS,
+                        "Content-Type": "application/json",
+                        "Origin": "https://www.target.com",
+                        "Referer": "https://www.target.com/",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-site",
+                    },
+                )
+                if resp.status_code in (200, 201):
+                    logger.info("Target: added TCIN %s to cart (fulfillment=%s)", tcin, fulfillment_type)
+                    return True
+                elif resp.status_code == 401:
+                    logger.warning("Target: session expired during cart add")
+                    return False
+                elif resp.status_code == 403:
+                    logger.warning("Target: blocked (403) on cart add — PerimeterX")
+                    return False
+                else:
+                    body = resp.text[:300]
+                    logger.debug("Target: cart add failed for %s (fulfillment=%s, HTTP %d): %s",
+                                 tcin, fulfillment_type, resp.status_code, body)
+                    # If this fulfillment type isn't available, try the next one
+                    continue
+            except Exception as exc:
+                logger.error("Target cart add error: %s", exc)
+                return False
+
+        logger.warning("Target: all fulfillment methods failed for TCIN %s", tcin)
+        return False
 
     async def _tgt_checkout(self, client: httpx.AsyncClient) -> bool:
-        """Initiate Target checkout."""
+        """Initiate Target checkout.
+
+        Target's checkout requires:
+        1. Cart must have items with a delivery method set
+        2. POST to /checkout to initiate
+        3. If shipping address / payment are saved, the order can proceed
+        """
+        api_headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Origin": "https://www.target.com",
+            "Referer": "https://www.target.com/cart",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+        }
+
         try:
-            # First get cart to ensure items are present
+            # Step 1: Load cart to ensure items are present and check fulfillment
             cart_resp = await client.get(
                 f"https://carts.target.com/web_checkouts/v1/cart"
                 f"?cart_type=REGULAR"
-                f"&field_groups=ADDRESSES,CART_ITEMS,SUMMARY"
-                f"&key={self._TGT_API_KEY}"
-                f"&client_feature=cart",
+                f"&field_groups=ADDRESSES,CART_ITEMS,SUMMARY,FULFILLMENT"
+                f"&key={self._TGT_API_KEY}",
                 headers={**HEADERS, "Accept": "application/json"},
             )
             if cart_resp.status_code != 200:
-                logger.warning("Target: could not load cart for checkout")
+                logger.warning("Target: could not load cart for checkout (HTTP %d)", cart_resp.status_code)
                 return False
 
-            # Initiate checkout
+            cart_data = cart_resp.json()
+
+            # Step 2: Check if cart items need fulfillment method set
+            # If items don't have fulfillment selected, set them to shipping
+            cart_items = cart_data.get("cart_items", [])
+            for item in cart_items:
+                fulfillment = item.get("fulfillment", {})
+                if not fulfillment.get("type"):
+                    # Set fulfillment to shipping for this item
+                    cart_item_id = item.get("cart_item_id")
+                    if cart_item_id:
+                        try:
+                            await client.put(
+                                f"https://carts.target.com/web_checkouts/v1/cart_items/{cart_item_id}"
+                                f"?key={self._TGT_API_KEY}",
+                                json={
+                                    "cart_type": "REGULAR",
+                                    "fulfillment": {
+                                        "type": "SHIPT",
+                                        "shipping_method": "STANDARD",
+                                    },
+                                },
+                                headers=api_headers,
+                            )
+                            logger.info("Target: set fulfillment to SHIPT for cart item %s", cart_item_id)
+                        except Exception as exc:
+                            logger.debug("Target: failed to set fulfillment: %s", exc)
+
+            # Step 3: Initiate checkout
             checkout_resp = await client.post(
                 f"https://carts.target.com/web_checkouts/v1/checkout"
                 f"?key={self._TGT_API_KEY}",
                 json={"cart_type": "REGULAR"},
-                headers={
-                    **HEADERS,
-                    "Content-Type": "application/json",
-                    "Origin": "https://www.target.com",
-                    "Referer": "https://www.target.com/cart",
-                },
+                headers=api_headers,
             )
             if checkout_resp.status_code in (200, 201):
                 logger.info("Target: checkout initiated successfully")
                 return True
 
-            logger.warning("Target: checkout failed (HTTP %d)", checkout_resp.status_code)
+            logger.warning("Target: checkout failed (HTTP %d): %s",
+                          checkout_resp.status_code, checkout_resp.text[:200])
             return False
         except Exception as exc:
             logger.error("Target checkout error: %s", exc)
