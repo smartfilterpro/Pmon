@@ -443,16 +443,23 @@ class CheckoutEngine:
 
     async def _get_context(self, retailer: str):
         """Get or create a browser context with persistent cookies and stealth."""
+        from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
+
         storage_path = SESSION_DIR / f"{retailer}.json"
         ctx_kwargs = dict(
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
+                f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                f"AppleWebKit/537.36 (KHTML, like Gecko) "
+                f"Chrome/{_CHROME_FULL} Safari/537.36"
             ),
             viewport={"width": 1366, "height": 768},
             locale="en-US",
             timezone_id="America/New_York",
+            extra_http_headers={
+                "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            },
         )
         if storage_path.exists():
             ctx_kwargs["storage_state"] = str(storage_path)
