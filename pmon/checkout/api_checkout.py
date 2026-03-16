@@ -87,89 +87,330 @@ class ApiCheckout:
                 error_message=str(e),
             )
 
+    # Target API constants (from network analysis)
+    _TGT_API_KEY = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
+    _TGT_CLIENT_ID = "ecom-web-1.0.0"
+
     async def _checkout_target(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
     ) -> CheckoutResult:
-        """Target API checkout flow."""
-        client = self._get_client("target")
+        """Target API checkout flow.
 
-        # Extract TCIN from URL
+        Uses real Target API endpoints discovered from network analysis:
+        - Auth: OAuth code grant via gsp.target.com (multi-step: email → method → password)
+        - Product: redsky.target.com/redsky_aggregations/v1/web/
+        - Cart: carts.target.com/web_checkouts/v1/cart
+        - Profile: api.target.com/guest_profile_details/v1/
+
+        Session cookies are the most reliable auth method since Target uses
+        PerimeterX bot protection on login pages. Import cookies via Dashboard.
+        """
+        client = self._get_client("target")
+        retailer = "target"
+
+        # Extract TCIN from URL (Target product ID)
+        # Formats: /A-12345678, /-/A-12345678, ?preselect=12345678
         match = re.search(r"A-(\d+)", url)
         if not match:
+            match = re.search(r"preselect=(\d+)", url)
+        if not match:
             return CheckoutResult(
-                url=url, retailer="target", product_name=product_name,
-                status=CheckoutStatus.FAILED, error_message="Could not extract TCIN",
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Could not extract TCIN from Target URL",
             )
         tcin = match.group(1)
 
-        # Step 1: Load login page for session cookies
-        await client.get("https://www.target.com/login")
+        # Check for session cookies — most reliable auth method
+        has_session = bool(self._session_cookies.get("target"))
+        if not has_session:
+            logger.warning("Target: no session cookies — attempting GSP OAuth login")
+            login_ok = await self._tgt_gsp_login(client, creds)
+            if not login_ok:
+                return CheckoutResult(
+                    url=url, retailer=retailer, product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message=(
+                        "Target login failed (PerimeterX may be blocking). "
+                        "Import session cookies via Dashboard > Accounts > Target > Import Cookies"
+                    ),
+                )
 
-        # Step 2: Authenticate
-        auth_resp = await client.post(
-            "https://login.target.com/gsp/static/v1/login/token",
-            json={
-                "username": creds.email,
-                "password": creds.password,
-                "device_info": {"type": "WEB"},
-            },
-            headers={
-                **HEADERS,
-                "Content-Type": "application/json",
-                "Origin": "https://www.target.com",
-                "Referer": "https://www.target.com/login",
-            },
-        )
-
-        if auth_resp.status_code not in (200, 201):
+        # Step 1: Validate session by checking cart or profile
+        session_valid = await self._tgt_validate_session(client)
+        if not session_valid:
             return CheckoutResult(
-                url=url, retailer="target", product_name=product_name,
+                url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"Auth failed (HTTP {auth_resp.status_code}): {auth_resp.text[:200]}",
+                error_message="Target session expired — re-import cookies via Dashboard",
             )
 
-        # Step 2: Add to cart
-        cart_resp = await client.post(
-            "https://carts.target.com/web_checkouts/v1/cart_items",
-            json={
-                "cart_type": "REGULAR",
-                "channel_id": 10,
-                "shopping_context": "DIGITAL",
-                "cart_item": {
-                    "tcin": tcin,
-                    "quantity": 1,
-                    "item_channel_id": 10,
-                },
-            },
-            headers={**HEADERS, "Content-Type": "application/json"},
-        )
-
-        if cart_resp.status_code not in (200, 201):
+        # Step 2: Look up product via Redsky API to verify availability
+        product_info = await self._tgt_lookup_product(client, tcin)
+        if product_info and not product_info.get("available", True):
             return CheckoutResult(
-                url=url, retailer="target", product_name=product_name,
+                url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"Add to cart failed (HTTP {cart_resp.status_code})",
+                error_message="Product is out of stock on Target",
             )
 
-        # Step 3: Initiate checkout
-        checkout_resp = await client.post(
-            "https://carts.target.com/web_checkouts/v1/checkout",
-            json={"cart_type": "REGULAR"},
-            headers={**HEADERS, "Content-Type": "application/json"},
-        )
-
-        if checkout_resp.status_code in (200, 201):
+        # Step 3: Add to cart via carts.target.com
+        cart_ok = await self._tgt_add_to_cart(client, tcin)
+        if not cart_ok:
             return CheckoutResult(
-                url=url, retailer="target", product_name=product_name,
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Failed to add item to Target cart",
+            )
+
+        # Step 4: Initiate checkout
+        checkout_ok = await self._tgt_checkout(client)
+        if checkout_ok:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.SUCCESS,
                 error_message="Checkout initiated — check your Target account for order confirmation",
             )
 
         return CheckoutResult(
-            url=url, retailer="target", product_name=product_name,
+            url=url, retailer=retailer, product_name=product_name,
             status=CheckoutStatus.FAILED,
-            error_message=f"Checkout API returned HTTP {checkout_resp.status_code}",
+            error_message="Target checkout API call failed",
         )
+
+    async def _tgt_gsp_login(self, client: httpx.AsyncClient, creds: AccountCredentials) -> bool:
+        """Attempt Target OAuth login via GSP.
+
+        Target login is a multi-step OAuth code grant:
+        1. Load login page (sets PerimeterX cookies, session cookies)
+        2. POST email to get auth methods
+        3. POST password to authenticate
+        4. Receive OAuth code redirect → validate token
+
+        This often fails due to PerimeterX. Session cookie import is preferred.
+        """
+        if not creds.email or not creds.password:
+            return False
+
+        try:
+            # Step 1: Load login page to get initial cookies
+            login_url = (
+                f"https://www.target.com/login?"
+                f"client_id={self._TGT_CLIENT_ID}"
+                f"&ui_namespace=ui-default"
+                f"&back_button_action=browser"
+                f"&keep_me_signed_in=true"
+                f"&actions=create_session_signin"
+            )
+            resp = await client.get(login_url, headers={**HEADERS, "Accept": "text/html,*/*"})
+
+            if resp.status_code == 403:
+                logger.warning("Target: PerimeterX blocked login page")
+                return False
+
+            # Step 2: Submit email via GSP auth endpoint
+            auth_resp = await client.post(
+                f"https://gsp.target.com/gsp/authentications/v1/auth_codes"
+                f"?client_id={self._TGT_CLIENT_ID}",
+                json={
+                    "username": creds.email,
+                    "credential_type_code": "email",
+                    "keep_me_signed_in": True,
+                },
+                headers={
+                    **HEADERS,
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.target.com",
+                    "Referer": login_url,
+                },
+            )
+
+            if auth_resp.status_code not in (200, 201, 202):
+                logger.warning("Target: GSP email step failed (HTTP %d)", auth_resp.status_code)
+                return False
+
+            # Step 3: Submit password
+            pwd_resp = await client.post(
+                f"https://gsp.target.com/gsp/authentications/v1/auth_codes"
+                f"?client_id={self._TGT_CLIENT_ID}",
+                json={
+                    "username": creds.email,
+                    "password": creds.password,
+                    "credential_type_code": "password",
+                    "keep_me_signed_in": True,
+                },
+                headers={
+                    **HEADERS,
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.target.com",
+                    "Referer": login_url,
+                },
+            )
+
+            if pwd_resp.status_code not in (200, 201):
+                logger.warning("Target: GSP password step failed (HTTP %d)", pwd_resp.status_code)
+                return False
+
+            # Extract auth code from response
+            try:
+                auth_data = pwd_resp.json()
+                code = auth_data.get("code") or auth_data.get("auth_code")
+            except Exception:
+                code = None
+
+            if not code:
+                # Check if redirect happened with code in URL
+                logger.warning("Target: no auth code in GSP response")
+                return False
+
+            # Step 4: Validate token
+            token_resp = await client.post(
+                "https://gsp.target.com/gsp/oauth_validations/v3/token_validations",
+                json={"code": code, "client_id": self._TGT_CLIENT_ID},
+                headers={
+                    **HEADERS,
+                    "Content-Type": "application/json",
+                },
+            )
+
+            if token_resp.status_code == 200:
+                logger.info("Target: GSP OAuth login successful")
+                return True
+
+            logger.warning("Target: token validation failed (HTTP %d)", token_resp.status_code)
+            return False
+
+        except Exception as exc:
+            logger.error("Target GSP login error: %s", exc)
+            return False
+
+    async def _tgt_validate_session(self, client: httpx.AsyncClient) -> bool:
+        """Check if the current Target session is valid."""
+        try:
+            resp = await client.get(
+                f"https://api.target.com/guest_profile_details/v1/profile_details/profiles"
+                f"?fields=address,affiliation,loyalty,paid",
+                headers={**HEADERS, "Accept": "application/json"},
+            )
+            # 200 = authenticated, 401/403 = session expired
+            if resp.status_code == 200:
+                logger.info("Target: session is valid")
+                return True
+
+            # Also try cart endpoint as fallback validation
+            cart_resp = await client.get(
+                f"https://carts.target.com/web_checkouts/v1/cart"
+                f"?cart_type=REGULAR"
+                f"&field_groups=CART_ITEMS,SUMMARY"
+                f"&key={self._TGT_API_KEY}",
+                headers={**HEADERS, "Accept": "application/json"},
+            )
+            if cart_resp.status_code == 200:
+                logger.info("Target: session valid (via cart)")
+                return True
+
+            return False
+        except Exception as exc:
+            logger.debug("Target session validation error: %s", exc)
+            return False
+
+    async def _tgt_lookup_product(self, client: httpx.AsyncClient, tcin: str) -> dict | None:
+        """Look up product details via Redsky API."""
+        try:
+            resp = await client.get(
+                f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+                f"?key={self._TGT_API_KEY}"
+                f"&tcin={tcin}"
+                f"&channel=WEB",
+                headers={**HEADERS, "Accept": "application/json"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                product = data.get("data", {}).get("product", {})
+                avail = product.get("fulfillment", {})
+                is_available = any(
+                    method.get("is_available", False)
+                    for method in avail.get("shipping_options", {}).get("availability_status_v2", [])
+                ) if avail else True  # default to True if we can't determine
+                return {"available": is_available, "product": product}
+        except Exception as exc:
+            logger.debug("Target Redsky lookup failed: %s", exc)
+        return None
+
+    async def _tgt_add_to_cart(self, client: httpx.AsyncClient, tcin: str) -> bool:
+        """Add item to Target cart via carts.target.com API."""
+        try:
+            resp = await client.post(
+                f"https://carts.target.com/web_checkouts/v1/cart_items"
+                f"?key={self._TGT_API_KEY}",
+                json={
+                    "cart_type": "REGULAR",
+                    "channel_id": 10,
+                    "shopping_context": "DIGITAL",
+                    "cart_item": {
+                        "tcin": tcin,
+                        "quantity": 1,
+                        "item_channel_id": 10,
+                    },
+                },
+                headers={
+                    **HEADERS,
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.target.com",
+                    "Referer": "https://www.target.com/",
+                },
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Target: added TCIN %s to cart", tcin)
+                return True
+            elif resp.status_code == 401:
+                logger.warning("Target: session expired during cart add")
+            elif resp.status_code == 403:
+                logger.warning("Target: blocked (403) on cart add — PerimeterX")
+            else:
+                logger.warning("Target: cart add failed (HTTP %d): %s", resp.status_code, resp.text[:200])
+            return False
+        except Exception as exc:
+            logger.error("Target cart add error: %s", exc)
+            return False
+
+    async def _tgt_checkout(self, client: httpx.AsyncClient) -> bool:
+        """Initiate Target checkout."""
+        try:
+            # First get cart to ensure items are present
+            cart_resp = await client.get(
+                f"https://carts.target.com/web_checkouts/v1/cart"
+                f"?cart_type=REGULAR"
+                f"&field_groups=ADDRESSES,CART_ITEMS,SUMMARY"
+                f"&key={self._TGT_API_KEY}"
+                f"&client_feature=cart",
+                headers={**HEADERS, "Accept": "application/json"},
+            )
+            if cart_resp.status_code != 200:
+                logger.warning("Target: could not load cart for checkout")
+                return False
+
+            # Initiate checkout
+            checkout_resp = await client.post(
+                f"https://carts.target.com/web_checkouts/v1/checkout"
+                f"?key={self._TGT_API_KEY}",
+                json={"cart_type": "REGULAR"},
+                headers={
+                    **HEADERS,
+                    "Content-Type": "application/json",
+                    "Origin": "https://www.target.com",
+                    "Referer": "https://www.target.com/cart",
+                },
+            )
+            if checkout_resp.status_code in (200, 201):
+                logger.info("Target: checkout initiated successfully")
+                return True
+
+            logger.warning("Target: checkout failed (HTTP %d)", checkout_resp.status_code)
+            return False
+        except Exception as exc:
+            logger.error("Target checkout error: %s", exc)
+            return False
 
     async def _checkout_walmart(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
