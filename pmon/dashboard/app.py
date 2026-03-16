@@ -574,6 +574,53 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     pass_sel = sel["password"]
                     submit_sel = sel["submit"]
 
+                # --- Dismiss overlay modals that block interaction ---
+                # Target (and others) show floating-ui consent/privacy overlays
+                # that intercept pointer events.  Try multiple strategies:
+                overlay_selectors = [
+                    # Target's floating-ui overlay + close/accept buttons inside it
+                    '[data-floating-ui-portal] button',
+                    '[data-floating-ui-portal] [class*="close" i]',
+                    'div[class*="overlay" i] button',
+                    # Generic cookie / consent banners
+                    'button:has-text("Accept")',
+                    'button:has-text("I Accept")',
+                    'button:has-text("Accept All")',
+                    'button:has-text("Close")',
+                    '#onetrust-accept-btn-handler',
+                    '.onetrust-close-btn-handler',
+                    'button[id*="consent" i]',
+                    'button[class*="consent" i]',
+                ]
+                for overlay_sel in overlay_selectors:
+                    try:
+                        btn = page.locator(overlay_sel).first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click(timeout=2000)
+                            await page.wait_for_timeout(500)
+                            logger.info("Test login %s: dismissed overlay via %s", retailer_name, overlay_sel)
+                            break
+                    except Exception:
+                        continue
+                else:
+                    # Last resort: if a floating-ui-portal overlay exists, remove it via JS
+                    try:
+                        removed = await page.evaluate("""() => {
+                            const portal = document.querySelector('[data-floating-ui-portal]');
+                            if (portal) { portal.remove(); return true; }
+                            const overlay = document.querySelector('div[class*="overlay"]');
+                            if (overlay && overlay.style.pointerEvents !== 'none') {
+                                overlay.style.pointerEvents = 'none';
+                                return true;
+                            }
+                            return false;
+                        }""")
+                        if removed:
+                            logger.info("Test login %s: removed blocking overlay via JS", retailer_name)
+                            await page.wait_for_timeout(300)
+                    except Exception:
+                        pass
+
                 # Wait for the email field to appear (up to 15s for JS-heavy pages)
                 email_found = False
                 try:
@@ -596,7 +643,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                 # Use keyboard.type() for human-like input instead of fill() which is a bot tell
                 if email_found and not await _page_has_value(page, email_sel, email):
-                    await page.locator(email_sel).first.click()
+                    # Use force=True to bypass any remaining overlay interception
+                    await page.locator(email_sel).first.click(force=True)
                     await page.locator(email_sel).first.press("Control+a")
                     await page.keyboard.type(email, delay=40)
 
