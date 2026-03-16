@@ -341,7 +341,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             )
 
         async def click_visible_button(pg, selector: str, timeout: int = 3000) -> bool:
-            """Click the first *visible* element matching the comma-separated selector."""
+            """Click the first *visible* element matching the comma-separated selector.
+            Returns False if no visible match found — caller should use vision fallback."""
             for sel_part in selector.split(","):
                 sel_part = sel_part.strip()
                 try:
@@ -351,12 +352,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         return True
                 except Exception:
                     continue
-            # Fallback: try the full selector (Playwright's first-match)
-            try:
-                await pg.click(selector, timeout=timeout)
-                return True
-            except Exception:
-                return False
+            return False
 
         LOGIN_URLS = {
             "target": "https://www.target.com/login",
@@ -580,7 +576,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 else:
                     # Multi-step: submit email/phone first
                     if not await click_visible_button(page, submit_sel):
-                        await vision_click(page, "Continue / Next button")
+                        await vision_click(page, "Continue with email button (NOT passkey)")
                     await page.wait_for_timeout(3000)
 
                     # Check for "Something went wrong" error and retry once
