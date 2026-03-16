@@ -743,50 +743,59 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                 # Check for success indicators
                 final_url = page.url
-                success_el = page.locator(sel["success"])
-                error_el = page.locator(sel["error"])
+                logger.info("Test login %s: final URL after submit: %s", retailer_name, final_url)
 
-                still_on_login = "/login" in final_url or "/signin" in final_url
-                has_success = False
+                still_on_login = "/login" in final_url or "/signin" in final_url or "/sign-in" in final_url or "/identity" in final_url
+
+                # If we navigated away from the login page, that's a strong success signal
                 if not still_on_login:
+                    # Check for explicit error messages on the page (login-specific errors only)
+                    error_el = page.locator(sel["error"])
+                    has_error = False
+                    error_text = ""
                     try:
-                        has_success = await success_el.first.is_visible(timeout=2000)
+                        if await error_el.first.is_visible(timeout=1000):
+                            error_text = (await error_el.first.inner_text(timeout=1000)).strip()
+                            # Only count as login error if text is login-related
+                            login_error_keywords = ["password", "credentials", "sign in", "login", "incorrect", "invalid", "unauthorized"]
+                            if error_text and any(kw in error_text.lower() for kw in login_error_keywords):
+                                has_error = True
                     except Exception:
                         pass
-                has_error = False
+
+                    if has_error and error_text:
+                        msg = f"{retailer_name} login failed: {error_text[:200]}"
+                        logger.warning("Test login failed for %s user=%s: %s", retailer_name, email, error_text)
+                        db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
+                        return {"ok": False, "message": msg}
+
+                    # Not on login page + no login error = success
+                    logger.info("Test login successful for %s user=%s (navigated to %s)", retailer_name, email, final_url)
+                    return {"ok": True, "message": f"{retailer_name} login successful"}
+
+                # Still on login page — check why
+                # Look for error messages
+                error_el = page.locator(sel["error"])
                 error_text = ""
                 try:
                     if await error_el.first.is_visible(timeout=1000):
-                        has_error = True
-                        error_text = await error_el.first.inner_text(timeout=1000)
+                        error_text = (await error_el.first.inner_text(timeout=1000)).strip()
                 except Exception:
                     pass
 
-                if has_error and error_text:
-                    msg = f"{retailer_name} login failed: {error_text.strip()[:200]}"
-                    logger.warning("Test login failed for %s user=%s: %s", retailer_name, email, error_text.strip())
+                if error_text:
+                    msg = f"{retailer_name} login failed: {error_text[:200]}"
+                    logger.warning("Test login failed for %s user=%s: %s", retailer_name, email, error_text)
                     db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
                     return {"ok": False, "message": msg}
 
-                if has_success or (not still_on_login and not has_error):
-                    logger.info("Test login successful for %s user=%s", retailer_name, email)
-                    return {"ok": True, "message": f"{retailer_name} login successful"}
-
-                if still_on_login:
-                    # Use vision to understand why we're still on login
-                    page_desc = await vision_read_page(page)
-                    msg = f"{retailer_name} login failed — still on login page (wrong email/password?)"
-                    if page_desc:
-                        msg += f" (page shows: {page_desc})"
-                    logger.warning("Test login failed for %s user=%s: still on login page", retailer_name, email)
-                    db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
-                    return {"ok": False, "message": msg}
-
-                # Ambiguous — use vision for diagnosis
+                # No error text but still on login page
                 page_desc = await vision_read_page(page)
-                msg = f"{retailer_name} login result unclear — check credentials and try in a browser"
+                msg = f"{retailer_name} login failed — still on login page (wrong email/password?)"
                 if page_desc:
                     msg += f" (page shows: {page_desc})"
+                logger.warning("Test login failed for %s user=%s: still on login page", retailer_name, email)
+                db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
                 return {"ok": False, "message": msg}
 
             finally:
