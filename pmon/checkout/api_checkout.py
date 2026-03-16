@@ -172,7 +172,20 @@ class ApiCheckout:
                 error_message="Failed to add item to Target cart",
             )
 
-        # Step 4: Initiate checkout
+        # Step 4: Set shipping address on the cart
+        address_ok = await self._tgt_set_shipping_address(client, profile)
+        if not address_ok:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message=(
+                    "Failed to set shipping address on Target cart. "
+                    "Make sure you have a saved address in your Target account, "
+                    "or configure a shipping profile in Settings."
+                ),
+            )
+
+        # Step 5: Initiate checkout
         checkout_ok = await self._tgt_checkout(client)
         if checkout_ok:
             return CheckoutResult(
@@ -402,6 +415,156 @@ class ApiCheckout:
                 return False
 
         logger.warning("Target: all fulfillment methods failed for TCIN %s", tcin)
+        return False
+
+    async def _tgt_set_shipping_address(self, client: httpx.AsyncClient, profile: Profile) -> bool:
+        """Set shipping address on the Target cart.
+
+        Target requires a shipping address on the cart before checkout.
+        Strategy:
+        1. Try to fetch saved addresses from Target's guest profile API
+        2. If found, use the default/first saved address
+        3. If no saved address, use the Profile from config (if populated)
+        4. Apply the address to the cart via PUT
+        """
+        api_headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Origin": "https://www.target.com",
+            "Referer": "https://www.target.com/checkout",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+        }
+
+        address = None
+
+        # Strategy 1: Get saved address from Target profile
+        try:
+            resp = await client.get(
+                "https://api.target.com/guest_profile_details/v1/profile_details/profiles"
+                "?fields=address",
+                headers={**HEADERS, "Accept": "application/json"},
+            )
+            if resp.status_code == 200:
+                profile_data = resp.json()
+                addresses = profile_data.get("addresses", [])
+                # Prefer default address, then first available
+                for addr in addresses:
+                    if addr.get("is_default"):
+                        address = addr
+                        break
+                if not address and addresses:
+                    address = addresses[0]
+
+                if address:
+                    logger.info("Target: using saved address: %s, %s %s",
+                                address.get("city", ""), address.get("state", ""),
+                                address.get("zip_code", ""))
+        except Exception as exc:
+            logger.debug("Target: failed to fetch saved addresses: %s", exc)
+
+        # Strategy 2: Fall back to Profile from config
+        if not address and profile.address_line1 and profile.zip_code:
+            address = {
+                "first_name": profile.first_name,
+                "last_name": profile.last_name,
+                "address_line1": profile.address_line1,
+                "address_line2": profile.address_line2 or "",
+                "city": profile.city,
+                "state": profile.state,
+                "zip_code": profile.zip_code,
+                "phone": profile.phone or "",
+            }
+            logger.info("Target: using profile address: %s, %s %s",
+                        profile.city, profile.state, profile.zip_code)
+
+        if not address:
+            logger.warning("Target: no shipping address available (no saved address in Target account, "
+                          "no profile configured)")
+            return False
+
+        # Normalize field names (Target profile API may use different keys)
+        shipping_address = {
+            "first_name": address.get("first_name", ""),
+            "last_name": address.get("last_name", ""),
+            "address_line1": address.get("address_line1") or address.get("street1", ""),
+            "address_line2": address.get("address_line2") or address.get("street2", ""),
+            "city": address.get("city", ""),
+            "state": address.get("state", ""),
+            "zip_code": address.get("zip_code") or address.get("zip", ""),
+            "phone": address.get("phone") or address.get("mobile", ""),
+            "country": "US",
+            "save_as_default": False,
+        }
+
+        # Apply address to the cart via the checkout addresses endpoint
+        try:
+            resp = await client.put(
+                f"https://carts.target.com/web_checkouts/v1/checkout_address"
+                f"?key={self._TGT_API_KEY}",
+                json={
+                    "cart_type": "REGULAR",
+                    "address_type": "SHIPPING",
+                    "address": shipping_address,
+                },
+                headers=api_headers,
+            )
+            if resp.status_code in (200, 201, 204):
+                logger.info("Target: shipping address set via checkout_address endpoint")
+                return True
+
+            # If that endpoint doesn't work, try alternative cart address endpoint
+            logger.debug("Target: checkout_address returned HTTP %d: %s",
+                        resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.debug("Target: checkout_address endpoint failed: %s", exc)
+
+        # Fallback: Try setting address via the cart delivery address endpoint
+        try:
+            resp = await client.put(
+                f"https://carts.target.com/web_checkouts/v1/cart"
+                f"?cart_type=REGULAR"
+                f"&key={self._TGT_API_KEY}",
+                json={
+                    "cart_type": "REGULAR",
+                    "shipping_address": shipping_address,
+                },
+                headers=api_headers,
+            )
+            if resp.status_code in (200, 201, 204):
+                logger.info("Target: shipping address set via cart update")
+                return True
+
+            logger.debug("Target: cart address update returned HTTP %d: %s",
+                        resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.debug("Target: cart address update failed: %s", exc)
+
+        # Fallback 2: Try PUT on checkout with address in the body
+        try:
+            resp = await client.put(
+                f"https://carts.target.com/web_checkouts/v1/checkout"
+                f"?key={self._TGT_API_KEY}",
+                json={
+                    "cart_type": "REGULAR",
+                    "channel_id": 10,
+                    "address": {
+                        "address_type": "SHIPPING",
+                        **shipping_address,
+                    },
+                },
+                headers=api_headers,
+            )
+            if resp.status_code in (200, 201, 204):
+                logger.info("Target: shipping address set via checkout update")
+                return True
+
+            logger.warning("Target: all address endpoints failed. Last: HTTP %d: %s",
+                          resp.status_code, resp.text[:200])
+        except Exception as exc:
+            logger.warning("Target: failed to set shipping address: %s", exc)
+
         return False
 
     async def _tgt_checkout(self, client: httpx.AsyncClient) -> bool:
