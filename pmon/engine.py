@@ -184,8 +184,6 @@ class PmonEngine:
 
         logger.info(f"Auto-checkout for user {user_id}: {product_row['name']}")
 
-        # Load user's retailer credentials
-        accounts = db.get_retailer_accounts(user_id)
         retailer = product_row["retailer"]
 
         checkout_result = await self.checkout_engine.attempt_checkout(

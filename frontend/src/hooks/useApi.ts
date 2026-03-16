@@ -178,6 +178,23 @@ export async function testAccount(retailer: string) {
   })).json();
 }
 
+// --- Sessions (cookie import for checkout) ---
+
+export async function getSessions() {
+  return (await apiFetch('/sessions')).json();
+}
+
+export async function importSession(retailer: string, cookies: string) {
+  return (await apiFetch('/sessions/import', {
+    method: 'POST',
+    body: JSON.stringify({ retailer, cookies }),
+  })).json();
+}
+
+export async function deleteSession(retailer: string) {
+  return (await apiFetch(`/sessions/${retailer}`, { method: 'DELETE' })).json();
+}
+
 // --- 2FA ---
 
 export async function setupTotp() {

@@ -346,6 +346,31 @@ class CheckoutEngine:
         except Exception as exc:
             logger.debug("Failed to load session cookies for %s: %s", retailer, exc)
 
+    def _load_user_credentials(
+        self, retailer: str, user_id: int | None = None
+    ) -> AccountCredentials | None:
+        """Load credentials from database (preferred) or config.yaml (fallback).
+
+        The dashboard stores credentials in the DB per-user.  Config.yaml is
+        only used as a legacy fallback for single-user / CLI mode.
+        """
+        if user_id is not None:
+            try:
+                from pmon import database as db
+                accounts = db.get_retailer_accounts(user_id)
+                acct = accounts.get(retailer)
+                if acct and acct.get("email"):
+                    logger.debug("Loaded %s credentials from database for user %d", retailer, user_id)
+                    return AccountCredentials(
+                        email=acct["email"],
+                        password=acct.get("password", ""),
+                    )
+            except Exception as exc:
+                logger.debug("Failed to load DB credentials for %s: %s", retailer, exc)
+
+        # Fallback: config.yaml (single-user / CLI mode)
+        return self.config.accounts.get(retailer)
+
     async def attempt_checkout(
         self,
         url: str,
@@ -362,7 +387,9 @@ class CheckoutEngine:
         actually purchasing.
         """
         profile = self.config.profiles.get(profile_name) or Profile()
-        creds = self.config.accounts.get(retailer)
+
+        # Load credentials from DB (dashboard) first, then fall back to config.yaml
+        creds = self._load_user_credentials(retailer, user_id)
 
         # Load stored session cookies for API checkout
         self._load_user_sessions(retailer, user_id)
@@ -373,7 +400,7 @@ class CheckoutEngine:
                 retailer=retailer,
                 product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"No credentials for {retailer}. Add them in config.",
+                error_message=f"No credentials for {retailer}. Add them via Dashboard > Settings > Accounts.",
             )
 
         if dry_run:
