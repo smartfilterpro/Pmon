@@ -776,61 +776,135 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             pass
 
                     # Some sites show an auth method picker before the password field:
-                    # - Target: buttons "Use a passkey", "Get a code", "Enter your password"
+                    # - Target: links/buttons "Enter your password", "Use a passkey", "Get a code"
                     # - Walmart: radio buttons "Text me a verification code", "Email me a verification code", "Password"
                     # - Best Buy: tabs/options for text code, email code, Google, password
                     pw_option_clicked = False
 
-                    # Strategy 1: get_by_role("button") for button-style pickers (Target, Best Buy)
-                    for option_text in ["Enter your password", "Enter password", "Password", "Use password"]:
+                    # Re-dismiss overlays (Target's consent modal can reappear after email submit)
+                    for overlay_sel in overlay_selectors:
                         try:
-                            opt = page.get_by_role("button", name=option_text, exact=False)
-                            if await opt.first.is_visible(timeout=500):
-                                await opt.first.click()
-                                pw_option_clicked = True
-                                logger.info("Test login %s: clicked auth method via get_by_role('button', '%s')", retailer_name, option_text)
+                            btn = page.locator(overlay_sel).first
+                            if await btn.is_visible(timeout=300):
+                                await btn.click(timeout=1000)
+                                await page.wait_for_timeout(300)
+                                logger.info("Test login %s: dismissed overlay (post-email) via %s", retailer_name, overlay_sel)
                                 break
                         except Exception:
                             continue
+                    else:
+                        try:
+                            await page.evaluate("""() => {
+                                const portal = document.querySelector('[data-floating-ui-portal]');
+                                if (portal) portal.remove();
+                            }""")
+                        except Exception:
+                            pass
 
-                    # Strategy 2: get_by_role("radio") for radio-button pickers (Walmart)
+                    # Check if password field is already visible (no picker needed)
+                    try:
+                        if await page.locator(pass_sel).first.is_visible(timeout=2000):
+                            pw_option_clicked = True  # Skip picker, password field already showing
+                            logger.info("Test login %s: password field already visible (no auth picker)", retailer_name)
+                    except Exception:
+                        pass
+
+                    # Password auth option text variants
+                    pw_texts = [
+                        "Enter your password", "Enter password",
+                        "Password", "Use password", "Sign in with password",
+                        "password",  # lowercase fallback
+                    ]
+
+                    # Strategy 1: get_by_role("button") for button-style pickers
+                    if not pw_option_clicked:
+                        for option_text in pw_texts:
+                            try:
+                                opt = page.get_by_role("button", name=option_text, exact=False)
+                                if await opt.first.is_visible(timeout=500):
+                                    await opt.first.click(force=True)
+                                    pw_option_clicked = True
+                                    logger.info("Test login %s: clicked auth method via get_by_role('button', '%s')", retailer_name, option_text)
+                                    break
+                            except Exception:
+                                continue
+
+                    # Strategy 2: get_by_role("link") — Target often uses <a> tags for auth options
+                    if not pw_option_clicked:
+                        for option_text in pw_texts:
+                            try:
+                                opt = page.get_by_role("link", name=option_text, exact=False)
+                                if await opt.first.is_visible(timeout=500):
+                                    await opt.first.click(force=True)
+                                    pw_option_clicked = True
+                                    logger.info("Test login %s: clicked auth method via get_by_role('link', '%s')", retailer_name, option_text)
+                                    break
+                            except Exception:
+                                continue
+
+                    # Strategy 3: get_by_role("radio") for radio-button pickers (Walmart)
                     if not pw_option_clicked:
                         for option_text in ["Password"]:
                             try:
                                 opt = page.get_by_role("radio", name=option_text, exact=False)
                                 if await opt.first.is_visible(timeout=500):
-                                    await opt.first.click()
+                                    await opt.first.click(force=True)
                                     pw_option_clicked = True
                                     logger.info("Test login %s: clicked auth method via get_by_role('radio', '%s')", retailer_name, option_text)
                                     break
                             except Exception:
                                 continue
 
-                    # Strategy 3: get_by_text (catches divs/links/labels acting as buttons)
+                    # Strategy 4: get_by_text with exact=False (catches divs/spans/labels)
                     if not pw_option_clicked:
-                        for option_text in ["Enter your password", "Enter password", "Password"]:
+                        for option_text in pw_texts:
                             try:
-                                opt = page.get_by_text(option_text, exact=True)
+                                opt = page.get_by_text(option_text, exact=False)
                                 if await opt.first.is_visible(timeout=500):
-                                    await opt.first.click()
+                                    await opt.first.click(force=True)
                                     pw_option_clicked = True
                                     logger.info("Test login %s: clicked auth method via get_by_text('%s')", retailer_name, option_text)
                                     break
                             except Exception:
                                 continue
 
-                    # Strategy 4: CSS selectors (labels for radio, buttons, links)
+                    # Strategy 5: CSS selectors (labels for radio, buttons, links, list items)
                     if not pw_option_clicked:
-                        password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password"), label:has-text("Password"), input[type="radio"][value*="password" i]')
+                        password_option = page.locator(
+                            'button:has-text("password"), a:has-text("password"), '
+                            '[data-test*="password" i], div:has-text("Enter your password"), '
+                            'label:has-text("Password"), input[type="radio"][value*="password" i], '
+                            'li:has-text("password"), span:has-text("Enter your password")'
+                        )
                         try:
                             if await password_option.first.is_visible(timeout=1000):
-                                await password_option.first.click()
+                                await password_option.first.click(force=True)
                                 pw_option_clicked = True
                                 logger.info("Test login %s: clicked auth method via CSS selector", retailer_name)
                         except Exception:
                             pass
 
-                    # Strategy 5: Vision fallback
+                    # Strategy 6: JS click — find any clickable element containing "password" text
+                    if not pw_option_clicked:
+                        try:
+                            clicked_js = await page.evaluate("""() => {
+                                const els = document.querySelectorAll('a, button, [role="button"], [role="link"], li, div[tabindex], span[tabindex]');
+                                for (const el of els) {
+                                    const text = (el.textContent || '').toLowerCase().trim();
+                                    if (text.includes('password') && !text.includes('forgot') && el.offsetParent !== null) {
+                                        el.click();
+                                        return el.tagName + ': ' + text.substring(0, 60);
+                                    }
+                                }
+                                return null;
+                            }""")
+                            if clicked_js:
+                                pw_option_clicked = True
+                                logger.info("Test login %s: clicked auth method via JS: %s", retailer_name, clicked_js)
+                        except Exception:
+                            pass
+
+                    # Strategy 7: Vision fallback
                     if not pw_option_clicked:
                         logger.info("Test login %s: trying vision for auth method picker", retailer_name)
                         pw_option_clicked = await vision_click(page, "Password option (radio button or link to select password sign-in method)")
@@ -851,7 +925,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     if pass_found:
                         # Click the password field to focus it, then type
                         pw_locator = page.locator(pass_sel).first
-                        await pw_locator.click()
+                        await pw_locator.click(force=True)
                         await page.wait_for_timeout(300)
                         await page.keyboard.type(password, delay=40)
                         await page.wait_for_timeout(300)
@@ -924,7 +998,26 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                     # Not on login page + no login error = success
                     logger.info("Test login successful for %s user=%s (navigated to %s)", retailer_name, email, final_url)
-                    return {"ok": True, "message": f"{retailer_name} login successful"}
+
+                    # --- Auto-save session cookies for API checkout ---
+                    try:
+                        browser_cookies = await context.cookies()
+                        cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                        if cookies_dict:
+                            import json as _json
+                            db.set_retailer_session(
+                                user["id"], retailer,
+                                cookies_json=_json.dumps(cookies_dict),
+                            )
+                            # Hot-reload into checkout engine if running
+                            if engine.checkout_engine:
+                                engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                engine.checkout_engine._api.reset_client(retailer)
+                            logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                    except Exception as cookie_err:
+                        logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+
+                    return {"ok": True, "message": f"{retailer_name} login successful — session cookies saved for API checkout"}
 
                 # Still on login page — check why
                 # Look for error messages
