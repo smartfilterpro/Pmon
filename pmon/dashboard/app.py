@@ -991,6 +991,92 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         db.set_user_admin(target_id, data.get("is_admin", False))
         return {"ok": True}
 
+    # --- Session / Cookie import (for API-first checkout) ---
+
+    @app.get("/api/sessions")
+    async def api_get_sessions(user: dict = Depends(get_current_user)):
+        """List which retailers have imported session cookies."""
+        result = {}
+        for retailer in ("target", "walmart", "bestbuy", "pokemoncenter"):
+            session = db.get_retailer_session(user["id"], retailer)
+            if session:
+                import json as _json
+                try:
+                    cookies = _json.loads(session["cookies_json"])
+                    result[retailer] = {
+                        "has_session": True,
+                        "cookie_count": len(cookies),
+                        "updated_at": session["updated_at"],
+                    }
+                except Exception:
+                    result[retailer] = {"has_session": False}
+            else:
+                result[retailer] = {"has_session": False}
+        return {"sessions": result}
+
+    @app.post("/api/sessions/import")
+    async def api_import_session(request: Request, user: dict = Depends(get_current_user)):
+        """Import session cookies for a retailer.
+
+        Accepts cookies in multiple formats:
+        1. Array of {name, value, domain, path} objects (browser export format)
+        2. Object of {name: value} pairs (simple format)
+        3. Raw cookie header string ("name1=val1; name2=val2")
+        """
+        import json as _json
+
+        data = await request.json()
+        retailer = data.get("retailer", "").strip()
+        cookies_raw = data.get("cookies")
+
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+            return JSONResponse({"error": "Invalid retailer"}, 400)
+
+        if not cookies_raw:
+            return JSONResponse({"error": "No cookies provided"}, 400)
+
+        # Normalize cookies to {name: value} dict
+        cookies_dict = {}
+        if isinstance(cookies_raw, list):
+            # Browser extension format: [{name, value, domain, ...}]
+            for c in cookies_raw:
+                if isinstance(c, dict) and "name" in c and "value" in c:
+                    cookies_dict[c["name"]] = c["value"]
+        elif isinstance(cookies_raw, dict):
+            # Simple {name: value} format
+            cookies_dict = {str(k): str(v) for k, v in cookies_raw.items()}
+        elif isinstance(cookies_raw, str):
+            # Raw cookie header string: "name1=val1; name2=val2"
+            for pair in cookies_raw.split(";"):
+                pair = pair.strip()
+                if "=" in pair:
+                    name, _, value = pair.partition("=")
+                    cookies_dict[name.strip()] = value.strip()
+
+        if not cookies_dict:
+            return JSONResponse({"error": "Could not parse cookies"}, 400)
+
+        # Store in database
+        db.set_retailer_session(
+            user["id"], retailer,
+            cookies_json=_json.dumps(cookies_dict),
+        )
+
+        # If checkout engine exists, hot-reload the session
+        if engine.checkout_engine:
+            engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+            engine.checkout_engine._api.reset_client(retailer)
+
+        logger.info("Imported %d cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+        return {"ok": True, "cookie_count": len(cookies_dict)}
+
+    @app.delete("/api/sessions/{retailer}")
+    async def api_delete_session(retailer: str, user: dict = Depends(get_current_user)):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+            return JSONResponse({"error": "Invalid retailer"}, 400)
+        db.delete_retailer_session(user["id"], retailer)
+        return {"ok": True}
+
     # --- Monitor control ---
 
     @app.post("/api/monitor/{action}")

@@ -294,6 +294,23 @@ class CheckoutEngine:
         if self._playwright:
             await self._playwright.stop()
 
+    def _load_user_sessions(self, retailer: str, user_id: int | None = None):
+        """Load stored session cookies from database for API checkout."""
+        if user_id is None:
+            return
+        try:
+            from pmon import database as db
+            import json
+            session = db.get_retailer_session(user_id, retailer)
+            if session and session.get("cookies_json"):
+                cookies = json.loads(session["cookies_json"])
+                if cookies:
+                    self._api.load_session_cookies(retailer, cookies)
+                    self._api.reset_client(retailer)
+                    logger.info("Loaded %d stored session cookies for %s", len(cookies), retailer)
+        except Exception as exc:
+            logger.debug("Failed to load session cookies for %s: %s", retailer, exc)
+
     async def attempt_checkout(
         self,
         url: str,
@@ -301,6 +318,7 @@ class CheckoutEngine:
         product_name: str,
         profile_name: str = "default",
         dry_run: bool = False,
+        user_id: int | None = None,
     ) -> CheckoutResult:
         """Attempt checkout: API first, browser fallback.
 
@@ -310,6 +328,9 @@ class CheckoutEngine:
         """
         profile = self.config.profiles.get(profile_name) or Profile()
         creds = self.config.accounts.get(retailer)
+
+        # Load stored session cookies for API checkout
+        self._load_user_sessions(retailer, user_id)
 
         if not creds:
             return CheckoutResult(
@@ -393,6 +414,9 @@ class CheckoutEngine:
             # Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(2000)
+
+            # Dismiss privacy/cookie overlay if present
+            await self._dismiss_target_overlay(page)
 
             # Check if we need to sign in
             if not await self._is_signed_in_target(page):
@@ -509,12 +533,71 @@ class CheckoutEngine:
         except Exception:
             return False
 
+    async def _dismiss_target_overlay(self, page):
+        """Dismiss Target's privacy/cookie consent overlay that blocks clicks."""
+        try:
+            # Try clicking common accept/close buttons inside the floating-ui portal overlay
+            for sel in [
+                '[data-floating-ui-portal] button:has-text("Accept")',
+                '[data-floating-ui-portal] button:has-text("accept")',
+                '[data-floating-ui-portal] button:has-text("Close")',
+                '[data-floating-ui-portal] button:has-text("Got it")',
+                '[data-floating-ui-portal] button:has-text("OK")',
+                '.styles_overlay__AJMdo + div button',
+                '#onetrust-accept-btn-handler',
+                'button[id*="accept" i]',
+                'button[id*="cookie" i]',
+            ]:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click(timeout=2000)
+                        logger.info("Target overlay: dismissed via button '%s'", sel)
+                        await page.wait_for_timeout(500)
+                        return
+                except Exception:
+                    continue
+
+            # Fallback: forcibly remove the overlay and portal via JS
+            removed = await page.evaluate("""() => {
+                let removed = 0;
+                // Remove floating-ui portal overlays
+                document.querySelectorAll('[data-floating-ui-portal]').forEach(el => {
+                    el.remove();
+                    removed++;
+                });
+                // Remove any remaining overlay divs that block pointer events
+                document.querySelectorAll('[class*="overlay"]').forEach(el => {
+                    const style = window.getComputedStyle(el);
+                    if (style.position === 'fixed' || style.position === 'absolute') {
+                        el.remove();
+                        removed++;
+                    }
+                });
+                // Also remove any inert attributes that may have been set
+                document.querySelectorAll('[data-floating-ui-inert]').forEach(el => {
+                    el.removeAttribute('data-floating-ui-inert');
+                    el.removeAttribute('aria-hidden');
+                });
+                return removed;
+            }""")
+            if removed:
+                logger.info("Target overlay: removed %d blocking element(s) via JS", removed)
+                await page.wait_for_timeout(500)
+            else:
+                logger.debug("Target overlay: no overlay detected")
+        except Exception as exc:
+            logger.debug("Target overlay dismiss failed (non-fatal): %s", exc)
+
     async def _sign_in_target(self, page, creds: AccountCredentials):
         await page.goto(
             "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
             wait_until="domcontentloaded",
         )
         await page.wait_for_timeout(2000)
+
+        # Dismiss Target privacy/cookie overlay that blocks pointer events
+        await self._dismiss_target_overlay(page)
 
         email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
         pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'

@@ -1,7 +1,8 @@
-"""Pokemon Center stock monitor."""
+"""Pokemon Center stock monitor — API-first with HTML fallback."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -18,62 +19,210 @@ class PokemonCenterMonitor(BaseMonitor):
 
     async def check_stock(self, url: str, product_name: str) -> StockResult:
         client = await self.get_client()
-        resp = await client.get(url)
-        resp.raise_for_status()
 
-        html = resp.text
-        soup = BeautifulSoup(html, "html.parser")
+        # Try API/JSON approach first, fall back to HTML scraping
+        result = await self._check_stock_api(client, url, product_name)
+        if result and result.status != StockStatus.ERROR:
+            return result
 
-        # Pokemon Center uses various indicators for stock status
-        # Check for "Add to Cart" button
-        add_to_cart = soup.find("button", string=re.compile(r"add to cart", re.I))
-        if add_to_cart and not add_to_cart.get("disabled"):
-            price = self._extract_price(soup)
+        # Fallback to HTML scraping
+        return await self._check_stock_html(client, url, product_name)
+
+    async def _check_stock_api(self, client, url: str, product_name: str) -> StockResult | None:
+        """Check stock via embedded JSON data (avoids full HTML parsing, harder to block)."""
+        try:
+            resp = await client.get(url)
+
+            # Detect block page
+            if resp.status_code == 403:
+                return StockResult(
+                    url=url,
+                    retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.ERROR,
+                    error_message="Access blocked (403) — IP may be flagged",
+                )
+
+            resp.raise_for_status()
+            html = resp.text
+
+            # Check for bot block in content
+            lower = html.lower()
+            if "unusual activity" in lower or "access to this page has been denied" in lower:
+                return StockResult(
+                    url=url,
+                    retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.ERROR,
+                    error_message="Access blocked — bot detection triggered",
+                )
+
+            # Strategy 1: JSON-LD structured data (schema.org Product)
+            for match in re.finditer(
+                r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S
+            ):
+                try:
+                    ld = json.loads(match.group(1))
+                    if isinstance(ld, list):
+                        ld = next((x for x in ld if x.get("@type") == "Product"), None)
+                    if not isinstance(ld, dict) or ld.get("@type") != "Product":
+                        continue
+
+                    availability = ""
+                    offers = ld.get("offers", {})
+                    if isinstance(offers, dict):
+                        availability = offers.get("availability", "")
+                    elif isinstance(offers, list) and offers:
+                        availability = offers[0].get("availability", "")
+
+                    price = self._extract_price_from_offers(offers)
+
+                    if "InStock" in availability:
+                        return StockResult(
+                            url=url, retailer=self.retailer_name,
+                            product_name=product_name,
+                            status=StockStatus.IN_STOCK, price=price,
+                        )
+                    elif "OutOfStock" in availability or "SoldOut" in availability:
+                        return StockResult(
+                            url=url, retailer=self.retailer_name,
+                            product_name=product_name,
+                            status=StockStatus.OUT_OF_STOCK,
+                        )
+                except (json.JSONDecodeError, StopIteration):
+                    continue
+
+            # Strategy 2: __NEXT_DATA__ (Next.js hydration data)
+            next_match = re.search(
+                r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S
+            )
+            if next_match:
+                try:
+                    nd = json.loads(next_match.group(1))
+                    product = (
+                        nd.get("props", {})
+                        .get("pageProps", {})
+                        .get("product", {})
+                    )
+                    if product:
+                        avail = product.get("availability", "")
+                        in_stock = product.get("inStock", product.get("isAvailable"))
+                        price = product.get("price", "")
+                        if isinstance(price, (int, float)):
+                            price = f"${price:.2f}"
+
+                        if in_stock is True or "InStock" in str(avail):
+                            return StockResult(
+                                url=url, retailer=self.retailer_name,
+                                product_name=product_name,
+                                status=StockStatus.IN_STOCK,
+                                price=str(price),
+                            )
+                        elif in_stock is False or "OutOfStock" in str(avail):
+                            return StockResult(
+                                url=url, retailer=self.retailer_name,
+                                product_name=product_name,
+                                status=StockStatus.OUT_OF_STOCK,
+                            )
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+            # Strategy 3: Inline JS variables (window.__PRODUCT_DATA__, etc.)
+            for pattern in [
+                r'"availability"\s*:\s*"([^"]+)"',
+                r'"stockStatus"\s*:\s*"([^"]+)"',
+                r'"inStock"\s*:\s*(true|false)',
+            ]:
+                m = re.search(pattern, html, re.I)
+                if m:
+                    val = m.group(1).lower()
+                    if val in ("instock", "in_stock", "true", "available"):
+                        return StockResult(
+                            url=url, retailer=self.retailer_name,
+                            product_name=product_name,
+                            status=StockStatus.IN_STOCK,
+                            price=self._extract_price_from_html(html),
+                        )
+                    elif val in ("outofstock", "out_of_stock", "false", "soldout", "unavailable"):
+                        return StockResult(
+                            url=url, retailer=self.retailer_name,
+                            product_name=product_name,
+                            status=StockStatus.OUT_OF_STOCK,
+                        )
+
+            return None  # Couldn't determine from API data, try HTML fallback
+
+        except Exception as exc:
+            logger.debug("Pokemon Center API stock check failed: %s", exc)
+            return None
+
+    async def _check_stock_html(self, client, url: str, product_name: str) -> StockResult:
+        """Fallback: check stock via HTML content parsing."""
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Check for "Add to Cart" button
+            add_to_cart = soup.find("button", string=re.compile(r"add to cart", re.I))
+            if add_to_cart and not add_to_cart.get("disabled"):
+                price = self._extract_price(soup)
+                return StockResult(
+                    url=url,
+                    retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.IN_STOCK,
+                    price=price,
+                )
+
+            # Check for "Out of Stock" or "Sold Out" text
+            out_of_stock = soup.find(
+                string=re.compile(r"(out of stock|sold out|unavailable)", re.I)
+            )
+            if out_of_stock:
+                return StockResult(
+                    url=url,
+                    retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.OUT_OF_STOCK,
+                )
+
             return StockResult(
                 url=url,
                 retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.IN_STOCK,
-                price=price,
+                status=StockStatus.UNKNOWN,
+                error_message="Could not determine stock status",
             )
 
-        # Check for "Out of Stock" or "Sold Out" text
-        out_of_stock = soup.find(string=re.compile(r"(out of stock|sold out|unavailable)", re.I))
-        if out_of_stock:
+        except Exception as exc:
             return StockResult(
                 url=url,
                 retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK,
+                status=StockStatus.ERROR,
+                error_message=str(exc),
             )
 
-        # Check for product data in script tags (PKC often loads via JS)
-        for script in soup.find_all("script"):
-            text = script.string or ""
-            if '"availability"' in text:
-                if '"InStock"' in text or '"instock"' in text.lower():
-                    return StockResult(
-                        url=url,
-                        retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK,
-                        price=self._extract_price(soup),
-                    )
-                if '"OutOfStock"' in text:
-                    return StockResult(
-                        url=url,
-                        retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.OUT_OF_STOCK,
-                    )
+    def _extract_price_from_offers(self, offers) -> str:
+        """Extract price from JSON-LD offers."""
+        if isinstance(offers, dict):
+            price = offers.get("price", "")
+            currency = offers.get("priceCurrency", "USD")
+            if price:
+                return f"${price}" if currency == "USD" else f"{price} {currency}"
+        elif isinstance(offers, list) and offers:
+            return self._extract_price_from_offers(offers[0])
+        return ""
 
-        return StockResult(
-            url=url,
-            retailer=self.retailer_name,
-            product_name=product_name,
-            status=StockStatus.UNKNOWN,
-            error_message="Could not determine stock status",
-        )
+    def _extract_price_from_html(self, html: str) -> str:
+        """Quick regex price extraction from raw HTML."""
+        m = re.search(r'"price"\s*:\s*"?(\$?[\d,.]+)"?', html)
+        if m:
+            price = m.group(1)
+            return price if price.startswith("$") else f"${price}"
+        return ""
 
     def _extract_price(self, soup: BeautifulSoup) -> str:
         price_el = soup.find(class_=re.compile(r"price", re.I))
