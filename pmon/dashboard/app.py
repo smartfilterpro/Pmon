@@ -214,6 +214,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         asyncio.create_task(engine.manual_checkout(p, user_id=user["id"]))
         return {"ok": True, "message": "Checkout attempt started"}
 
+    @app.post("/api/products/test_cart")
+    async def api_test_cart(request: Request, user: dict = Depends(get_current_user)):
+        """Dry-run checkout: adds to cart and goes through checkout flow but stops
+        before placing the order. Useful for testing without actually buying."""
+        data = await request.json()
+        url = data["url"]
+        products = db.get_user_products(user["id"])
+        product = next((p for p in products if p["url"] == url), None)
+        if not product:
+            return JSONResponse({"error": "Product not found"}, 404)
+
+        from pmon.config import Product
+        p = Product(url=url, name=product["name"], auto_checkout=True)
+        asyncio.create_task(engine.manual_checkout(p, user_id=user["id"], dry_run=True))
+        return {"ok": True, "message": "Test cart (dry run) started — will stop before placing order"}
+
     # --- Retailer accounts ---
 
     @app.get("/api/accounts")

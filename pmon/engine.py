@@ -193,8 +193,8 @@ class PmonEngine:
         if notifier:
             await notifier.notify_checkout(checkout_result)
 
-    async def manual_checkout(self, product: Product, user_id: int | None = None):
-        """Trigger a manual checkout attempt."""
+    async def manual_checkout(self, product: Product, user_id: int | None = None, dry_run: bool = False):
+        """Trigger a manual checkout attempt. If dry_run=True, stops before placing order."""
         if not self.checkout_engine:
             self.checkout_engine = CheckoutEngine(self.config)
             await self.checkout_engine.start()
@@ -203,6 +203,7 @@ class PmonEngine:
             url=product.url,
             retailer=product.retailer,
             product_name=product.name,
+            dry_run=dry_run,
         )
 
         if user_id:
