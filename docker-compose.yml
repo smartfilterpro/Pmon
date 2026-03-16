@@ -1,0 +1,36 @@
+services:
+  pmon:
+    image: ghcr.io/smartfilterpro/pmon:latest
+    container_name: pmon
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    volumes:
+      # Persistent data (database, browser sessions, config)
+      - pmon-data:/data
+    environment:
+      - PMON_DATA_DIR=/data
+      # Add your Anthropic API key here (for vision-assisted login)
+      # - ANTHROPIC_API_KEY=sk-ant-...
+    labels:
+      # Tell Watchtower to watch this container
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Check for updates every 5 minutes
+      - WATCHTOWER_POLL_INTERVAL=300
+      # Only update containers with the watchtower label
+      - WATCHTOWER_LABEL_ENABLE=true
+      # Clean up old images after updating
+      - WATCHTOWER_CLEANUP=true
+      # Log level
+      - WATCHTOWER_LOG_LEVEL=info
+
+volumes:
+  pmon-data:

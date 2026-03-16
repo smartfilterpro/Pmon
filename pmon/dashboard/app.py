@@ -129,6 +129,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         disable_totp(user["id"])
         return {"ok": True}
 
+    # --- Health check (unauthenticated, for Docker/Watchtower) ---
+
+    @app.get("/api/health")
+    async def api_health():
+        return {"ok": True}
+
     # --- Product endpoints (per-user) ---
 
     @app.get("/api/status")
