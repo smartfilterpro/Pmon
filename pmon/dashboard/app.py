@@ -269,7 +269,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 import anthropic
                 vision_client = anthropic.Anthropic(api_key=api_key)
             except ImportError:
-                pass
+                logger.warning("Test login: anthropic package not installed, vision fallback disabled")
+        else:
+            logger.warning("Test login: ANTHROPIC_API_KEY not set, vision fallback disabled")
 
         async def screenshot_b64(pg):
             raw = await pg.screenshot(type="png")
@@ -575,8 +577,34 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         await vision_click(page, "Sign In / Continue button")
                 else:
                     # Multi-step: submit email/phone first
-                    if not await click_visible_button(page, submit_sel):
+                    # Use multiple strategies to find and click the submit/continue button
+                    submit_clicked = await click_visible_button(page, submit_sel)
+                    if not submit_clicked:
+                        # Try Playwright's get_by_role which handles text matching much better
+                        for btn_text in ["Continue with email", "Continue", "Sign in", "Next"]:
+                            try:
+                                btn = page.get_by_role("button", name=btn_text, exact=False)
+                                if await btn.first.is_visible(timeout=500):
+                                    await btn.first.click()
+                                    submit_clicked = True
+                                    break
+                            except Exception:
+                                continue
+                    if not submit_clicked:
+                        # Try any visible link with matching text
+                        for link_text in ["Continue with email", "Continue"]:
+                            try:
+                                link = page.get_by_text(link_text, exact=False)
+                                if await link.first.is_visible(timeout=500):
+                                    await link.first.click()
+                                    submit_clicked = True
+                                    break
+                            except Exception:
+                                continue
+                    if not submit_clicked:
+                        # Last resort: vision
                         await vision_click(page, "Continue with email button (NOT passkey)")
+
                     await page.wait_for_timeout(3000)
 
                     # Check for "Something went wrong" error and retry once
@@ -593,7 +621,15 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     await page.locator(email_sel).first.press("Control+a")
                                     await page.keyboard.type(email, delay=40)
                                     await page.wait_for_timeout(500)
-                                    await click_visible_button(page, submit_sel)
+                                    # Re-use the same multi-strategy click
+                                    for btn_text in ["Continue with email", "Continue", "Sign in"]:
+                                        try:
+                                            btn = page.get_by_role("button", name=btn_text, exact=False)
+                                            if await btn.first.is_visible(timeout=500):
+                                                await btn.first.click()
+                                                break
+                                        except Exception:
+                                            continue
                                     await page.wait_for_timeout(3000)
                                 except Exception:
                                     pass
