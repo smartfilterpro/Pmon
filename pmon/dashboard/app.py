@@ -652,15 +652,54 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pass
 
                     # Some sites (e.g. Target) show an auth method picker
-                    password_option = page.locator('button:has-text("Password"), a:has-text("Password"), [data-test*="password" i], button:has-text("Use password")')
-                    try:
-                        if await password_option.first.is_visible(timeout=3000):
-                            await password_option.first.click()
-                            await page.wait_for_timeout(1500)
-                    except Exception:
-                        # Vision fallback for auth method picker
-                        await vision_click(page, "Password option or Use password button")
-                        await page.wait_for_timeout(1500)
+                    # Target shows: "Use a passkey", "Get a code", "Enter your password"
+                    pw_option_clicked = False
+
+                    # Strategy 1: get_by_role with exact text variations
+                    for option_text in ["Enter your password", "Enter password", "Password", "Use password"]:
+                        try:
+                            opt = page.get_by_role("button", name=option_text, exact=False)
+                            if await opt.first.is_visible(timeout=500):
+                                await opt.first.click()
+                                pw_option_clicked = True
+                                logger.info("Test login %s: clicked auth method via get_by_role('%s')", retailer_name, option_text)
+                                break
+                        except Exception:
+                            continue
+
+                    # Strategy 2: get_by_text (catches divs/links acting as buttons)
+                    if not pw_option_clicked:
+                        for option_text in ["Enter your password", "Enter password"]:
+                            try:
+                                opt = page.get_by_text(option_text, exact=False)
+                                if await opt.first.is_visible(timeout=500):
+                                    await opt.first.click()
+                                    pw_option_clicked = True
+                                    logger.info("Test login %s: clicked auth method via get_by_text('%s')", retailer_name, option_text)
+                                    break
+                            except Exception:
+                                continue
+
+                    # Strategy 3: CSS selectors
+                    if not pw_option_clicked:
+                        password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password")')
+                        try:
+                            if await password_option.first.is_visible(timeout=1000):
+                                await password_option.first.click()
+                                pw_option_clicked = True
+                                logger.info("Test login %s: clicked auth method via CSS selector", retailer_name)
+                        except Exception:
+                            pass
+
+                    # Strategy 4: Vision fallback
+                    if not pw_option_clicked:
+                        logger.info("Test login %s: trying vision for auth method picker", retailer_name)
+                        pw_option_clicked = await vision_click(page, "Enter your password option")
+
+                    if pw_option_clicked:
+                        await page.wait_for_timeout(2000)
+                    else:
+                        logger.warning("Test login %s: could not find password auth method option", retailer_name)
 
                     # Wait for password field — selectors first, then vision
                     pass_found = False
