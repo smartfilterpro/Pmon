@@ -223,7 +223,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.post("/api/products/test_cart")
     async def api_test_cart(request: Request, user: dict = Depends(get_current_user)):
         """Dry-run checkout: adds to cart and goes through checkout flow but stops
-        before placing the order. Useful for testing without actually buying."""
+        before placing the order. Returns the actual result (pass/fail)."""
         data = await request.json()
         url = data["url"]
         products = db.get_user_products(user["id"])
@@ -233,8 +233,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         from pmon.config import Product
         p = Product(url=url, name=product["name"], auto_checkout=True)
-        asyncio.create_task(engine.manual_checkout(p, user_id=user["id"], dry_run=True))
-        return {"ok": True, "message": "Test cart (dry run) started — will stop before placing order"}
+        try:
+            await engine.manual_checkout(p, user_id=user["id"], dry_run=True)
+        except Exception as e:
+            logger.error("Test cart failed for %s: %s", url, e)
+            return {"ok": False, "message": f"Test cart failed: {e}"}
+
+        # Get the most recent checkout log entry for this URL
+        checkouts = db.get_checkout_log(user["id"], limit=5)
+        recent = next((c for c in checkouts if c.get("url") == url), None)
+        if recent and recent.get("status") == "success":
+            return {"ok": True, "message": f"Test cart passed — dry run completed successfully for {product['name']}"}
+        elif recent and recent.get("error_message"):
+            return {"ok": False, "message": f"Test cart failed: {recent['error_message']}"}
+        else:
+            status = recent.get("status", "unknown") if recent else "unknown"
+            return {"ok": False, "message": f"Test cart finished with status: {status}"}
 
     # --- Retailer accounts ---
 
