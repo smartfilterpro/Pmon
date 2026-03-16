@@ -22,8 +22,10 @@ services:
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.docker/config.json:/config.json:ro
     environment:
+      # GitHub Container Registry auth (create a PAT with read:packages scope)
+      - REPO_USER=smartfilterpro
+      - REPO_PASS=ghp_YOUR_TOKEN_HERE
       # Check for updates every 5 minutes
       - WATCHTOWER_POLL_INTERVAL=300
       # Only update containers with the watchtower label
