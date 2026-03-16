@@ -30,6 +30,10 @@ class PmonEngine:
         # Track which products we've already notified about (avoid spam)
         self._notified: set[str] = set()
 
+        # Track products that have been successfully purchased (user_id:url).
+        # Once purchased, auto-checkout is disabled and monitoring skips the product.
+        self._purchased: set[str] = set()
+
         # Monitor instances (cached per retailer)
         self._monitors: dict[str, BaseMonitor] = {}
 
@@ -161,8 +165,9 @@ class PmonEngine:
                         if notifier:
                             await notifier.notify_in_stock(result)
 
-                        # Auto-checkout if enabled for this user's product
-                        if p["auto_checkout"]:
+                        # Auto-checkout if enabled and not already purchased
+                        purchase_key = f"{user_id}:{product.url}"
+                        if p["auto_checkout"] and purchase_key not in self._purchased:
                             await self._auto_checkout_for_user(p, user_id)
 
         elif result.status == StockStatus.OUT_OF_STOCK:
@@ -177,7 +182,11 @@ class PmonEngine:
             )
 
     async def _auto_checkout_for_user(self, product_row: dict, user_id: int):
-        """Auto-checkout a product for a specific user."""
+        """Auto-checkout a product for a specific user.
+
+        On successful checkout, disables auto-checkout for this product so the
+        bot doesn't keep buying it.
+        """
         if not self.checkout_engine:
             self.checkout_engine = CheckoutEngine(self.config)
             await self.checkout_engine.start()
@@ -205,6 +214,26 @@ class PmonEngine:
         )
 
         self.state.add_checkout(checkout_result)
+
+        # On success: mark as purchased and disable auto-checkout for this product
+        if checkout_result.status == CheckoutStatus.SUCCESS:
+            purchase_key = f"{user_id}:{product_row['url']}"
+            self._purchased.add(purchase_key)
+            logger.info(
+                f"PURCHASED: {product_row['name']} for user {user_id} — "
+                f"disabling auto-checkout to prevent duplicate orders"
+            )
+
+            # Disable auto_checkout in the database so it stays off across restarts
+            try:
+                conn = db.get_db()
+                conn.execute(
+                    "UPDATE products SET auto_checkout = 0 WHERE user_id = ? AND url = ?",
+                    (user_id, product_row["url"]),
+                )
+                conn.commit()
+            except Exception as exc:
+                logger.error(f"Failed to disable auto-checkout in DB: {exc}")
 
         # Notify
         await self._console_notifier.notify_checkout(checkout_result)
