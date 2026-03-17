@@ -129,7 +129,11 @@ class PmonEngine:
         # Simultaneous burst requests to the same retailer from one IP = instant flag.
         tasks = []
         for i, product in enumerate(products):
-            monitor = self._get_monitor(product.retailer)
+            try:
+                monitor = self._get_monitor(product.retailer)
+            except ValueError:
+                logger.warning(f"Skipping product with unsupported retailer: {product.retailer} ({product.url})")
+                continue
             delay = i * random.uniform(0.5, 2.0)
             tasks.append(self._delayed_check(monitor, product, delay))
 

@@ -187,6 +187,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         name = data.get("name", "")
         retailer = detect_retailer(url)
+        if retailer == "unknown":
+            return JSONResponse({"error": "Unsupported retailer. Supported: Pokemon Center, Target, Best Buy, Walmart"}, 400)
         quantity = max(1, int(data.get("quantity", 1)))
         auto = bool(data.get("auto_checkout", False))
 
