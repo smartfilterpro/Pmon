@@ -256,7 +256,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         # Don't send passwords back
         safe = {}
         for retailer, acc in accounts.items():
-            safe[retailer] = {"email": acc["email"], "has_password": bool(acc["password"])}
+            safe[retailer] = {
+                "email": acc["email"],
+                "has_password": bool(acc["password"]),
+                "has_cvv": bool(acc.get("card_cvv")),
+            }
         return {"accounts": safe}
 
     @app.post("/api/accounts")
@@ -265,9 +269,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         retailer = data.get("retailer", "").strip()
         email = data.get("email", "").strip()
         password = data.get("password", "")
+        card_cvv = data.get("card_cvv", "").strip()
         if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
-        db.set_retailer_account(user["id"], retailer, email, password)
+        db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv)
         return {"ok": True}
 
     @app.post("/api/accounts/test")

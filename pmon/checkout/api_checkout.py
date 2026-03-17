@@ -97,7 +97,7 @@ class ApiCheckout:
             )
 
     # Target API constants (from network analysis)
-    _TGT_API_KEY = "9f36aeafbe60771e321a7cc95a78140772ab3e96"
+    _TGT_API_KEY = "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14"
     _TGT_CLIENT_ID = "ecom-web-1.0.0"
 
     async def _checkout_target(
@@ -177,8 +177,8 @@ class ApiCheckout:
         # may auto-apply the account's default address during checkout)
         await self._tgt_set_shipping_address(client, profile)
 
-        # Step 5: Initiate checkout
-        checkout_ok = await self._tgt_checkout(client)
+        # Step 5: Initiate checkout (pass CVV for payment verification)
+        checkout_ok = await self._tgt_checkout(client, creds)
         if checkout_ok:
             return CheckoutResult(
                 url=url, retailer=retailer, product_name=product_name,
@@ -540,20 +540,21 @@ class ApiCheckout:
         # account has a default address that auto-applies during checkout
         return True
 
-    async def _tgt_checkout(self, client: httpx.AsyncClient) -> bool:
+    async def _tgt_checkout(self, client: httpx.AsyncClient,
+                            creds: "AccountCredentials | None" = None) -> bool:
         """Initiate Target checkout.
 
         Tries multiple approaches:
         1. PUT to /checkout to create/update checkout state
         2. POST to /checkout to initiate
-        3. POST to /checkout/place_order to finalize
+        3. POST to /checkout/place_order to finalize (with CVV if available)
         All responses are logged in detail for debugging.
         """
         api_headers = {
             **HEADERS,
             "Content-Type": "application/json",
             "Origin": "https://www.target.com",
-            "Referer": "https://www.target.com/co-checkout",
+            "Referer": "https://www.target.com/checkout",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-site",
@@ -630,11 +631,23 @@ class ApiCheckout:
             if post_resp.status_code in (200, 201):
                 return True
 
+            # Build place-order body with CVV if available
+            cvv = creds.card_cvv if creds else ""
+            place_body = {"cart_type": "REGULAR"}
+            if cvv:
+                # Target may require CVV in different field names
+                place_body["card_security_code"] = cvv
+                place_body["payment_verification"] = {"cvv": cvv}
+                logger.info("Target checkout: including CVV in place-order request")
+            else:
+                logger.warning("Target checkout: NO CVV available — order may fail. "
+                             "Add CVV via Dashboard > Settings > Accounts > Target > Edit")
+
             # Step 5: Try POST /checkout/place_order
             place_resp = await client.post(
                 f"https://carts.target.com/web_checkouts/v1/checkout/place_order"
                 f"?key={self._TGT_API_KEY}",
-                json={"cart_type": "REGULAR"},
+                json=place_body,
                 headers=api_headers,
             )
             logger.info("Target checkout: POST /checkout/place_order → HTTP %d: %s",
@@ -648,7 +661,7 @@ class ApiCheckout:
             place2_resp = await client.post(
                 f"https://carts.target.com/web_checkouts/v1/place_order"
                 f"?key={self._TGT_API_KEY}",
-                json={"cart_type": "REGULAR"},
+                json=place_body,
                 headers=api_headers,
             )
             logger.info("Target checkout: POST /place_order → HTTP %d: %s",
