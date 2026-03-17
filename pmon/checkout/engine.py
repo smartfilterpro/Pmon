@@ -260,13 +260,14 @@ class CheckoutEngine:
     async def _smart_click(self, page, description: str, selectors: str, timeout: int = 5000) -> bool:
         """Try CSS selectors first; fall back to Claude vision to find and click an element.
 
+        Uses human-like mouse movement and click behavior throughout.
         Returns True if click succeeded, False otherwise.
         """
-        # Fast path: selectors
+        # Fast path: selectors with human-like click
         try:
             elem = page.locator(selectors)
-            await elem.first.click(timeout=timeout)
-            return True
+            if await human_click_element(page, elem, timeout=timeout):
+                return True
         except Exception:
             pass
 
@@ -283,7 +284,7 @@ class CheckoutEngine:
         try:
             coords = json.loads(answer.strip())
             if coords.get("x") is not None and coords.get("y") is not None:
-                await page.mouse.click(int(coords["x"]), int(coords["y"]))
+                await human_click(page, int(coords["x"]), int(coords["y"]))
                 return True
         except (json.JSONDecodeError, TypeError, ValueError) as e:
             logger.warning(f"Vision click parse error for '{description}': {e}")
@@ -292,13 +293,16 @@ class CheckoutEngine:
     async def _smart_fill(self, page, description: str, selectors: str, value: str, timeout: int = 5000) -> bool:
         """Try CSS selectors first; fall back to Claude vision to find and fill an input.
 
+        Uses human-like typing throughout.
         Returns True if fill succeeded, False otherwise.
         """
         # Fast path: selectors
         try:
             elem = page.locator(selectors)
             await elem.first.wait_for(state="visible", timeout=timeout)
-            await elem.first.fill(value)
+            await human_click_element(page, elem)
+            await random_delay(page, 100, 250)
+            await human_type(page, value)
             return True
         except Exception:
             pass
@@ -316,8 +320,9 @@ class CheckoutEngine:
         try:
             coords = json.loads(answer.strip())
             if coords.get("x") is not None and coords.get("y") is not None:
-                await page.mouse.click(int(coords["x"]), int(coords["y"]))
-                await page.keyboard.type(value, delay=50)
+                await human_click(page, int(coords["x"]), int(coords["y"]))
+                await random_delay(page, 100, 250)
+                await human_type(page, value)
                 return True
         except (json.JSONDecodeError, TypeError, ValueError) as e:
             logger.warning(f"Vision fill parse error for '{description}': {e}")
@@ -360,13 +365,14 @@ class CheckoutEngine:
                 if action["type"] == "fill":
                     val = action.get("value", "")
                     val = val.replace("EMAIL", creds.email).replace("PASSWORD", creds.password)
-                    await page.mouse.click(x, y)
-                    await page.keyboard.type(val, delay=50)
+                    await human_click(page, x, y)
+                    await random_delay(page, 100, 250)
+                    await human_type(page, val)
                 elif action["type"] == "click":
-                    await page.mouse.click(x, y)
-                await page.wait_for_timeout(1000)
+                    await human_click(page, x, y)
+                await random_delay(page, 800, 1500)
 
-            await page.wait_for_timeout(3000)
+            await wait_for_page_ready(page, timeout=5000)
             return True
         except Exception as e:
             logger.warning(f"Vision sign-in failed for {retailer}: {e}")
@@ -392,16 +398,16 @@ class CheckoutEngine:
             return None
 
     async def _multi_strategy_click(self, page, description: str, button_texts: list[str], css_fallback: str, timeout: int = 3000) -> bool:
-        """Multi-strategy button click: get_by_role → get_by_text → CSS → vision.
+        """Multi-strategy button click: CSS → get_by_role → get_by_text → vision.
 
-        Matches the robust approach used in test login.
+        Uses human-like click behavior throughout.
         """
         # Strategy 1: CSS selectors (fast path)
         if css_fallback:
             try:
                 elem = page.locator(css_fallback)
                 if await elem.first.is_visible(timeout=min(timeout, 1000)):
-                    await elem.first.click()
+                    await human_click_element(page, elem)
                     return True
             except Exception:
                 pass
@@ -411,7 +417,7 @@ class CheckoutEngine:
             try:
                 btn = page.get_by_role("button", name=btn_text, exact=False)
                 if await btn.first.is_visible(timeout=500):
-                    await btn.first.click()
+                    await human_click_element(page, btn)
                     return True
             except Exception:
                 continue
@@ -421,12 +427,12 @@ class CheckoutEngine:
             try:
                 link = page.get_by_text(btn_text, exact=False)
                 if await link.first.is_visible(timeout=500):
-                    await link.first.click()
+                    await human_click_element(page, link)
                     return True
             except Exception:
                 continue
 
-        # Strategy 4: Vision fallback
+        # Strategy 4: Vision fallback (already uses human_click internally)
         return await self._smart_click(page, description, "", timeout=1000)
 
     async def start(self):
@@ -758,7 +764,7 @@ class CheckoutEngine:
                 place_order_sel,
                 timeout=10000,
             ):
-                await page.wait_for_timeout(5000)
+                await wait_for_page_ready(page, timeout=10000)
                 await self._save_context(context, "target")
                 return CheckoutResult(
                     url=url,
@@ -831,9 +837,9 @@ class CheckoutEngine:
                 try:
                     btn = page.locator(sel).first
                     if await btn.is_visible(timeout=500):
-                        await btn.click(timeout=3000)
+                        await human_click_element(page, btn)
                         logger.info("Health consent modal: dismissed via '%s'", sel)
-                        await page.wait_for_timeout(1000)
+                        await random_delay(page, 800, 1500)
                         return True
                 except Exception:
                     continue
@@ -848,7 +854,7 @@ class CheckoutEngine:
                 )
                 if clicked:
                     logger.info("Health consent modal: dismissed via vision fallback")
-                    await page.wait_for_timeout(1000)
+                    await random_delay(page, 800, 1500)
                     return True
 
             return False
@@ -913,7 +919,7 @@ class CheckoutEngine:
                 try:
                     loc = page.locator(sel).first
                     if await loc.is_visible(timeout=1000):
-                        await loc.click()
+                        await human_click_element(page, loc)
                         shipping_clicked = True
                         logger.info("Target cart: clicked shipping via %s", sel)
                         break
@@ -921,7 +927,7 @@ class CheckoutEngine:
                     continue
 
             if not shipping_clicked:
-                # Vision fallback
+                # Vision fallback (already uses human_click internally)
                 shipping_clicked = await self._smart_click(
                     page, "Shipping delivery option",
                     "",
@@ -929,7 +935,7 @@ class CheckoutEngine:
                 )
 
             if shipping_clicked:
-                await page.wait_for_timeout(2000)
+                await wait_for_page_ready(page, timeout=5000)
 
                 # Target sometimes shows a "Save" or "Apply" button after selecting delivery
                 for save_sel in [
@@ -940,8 +946,8 @@ class CheckoutEngine:
                     try:
                         loc = page.locator(save_sel).first
                         if await loc.is_visible(timeout=1000):
-                            await loc.click()
-                            await page.wait_for_timeout(1000)
+                            await human_click_element(page, loc)
+                            await random_delay(page, 800, 1500)
                             break
                     except Exception:
                         continue
@@ -1275,9 +1281,10 @@ class CheckoutEngine:
 
         try:
             await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
+            await wait_for_page_ready(page, timeout=10000)
 
             # Add to cart
+            await sweep_popups(page)
             if not await self._smart_click(
                 page, "Add to cart",
                 'button[data-tl-id="ProductPrimaryCTA-cta_add_to_cart_button"], button[data-tl-id*="addToCart"], button:has-text("Add to cart")',
@@ -1286,7 +1293,7 @@ class CheckoutEngine:
                 if error:
                     raise Exception(f"Cannot add to cart: {error}")
                 raise Exception("Add to cart button not found")
-            await page.wait_for_timeout(2000)
+            await random_delay(page, 1500, 2500)
 
             # Go to checkout via button or direct navigation
             if not await self._smart_click(
@@ -1295,7 +1302,7 @@ class CheckoutEngine:
                 timeout=3000,
             ):
                 await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
-                await page.wait_for_timeout(3000)
+                await wait_for_page_ready(page, timeout=10000)
 
             # Sign in if needed — try selectors first, then vision
             sign_in_visible = False
@@ -1314,36 +1321,38 @@ class CheckoutEngine:
                     pw_radio = page.get_by_role("radio", name="Password", exact=False)
                     if await pw_radio.first.is_visible(timeout=1000):
                         auth_picker_visible = True
-                        await pw_radio.first.click()
-                        await page.wait_for_timeout(1000)
+                        await human_click_element(page, pw_radio)
+                        await random_delay(page, 800, 1500)
                 except Exception:
                     pass
 
                 if not auth_picker_visible:
-                    # Standard flow: fill email/phone and submit
+                    # Standard flow: fill email/phone and submit (human-like via _smart_fill)
                     email_filled = await self._smart_fill(page, "email/phone", email_sel, creds.email)
                     if email_filled:
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                         await self._multi_strategy_click(page, "Continue", [
                             "Continue", "Sign in", "Next",
                         ], 'button[type="submit"]')
-                        await page.wait_for_timeout(3000)
+                        await wait_for_page_ready(page, timeout=10000)
 
                         # Check for auth method picker after submit
                         try:
                             pw_radio = page.get_by_role("radio", name="Password", exact=False)
                             if await pw_radio.first.is_visible(timeout=2000):
-                                await pw_radio.first.click()
-                                await page.wait_for_timeout(1000)
+                                await human_click_element(page, pw_radio)
+                                await random_delay(page, 800, 1500)
                         except Exception:
                             pass
 
-                # Now enter password
+                # Now enter password (human-like via _smart_fill)
                 pass_filled = await self._smart_fill(page, "password", pass_sel, creds.password)
                 if pass_filled:
+                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                     await self._multi_strategy_click(page, "Sign in", [
                         "Sign in", "Log in", "Continue",
                     ], 'button[type="submit"]')
-                    await page.wait_for_timeout(3000)
+                    await wait_for_page_ready(page, timeout=10000)
                 else:
                     # Full vision-assisted sign-in
                     await self._smart_sign_in(page, creds, "walmart")
@@ -1355,7 +1364,7 @@ class CheckoutEngine:
                 timeout=2000,
             )
 
-            # Wait for user to handle captcha if present, then place order
+            # Wait for checkout page to be ready, then place order
             if dry_run:
                 try:
                     btn = page.locator('button:has-text("Place order")')
@@ -1386,7 +1395,7 @@ class CheckoutEngine:
                 'button:has-text("Place order")',
                 timeout=15000,
             ):
-                await page.wait_for_timeout(5000)
+                await wait_for_page_ready(page, timeout=10000)
                 await self._save_context(context, "walmart")
                 return CheckoutResult(
                     url=url,
@@ -1425,10 +1434,11 @@ class CheckoutEngine:
 
         try:
             await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(3000)
+            await wait_for_page_ready(page, timeout=15000)
 
             # PKC often has queue — wait for page to load
             # Add to cart
+            await sweep_popups(page)
             if not await self._smart_click(
                 page, "Add to Cart",
                 'button:has-text("Add to Cart"), button:has-text("Add to Bag")',
@@ -1438,7 +1448,7 @@ class CheckoutEngine:
                 if error:
                     raise Exception(f"Cannot add to cart: {error}")
                 raise Exception("Add to cart button not found")
-            await page.wait_for_timeout(2000)
+            await random_delay(page, 1500, 2500)
 
             # Navigate to cart/checkout
             if not await self._smart_click(
@@ -1446,14 +1456,14 @@ class CheckoutEngine:
                 'a[href*="cart"], a:has-text("Cart"), a:has-text("Bag")',
             ):
                 raise Exception("Cart link not found")
-            await page.wait_for_timeout(2000)
+            await wait_for_page_ready(page, timeout=10000)
 
             if not await self._smart_click(
                 page, "Checkout",
                 'button:has-text("Checkout"), a:has-text("Checkout")',
             ):
                 raise Exception("Checkout button not found")
-            await page.wait_for_timeout(3000)
+            await wait_for_page_ready(page, timeout=10000)
 
             # Sign in if needed (may redirect to access.pokemon.com SSO)
             current_url = page.url
@@ -1464,14 +1474,15 @@ class CheckoutEngine:
                 email_sel = 'input[type="email"], input[name="email"], input[type="text"][autocomplete="email"], input[type="text"][autocomplete="username"], input[id*="email" i], input[id*="login" i], input[name*="email" i], input[name*="login" i]'
                 pass_sel = 'input[type="password"], input[name="password"], input[id*="password" i]'
 
-            # Try selector-based sign-in, fall back to vision
+            # Try selector-based sign-in (human-like via _smart_fill), fall back to vision
             email_filled = await self._smart_fill(page, "email", email_sel, creds.email, timeout=5000)
             if email_filled:
                 await self._smart_fill(page, "password", pass_sel, creds.password)
+                await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                 await self._multi_strategy_click(page, "Sign In", [
                     "Sign In", "Log In", "Continue",
                 ], 'button[type="submit"], button:has-text("Sign In")')
-                await page.wait_for_timeout(5000)
+                await wait_for_page_ready(page, timeout=10000)
             else:
                 # No email field found by selectors — try full vision sign-in
                 await self._smart_sign_in(page, creds, "pokemoncenter")
@@ -1507,7 +1518,7 @@ class CheckoutEngine:
                 'button:has-text("Place Order"), button:has-text("Submit Order")',
                 timeout=15000,
             ):
-                await page.wait_for_timeout(5000)
+                await wait_for_page_ready(page, timeout=10000)
                 await self._save_context(context, "pokemoncenter")
                 return CheckoutResult(
                     url=url,
@@ -1546,7 +1557,7 @@ class CheckoutEngine:
 
         try:
             await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
+            await wait_for_page_ready(page, timeout=10000)
 
             # Check for invitation system — use vision as backup detector
             invite_text = await page.locator('text=/invitation/i').count()
@@ -1560,6 +1571,7 @@ class CheckoutEngine:
                 )
 
             # Standard add to cart
+            await sweep_popups(page)
             if not await self._smart_click(
                 page, "Add to Cart",
                 'button.add-to-cart-button:not([disabled]), button.btn-primary.add-to-cart-button',
@@ -1574,7 +1586,7 @@ class CheckoutEngine:
                 if error:
                     raise Exception(f"Cannot add to cart: {error}")
                 raise Exception("Add to cart button not found")
-            await page.wait_for_timeout(2000)
+            await random_delay(page, 1500, 2500)
 
             # Go to cart via popup button or direct navigation
             if not await self._smart_click(
@@ -1583,7 +1595,7 @@ class CheckoutEngine:
                 timeout=3000,
             ):
                 await page.goto("https://www.bestbuy.com/cart", wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000)
+                await wait_for_page_ready(page, timeout=10000)
 
             # Click checkout
             if not await self._smart_click(
@@ -1591,18 +1603,19 @@ class CheckoutEngine:
                 'button[data-track="Checkout - Top"], button:has-text("Checkout"), a:has-text("Checkout")',
             ):
                 raise Exception("Checkout button not found")
-            await page.wait_for_timeout(3000)
+            await wait_for_page_ready(page, timeout=10000)
 
-            # Sign in if needed — selectors first, vision fallback
+            # Sign in if needed — selectors first (human-like via _smart_fill), vision fallback
             email_filled = await self._smart_fill(
                 page, "email", 'input#fld-e, input[id="user.emailAddress"], input[type="email"], input[name="email"]', creds.email, timeout=3000,
             )
             if email_filled:
                 await self._smart_fill(page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password)
+                await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                 await self._multi_strategy_click(page, "Sign In", [
                     "Sign In", "Log In", "Continue",
                 ], 'button[type="submit"], button:has-text("Sign In")')
-                await page.wait_for_timeout(3000)
+                await wait_for_page_ready(page, timeout=10000)
             else:
                 # Try full vision-assisted sign-in
                 await self._smart_sign_in(page, creds, "bestbuy")
@@ -1644,7 +1657,7 @@ class CheckoutEngine:
                 'button:has-text("Place Your Order"), button:has-text("Place Order")',
                 timeout=15000,
             ):
-                await page.wait_for_timeout(5000)
+                await wait_for_page_ready(page, timeout=10000)
                 await self._save_context(context, "bestbuy")
                 return CheckoutResult(
                     url=url,
