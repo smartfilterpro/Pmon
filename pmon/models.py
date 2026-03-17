@@ -19,8 +19,17 @@ Models are clean and well-structured. Gaps for the rewrite:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
+
+
+def _utcnow() -> datetime:
+    """Return timezone-aware UTC now.
+
+    Using timezone-aware datetimes ensures .isoformat() includes '+00:00',
+    which lets the browser correctly convert to the user's local timezone.
+    """
+    return datetime.now(timezone.utc)
 
 
 class StockStatus(Enum):
@@ -44,7 +53,7 @@ class StockResult:
     product_name: str
     status: StockStatus
     price: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utcnow)
     error_message: str = ""
 
 
@@ -56,7 +65,7 @@ class CheckoutResult:
     status: CheckoutStatus
     order_number: str = ""
     error_message: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utcnow)
 
 
 @dataclass

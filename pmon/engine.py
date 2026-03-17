@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pmon.config import Config, Product
 from pmon.models import MonitorState, StockStatus, CheckoutStatus
@@ -92,7 +92,7 @@ class PmonEngine:
         self.sync_products_from_db()
         self._running = True
         self.state.is_running = True
-        self.state.started_at = datetime.now()
+        self.state.started_at = datetime.now(timezone.utc)
         logger.info(f"Starting monitor with {len(self.config.products)} products, "
                      f"polling every {self.config.poll_interval}s")
 
