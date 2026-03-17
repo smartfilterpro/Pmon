@@ -1,4 +1,59 @@
-"""Checkout engine: API-first with optional Playwright browser fallback."""
+"""Checkout engine: API-first with optional Playwright browser fallback.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+This file contains the browser-based checkout engine with Playwright. It
+currently implements a Target checkout flow (_checkout_target) that is BROKEN
+due to Target site changes. Key issues identified:
+
+1. NO POPUP HANDLER: The bot has no universal popup/modal handler. Target now
+   shows new interstitials (cookie consent, "sign in for deals" modals,
+   age gates, delivery method pickers, "Choose a store" sheets) that block
+   the checkout flow. The _dismiss_target_overlay() method only handles
+   cookie/privacy overlays via a fixed list of selectors — it does NOT
+   detect or dismiss arbitrary modals, dialogs, or interstitials.
+
+2. LINEAR FLOW WITH NO RECOVERY: The _checkout_target() method runs steps
+   sequentially with no retry logic. If any step fails (e.g. a popup blocks
+   "Add to cart"), the entire checkout aborts. There is no mechanism to
+   detect that a step failed due to an unexpected UI element vs. a real error.
+
+3. HARDCODED SELECTORS: Selectors like 'button[data-test="shipItButton"]' and
+   'button[data-test="addToCartModalViewCartCheckout"]' are brittle. Target
+   frequently renames data-test attributes. The _smart_click() vision fallback
+   helps but is only used after CSS selectors fail — it doesn't proactively
+   sweep for blockers BEFORE attempting clicks.
+
+4. NO PRICE GUARD: The bot will place an order at ANY price. There is no
+   max_price check before clicking "Place your order". A price spike or
+   wrong product could result in an unintended expensive purchase.
+
+5. SIGN-IN FLOW FRAGILE: _sign_in_target() handles the multi-step Target
+   login but has no recovery if the login page doesn't render (after 3
+   retries it raises RuntimeError and aborts). The login flow also doesn't
+   handle CAPTCHAs or 2FA prompts from Target.
+
+6. STEALTH JS IS GOOD: The STEALTH_JS injection is comprehensive (webdriver
+   flag removal, WebGL spoofing, canvas noise, chrome object emulation).
+   This should be preserved in the rewrite.
+
+7. SESSION PERSISTENCE WORKS: _get_context()/_save_context() correctly use
+   Playwright's storage_state for cookie persistence. This pattern is sound.
+
+8. VISION HELPERS ARE USEFUL: _smart_click(), _smart_fill(), _ask_vision()
+   provide a good foundation for Claude-assisted fallback. However, they
+   return coordinates for clicking — which can be fragile if the viewport
+   or page layout shifts. The rewrite should use these as a last resort
+   after the new PopupHandler has swept for blockers.
+
+9. NO SCREENSHOTS FOR DEBUGGING: Failed steps don't save screenshots. The
+   only screenshot usage is for vision API calls. Every major step should
+   save a timestamped screenshot for post-mortem debugging.
+
+10. MISSING max_price CONFIG: The Config/Profile dataclasses have no
+    max_price field. This needs to be added to enable price guards.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -21,49 +76,109 @@ SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 # Stealth JS to inject into every page to reduce bot detection.
 # This patches the most common signals that PerimeterX/DataDome look for.
 STEALTH_JS = """
-// Remove webdriver flag (Playwright sets this by default)
+// --- webdriver flag removal (multiple vectors) ---
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 delete navigator.__proto__.webdriver;
 
-// Languages & plugins must look realistic
+// Prevent detection via getOwnPropertyDescriptor
+const origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+Object.getOwnPropertyDescriptor = function(obj, prop) {
+    if (prop === 'webdriver') return undefined;
+    return origGetOwnPropertyDescriptor(obj, prop);
+};
+
+// --- Languages & plugins ---
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 Object.defineProperty(navigator, 'plugins', {
     get: () => {
-        // Return realistic plugin array (Chrome PDF plugins)
         const plugins = [
             {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
             {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
             {name: 'Native Client', filename: 'internal-nacl-plugin'},
         ];
         plugins.refresh = () => {};
+        Object.defineProperty(plugins, 'length', {get: () => 3});
         return plugins;
     }
 });
 
-// Chrome object must exist and look real
+// --- Hardware concurrency & device memory (headless defaults are suspicious) ---
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
+Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+Object.defineProperty(navigator, 'vendor', {get: () => 'Google Inc.'});
+
+// --- Chrome object (must exist and look realistic) ---
 window.chrome = {
+    app: {isInstalled: false, InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'}, RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'}},
     runtime: {
-        onMessage: {addListener: () => {}, removeListener: () => {}},
+        onMessage: {addListener: () => {}, removeListener: () => {}, hasListeners: () => false},
         sendMessage: () => {},
-        connect: () => ({onMessage: {addListener: () => {}}, postMessage: () => {}}),
+        connect: () => ({onMessage: {addListener: () => {}}, postMessage: () => {}, disconnect: () => {}}),
+        PlatformOs: {MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd'},
+        PlatformArch: {ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64'},
+        PlatformNaclArch: {ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64'},
+        RequestUpdateCheckStatus: {THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available'},
     },
-    loadTimes: () => ({}),
-    csi: () => ({}),
+    loadTimes: () => ({requestTime: Date.now() / 1000, startLoadTime: Date.now() / 1000, firstPaintTime: Date.now() / 1000 + 0.1, firstPaintAfterLoadTime: 0, finishDocumentLoadTime: Date.now() / 1000 + 0.2, finishLoadTime: Date.now() / 1000 + 0.3, navigationType: 'Other'}),
+    csi: () => ({startE: Date.now(), onloadT: Date.now() + 200}),
 };
 
-// Permissions API patch
+// --- Permissions API patch ---
 const originalQuery = window.navigator.permissions.query;
 window.navigator.permissions.query = (parameters) =>
     parameters.name === 'notifications'
         ? Promise.resolve({state: Notification.permission})
         : originalQuery(parameters);
 
-// Prevent detection via iframe contentWindow checks
-const origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-Object.getOwnPropertyDescriptor = function(obj, prop) {
-    if (prop === 'webdriver') return undefined;
-    return origGetOwnPropertyDescriptor(obj, prop);
+// --- WebGL vendor/renderer (headless Chrome shows "Google SwiftShader") ---
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Google Inc. (NVIDIA)';       // UNMASKED_VENDOR_WEBGL
+    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)'; // UNMASKED_RENDERER_WEBGL
+    return getParameter.call(this, param);
 };
+const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+WebGL2RenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Google Inc. (NVIDIA)';
+    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+    return getParameter2.call(this, param);
+};
+
+// --- Canvas fingerprint noise (prevent exact canvas hash matching) ---
+const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+HTMLCanvasElement.prototype.toDataURL = function(type) {
+    if (this.width === 0 && this.height === 0) return origToDataURL.call(this, type);
+    const ctx = this.getContext('2d');
+    if (ctx) {
+        const imageData = ctx.getImageData(0, 0, Math.min(this.width, 2), Math.min(this.height, 2));
+        // Tiny noise to a few pixels — changes fingerprint hash without visible effect
+        for (let i = 0; i < imageData.data.length && i < 12; i += 4) {
+            imageData.data[i] = imageData.data[i] ^ 1;
+        }
+        ctx.putImageData(imageData, 0, 0);
+    }
+    return origToDataURL.call(this, type);
+};
+
+// --- Prevent Notification.permission detection in iframes ---
+try {
+    if (Notification.permission === 'default') {
+        Object.defineProperty(Notification, 'permission', {get: () => 'default'});
+    }
+} catch(e) {}
+
+// --- Screen dimensions (headless often has weird values) ---
+Object.defineProperty(screen, 'colorDepth', {get: () => 24});
+Object.defineProperty(screen, 'pixelDepth', {get: () => 24});
+
+// --- Connection API (headless may not have it) ---
+if (!navigator.connection) {
+    Object.defineProperty(navigator, 'connection', {
+        get: () => ({effectiveType: '4g', rtt: 50, downlink: 10, saveData: false}),
+    });
+}
 """
 
 
@@ -311,8 +426,15 @@ class CheckoutEngine:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-web-security",
                     "--disable-features=VizDisplayCompositor",
+                    "--disable-infobars",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--no-first-run",
+                    "--use-gl=angle",
+                    "--use-angle=d3d11",
                 ],
             )
             self._browser_available = True
@@ -454,10 +576,12 @@ class CheckoutEngine:
                 f"Chrome/{_CHROME_FULL} Safari/537.36"
             ),
             viewport={"width": 1366, "height": 768},
+            screen={"width": 1920, "height": 1080},
             locale="en-US",
             timezone_id="America/New_York",
+            color_scheme="light",
             extra_http_headers={
-                "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+                "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not?A_Brand";v="24"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
             },
@@ -476,7 +600,19 @@ class CheckoutEngine:
     async def _checkout_target(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
-        """Target checkout flow."""
+        """Target checkout flow.
+
+        AUDIT: This is the method that broke. Root causes:
+        - No popup sweep between steps (new Target modals go unhandled)
+        - No retry on individual steps (one failure = total abort)
+        - No price validation before placing order
+        - No screenshot logging for debugging failed runs
+        - Delivery method selection (_target_select_delivery) uses fixed
+          selectors that Target has changed
+        - The "Add to cart" confirmation modal handling is incomplete —
+          Target now sometimes shows "Choose a store" or "Sign in to save"
+          modals after the add-to-cart click that are not dismissed
+        """
         context = await self._get_context("target")
         page = await context.new_page()
 
@@ -487,6 +623,9 @@ class CheckoutEngine:
 
             # Dismiss privacy/cookie overlay if present
             await self._dismiss_target_overlay(page)
+
+            # Dismiss Health Data Consent modal if present (health-related products)
+            await self._dismiss_health_consent_modal(page)
 
             # Check if we need to sign in
             if not await self._is_signed_in_target(page):
@@ -503,11 +642,23 @@ class CheckoutEngine:
                 'button:has-text("Ship it"), button:has-text("Add to cart")',
             )
             if not add_to_cart_clicked:
-                error = await self._smart_read_error(page)
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found")
+                # Health Data Consent modal may have appeared and blocked the click
+                if await self._dismiss_health_consent_modal(page):
+                    # Retry add-to-cart after dismissing the consent modal
+                    add_to_cart_clicked = await self._smart_click(
+                        page, "Ship it / Add to cart",
+                        'button[data-test="shipItButton"], button[data-test="shippingButton"], '
+                        'button:has-text("Ship it"), button:has-text("Add to cart")',
+                    )
+                if not add_to_cart_clicked:
+                    error = await self._smart_read_error(page)
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found")
             await page.wait_for_timeout(1500)
+
+            # Health Data Consent modal can also appear AFTER clicking add-to-cart
+            await self._dismiss_health_consent_modal(page)
 
             # Decline optional coverage/warranty if modal appears
             await self._smart_click(
@@ -624,8 +775,77 @@ class CheckoutEngine:
         except Exception:
             return False
 
+    async def _dismiss_health_consent_modal(self, page) -> bool:
+        """Dismiss Target's Health Data Consent modal if present.
+
+        Target shows this modal for health-related products (supplements,
+        vitamins, health monitors, etc.), requiring users to agree to Terms
+        and Health Privacy Policy before adding to cart.  Returns True if a
+        modal was dismissed.
+        """
+        try:
+            # Look for the modal by role or common selectors
+            consent_selectors = [
+                # Dialog-level selectors
+                '[data-test="health-consent-modal"] button:has-text("Agree")',
+                '[data-test="healthConsentModal"] button:has-text("Agree")',
+                # Generic modal with health-related text + agree/acknowledge button
+                'dialog button:has-text("I agree")',
+                'dialog button:has-text("Agree")',
+                'dialog button:has-text("Acknowledge")',
+                'dialog button:has-text("Accept")',
+                'dialog button:has-text("Continue")',
+                # Div-based modals (Target uses both <dialog> and div overlays)
+                '[role="dialog"] button:has-text("I agree")',
+                '[role="dialog"] button:has-text("Agree")',
+                '[role="dialog"] button:has-text("Acknowledge")',
+                '[role="dialog"] button:has-text("Accept")',
+                '[role="dialog"] button:has-text("Continue")',
+                # Broader: any visible button with agree/acknowledge text
+                'button:has-text("I agree")',
+                'button:has-text("Agree and continue")',
+            ]
+            for sel in consent_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click(timeout=3000)
+                        logger.info("Health consent modal: dismissed via '%s'", sel)
+                        await page.wait_for_timeout(1000)
+                        return True
+                except Exception:
+                    continue
+
+            # Vision fallback: ask Claude to find and click the agree button
+            if self._vision_available:
+                clicked = await self._smart_click(
+                    page,
+                    "Health Data Consent agree/acknowledge button",
+                    "",
+                    timeout=2000,
+                )
+                if clicked:
+                    logger.info("Health consent modal: dismissed via vision fallback")
+                    await page.wait_for_timeout(1000)
+                    return True
+
+            return False
+        except Exception as exc:
+            logger.debug("Health consent modal dismiss failed (non-fatal): %s", exc)
+            return False
+
     async def _dismiss_target_overlay(self, page):
-        """Dismiss Target's privacy/cookie consent overlay that blocks clicks."""
+        """Dismiss Target's privacy/cookie consent overlay that blocks clicks.
+
+        AUDIT: This is the ONLY popup-handling code in the entire checkout flow.
+        It only handles cookie/privacy overlays via a hardcoded selector list.
+        It does NOT handle: age gates, "sign in for deals" modals, "Choose a
+        store" pickers, add-to-cart confirmation drawers, delivery option sheets,
+        CAPTCHA interstitials, or any [role="dialog"]/[aria-modal="true"] elements.
+        The JS fallback (removing overlay elements) is aggressive and may break
+        React's virtual DOM state. The rewrite needs a universal PopupHandler
+        that runs after every major action and detects ANY modal/dialog/overlay.
+        """
         try:
             # Try clicking common accept/close buttons inside the floating-ui portal overlay
             for sel in [
@@ -777,6 +997,13 @@ class CheckoutEngine:
 
         We try to click "Continue" / "Save and continue" through each step
         until we reach the final review page.
+
+        AUDIT: This method has no popup handling between steps. If Target shows
+        an "address suggestion" modal, a "promo code" interstitial, or any other
+        unexpected dialog during checkout navigation, this method will fail to
+        find the "Continue" button (it's behind the modal) and silently break.
+        The rewrite must call popup_handler.sweep() before each continue click.
+        Also: no price check is performed before reaching the "Place order" page.
         """
         continue_sel = (
             'button[data-test="save-and-continue-button"], '

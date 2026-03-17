@@ -1,4 +1,20 @@
-"""Shared data models for stock status tracking."""
+"""Shared data models for stock status tracking.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+Models are clean and well-structured. Gaps for the rewrite:
+
+1. CheckoutResult NEEDS screenshot_path FIELD: For debugging failed checkout
+   attempts, each result should optionally reference a screenshot file.
+
+2. CheckoutStatus NEEDS MORE STATES: Currently only IDLE/ATTEMPTING/SUCCESS/
+   FAILED. The rewrite may need PRICE_EXCEEDED, CAPTCHA_BLOCKED, or
+   SESSION_EXPIRED states for better error reporting.
+
+3. NO PopupEvent MODEL: The new PopupHandler will need a model to log
+   detected popups (type, action taken, screenshot, timestamp).
+=============================================================================
+"""
 
 from __future__ import annotations
 
