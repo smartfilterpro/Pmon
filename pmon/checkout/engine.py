@@ -76,109 +76,49 @@ SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 # Stealth JS to inject into every page to reduce bot detection.
 # This patches the most common signals that PerimeterX/DataDome look for.
 STEALTH_JS = """
-// --- webdriver flag removal (multiple vectors) ---
+// Remove webdriver flag (Playwright sets this by default)
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 delete navigator.__proto__.webdriver;
 
-// Prevent detection via getOwnPropertyDescriptor
-const origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-Object.getOwnPropertyDescriptor = function(obj, prop) {
-    if (prop === 'webdriver') return undefined;
-    return origGetOwnPropertyDescriptor(obj, prop);
-};
-
-// --- Languages & plugins ---
+// Languages & plugins must look realistic
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 Object.defineProperty(navigator, 'plugins', {
     get: () => {
+        // Return realistic plugin array (Chrome PDF plugins)
         const plugins = [
             {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
             {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
             {name: 'Native Client', filename: 'internal-nacl-plugin'},
         ];
         plugins.refresh = () => {};
-        Object.defineProperty(plugins, 'length', {get: () => 3});
         return plugins;
     }
 });
 
-// --- Hardware concurrency & device memory (headless defaults are suspicious) ---
-Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
-Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
-Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-Object.defineProperty(navigator, 'vendor', {get: () => 'Google Inc.'});
-
-// --- Chrome object (must exist and look realistic) ---
+// Chrome object must exist and look real
 window.chrome = {
-    app: {isInstalled: false, InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'}, RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'}},
     runtime: {
-        onMessage: {addListener: () => {}, removeListener: () => {}, hasListeners: () => false},
+        onMessage: {addListener: () => {}, removeListener: () => {}},
         sendMessage: () => {},
-        connect: () => ({onMessage: {addListener: () => {}}, postMessage: () => {}, disconnect: () => {}}),
-        PlatformOs: {MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd'},
-        PlatformArch: {ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64'},
-        PlatformNaclArch: {ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64'},
-        RequestUpdateCheckStatus: {THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available'},
+        connect: () => ({onMessage: {addListener: () => {}}, postMessage: () => {}}),
     },
-    loadTimes: () => ({requestTime: Date.now() / 1000, startLoadTime: Date.now() / 1000, firstPaintTime: Date.now() / 1000 + 0.1, firstPaintAfterLoadTime: 0, finishDocumentLoadTime: Date.now() / 1000 + 0.2, finishLoadTime: Date.now() / 1000 + 0.3, navigationType: 'Other'}),
-    csi: () => ({startE: Date.now(), onloadT: Date.now() + 200}),
+    loadTimes: () => ({}),
+    csi: () => ({}),
 };
 
-// --- Permissions API patch ---
+// Permissions API patch
 const originalQuery = window.navigator.permissions.query;
 window.navigator.permissions.query = (parameters) =>
     parameters.name === 'notifications'
         ? Promise.resolve({state: Notification.permission})
         : originalQuery(parameters);
 
-// --- WebGL vendor/renderer (headless Chrome shows "Google SwiftShader") ---
-const getParameter = WebGLRenderingContext.prototype.getParameter;
-WebGLRenderingContext.prototype.getParameter = function(param) {
-    if (param === 37445) return 'Google Inc. (NVIDIA)';       // UNMASKED_VENDOR_WEBGL
-    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)'; // UNMASKED_RENDERER_WEBGL
-    return getParameter.call(this, param);
+// Prevent detection via iframe contentWindow checks
+const origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+Object.getOwnPropertyDescriptor = function(obj, prop) {
+    if (prop === 'webdriver') return undefined;
+    return origGetOwnPropertyDescriptor(obj, prop);
 };
-const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-WebGL2RenderingContext.prototype.getParameter = function(param) {
-    if (param === 37445) return 'Google Inc. (NVIDIA)';
-    if (param === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-    return getParameter2.call(this, param);
-};
-
-// --- Canvas fingerprint noise (prevent exact canvas hash matching) ---
-const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-HTMLCanvasElement.prototype.toDataURL = function(type) {
-    if (this.width === 0 && this.height === 0) return origToDataURL.call(this, type);
-    const ctx = this.getContext('2d');
-    if (ctx) {
-        const imageData = ctx.getImageData(0, 0, Math.min(this.width, 2), Math.min(this.height, 2));
-        // Tiny noise to a few pixels — changes fingerprint hash without visible effect
-        for (let i = 0; i < imageData.data.length && i < 12; i += 4) {
-            imageData.data[i] = imageData.data[i] ^ 1;
-        }
-        ctx.putImageData(imageData, 0, 0);
-    }
-    return origToDataURL.call(this, type);
-};
-
-// --- Prevent Notification.permission detection in iframes ---
-try {
-    if (Notification.permission === 'default') {
-        Object.defineProperty(Notification, 'permission', {get: () => 'default'});
-    }
-} catch(e) {}
-
-// --- Screen dimensions (headless often has weird values) ---
-Object.defineProperty(screen, 'colorDepth', {get: () => 24});
-Object.defineProperty(screen, 'pixelDepth', {get: () => 24});
-
-// --- Connection API (headless may not have it) ---
-if (!navigator.connection) {
-    Object.defineProperty(navigator, 'connection', {
-        get: () => ({effectiveType: '4g', rtt: 50, downlink: 10, saveData: false}),
-    });
-}
 """
 
 
@@ -426,15 +366,8 @@ class CheckoutEngine:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
+                    "--disable-web-security",
                     "--disable-features=VizDisplayCompositor",
-                    "--disable-infobars",
-                    "--disable-background-networking",
-                    "--disable-component-update",
-                    "--disable-default-apps",
-                    "--disable-extensions",
-                    "--no-first-run",
-                    "--use-gl=angle",
-                    "--use-angle=d3d11",
                 ],
             )
             self._browser_available = True
@@ -576,12 +509,10 @@ class CheckoutEngine:
                 f"Chrome/{_CHROME_FULL} Safari/537.36"
             ),
             viewport={"width": 1366, "height": 768},
-            screen={"width": 1920, "height": 1080},
             locale="en-US",
             timezone_id="America/New_York",
-            color_scheme="light",
             extra_http_headers={
-                "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not?A_Brand";v="24"',
+                "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
                 "Sec-Ch-Ua-Mobile": "?0",
                 "Sec-Ch-Ua-Platform": '"Windows"',
             },

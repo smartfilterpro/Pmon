@@ -13,13 +13,12 @@ from pmon.models import StockResult, StockStatus
 
 logger = logging.getLogger(__name__)
 
-# Current Chrome version — MUST match the actual Playwright Chromium binary.
-# Mismatch between UA string and real browser version is a top bot signal.
-# Run: ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome --version
-_CHROME_MAJOR = "141"
-_CHROME_FULL = "141.0.7390.37"
+# Current Chrome version — keep this updated to avoid stale UA detection.
+# Last updated: 2026-03.  Check https://chromereleases.googleblog.com for latest.
+_CHROME_MAJOR = "133"
+_CHROME_FULL = "133.0.6943.127"
 
-# Realistic browser headers that match the actual Playwright Chromium version.
+# Realistic browser headers that match a real Chrome 133 on Windows 10/11.
 # Includes Sec-Ch-Ua and Sec-Fetch-* headers that modern browsers always send.
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -33,7 +32,7 @@ DEFAULT_HEADERS = {
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     # Client-hint headers — Chrome sends these on every navigation request.
-    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not?A_Brand";v="24"',
+    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
     # Sec-Fetch headers — their absence is the #1 bot signal for PerimeterX.
