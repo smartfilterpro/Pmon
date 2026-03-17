@@ -516,7 +516,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return False
 
         LOGIN_URLS = {
-            "target": "https://www.target.com/login",
+            # Target has NO dedicated /login page — it redirects to homepage.
+            # Login is done via a side-panel opened from the account icon.
+            # Set to None so we skip direct-URL navigation and go straight
+            # to the homepage → click-sign-in-link approach.
+            "target": None,
             "walmart": "https://identity.walmart.com/signin",
             "bestbuy": "https://www.bestbuy.com/identity/global/signin",
             "pokemoncenter": "https://www.pokemoncenter.com/account/login",
@@ -531,7 +535,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         }
 
         SIGNIN_LINK_SELECTORS = {
-            "target": 'a[href*="/login"], a[href*="/account"], [data-test="@web/AccountLink"], #account, a:has-text("Sign in")',
+            "target": '[data-test="@web/AccountLink"], #account, #accountNav, a[href*="/account"], a:has-text("Sign in"), button:has-text("Sign in"), a[href*="/login"], [data-test="accountNav-signIn"], [data-test="@web/AccountLink-signIn"]',
             "walmart": 'a[href*="/account/login"], a[href*="/account"], button:has-text("Sign In"), a:has-text("Sign In")',
             "bestbuy": 'a[href*="/signin"], a[href*="/identity"], a:has-text("Sign In"), .account-button',
             "pokemoncenter": 'a[href*="/account/login"], a[href*="/account"], a:has-text("Sign In"), a:has-text("Log In")',
@@ -670,26 +674,34 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 landed_on_login = False
                 nav_failed = False
 
-                try:
-                    await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
-                except Exception:
-                    nav_failed = True
+                login_url = LOGIN_URLS.get(retailer)
 
-                if not nav_failed:
-                    await wait_for_page_ready(page, timeout=15000)
-
-                    # Check for blank page — can happen when cookies/session cause
-                    # a redirect loop or when PerimeterX blocks with an empty response
+                if login_url is not None:
+                    # Retailer has a dedicated login URL — try it
                     try:
-                        page_content = await page.content()
-                        if not page_content or len(page_content.strip()) < 100 or page_content.strip() == "<html><head></head><body></body></html>":
-                            logger.warning("Test login %s: blank page detected after navigation — retrying without cookies", retailer_name)
-                            # Clear cookies and retry
-                            await context.clear_cookies()
-                            await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
-                            await page.wait_for_timeout(3000)
+                        await page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
                     except Exception:
-                        pass
+                        nav_failed = True
+
+                    if not nav_failed:
+                        await wait_for_page_ready(page, timeout=15000)
+
+                        # Check for blank page — can happen when cookies/session cause
+                        # a redirect loop or when PerimeterX blocks with an empty response
+                        try:
+                            page_content = await page.content()
+                            if not page_content or len(page_content.strip()) < 100 or page_content.strip() == "<html><head></head><body></body></html>":
+                                logger.warning("Test login %s: blank page detected after navigation — retrying without cookies", retailer_name)
+                                await context.clear_cookies()
+                                await page.goto(login_url, wait_until="domcontentloaded", timeout=45000)
+                                await wait_for_page_ready(page, timeout=10000)
+                        except Exception:
+                            pass
+                else:
+                    # No dedicated login URL (e.g. Target) — go straight to
+                    # homepage sign-in panel approach
+                    nav_failed = True
+                    logger.info("Test login %s: no dedicated login URL — will use homepage sign-in panel", retailer_name)
 
                 current_url = page.url
 
@@ -743,46 +755,81 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     if block_result:
                         return block_result
 
-                # --- Fallback: if redirected away from login, go to homepage and find sign-in link ---
+                # --- Fallback: if redirected away from login, go to homepage and find sign-in link/panel ---
                 if not landed_on_login or nav_failed:
                     # Before retrying, check if we're on a bot-block page
-                    block_result = await _check_bot_block(page, "blocked before reaching login page")
-                    if block_result:
-                        return block_result
+                    # (skip this check if we intentionally skipped direct URL — login_url is None)
+                    if login_url is not None:
+                        block_result = await _check_bot_block(page, "blocked before reaching login page")
+                        if block_result:
+                            return block_result
 
-                    logger.info("Test login %s: direct login URL missed (landed on %s), trying homepage approach", retailer_name, current_url)
-                    try:
-                        await page.goto(HOME_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
-                    except Exception as home_err:
-                        page_desc = await vision_read_page(page)
-                        msg = f"{retailer_name} page failed to load"
-                        if page_desc:
-                            msg += f": {page_desc}"
-                        return {"ok": False, "message": msg}
+                    logger.info("Test login %s: using homepage sign-in panel approach (current: %s)", retailer_name, current_url)
 
-                    await page.wait_for_timeout(3000)
+                    # Only re-navigate if we're not already on the homepage
+                    # (we already visited it during warm-up)
+                    home_url = HOME_URLS[retailer]
+                    if not current_url.rstrip("/").endswith(home_url.rstrip("/").split("//", 1)[-1].rstrip("/")):
+                        try:
+                            await page.goto(home_url, wait_until="domcontentloaded", timeout=45000)
+                        except Exception as home_err:
+                            page_desc = await vision_read_page(page)
+                            msg = f"{retailer_name} page failed to load"
+                            if page_desc:
+                                msg += f": {page_desc}"
+                            return {"ok": False, "message": msg}
+
+                    await wait_for_page_ready(page, timeout=15000)
+
+                    # Human-like: browse the page before clicking sign-in
+                    await random_mouse_jitter(page)
+                    await random_delay(page, 500, 1500)
 
                     # Check homepage for bot block too
                     block_result = await _check_bot_block(page, "homepage blocked by bot detection")
                     if block_result:
                         return block_result
 
-                    # Try to click the sign-in link from the homepage
+                    # Try to click the sign-in link/icon from the homepage
+                    # For Target this opens a slide-in side panel
                     signin_clicked = False
                     try:
                         signin_link = page.locator(SIGNIN_LINK_SELECTORS[retailer])
-                        if await signin_link.first.is_visible(timeout=5000):
-                            await signin_link.first.click()
+                        if await signin_link.first.is_visible(timeout=8000):
+                            await human_click_element(page, signin_link)
                             signin_clicked = True
-                            await page.wait_for_timeout(4000)
+                            # Wait for the side panel / login form to appear
+                            await wait_for_page_ready(page, timeout=10000)
+                            await random_delay(page, 1000, 2000)
                     except Exception:
                         pass
 
                     if not signin_clicked:
                         # Vision fallback: find and click sign-in link on homepage
-                        if await vision_click(page, "Sign in or Account link"):
+                        if await vision_click(page, "Sign in or Account link/icon in the top navigation"):
                             signin_clicked = True
-                            await page.wait_for_timeout(4000)
+                            await wait_for_page_ready(page, timeout=10000)
+                            await random_delay(page, 1000, 2000)
+
+                    # For Target: after clicking account icon, a side panel appears
+                    # with "Sign in or create account" button — click it
+                    if signin_clicked and retailer == "target":
+                        try:
+                            sign_in_btn = page.locator(
+                                'a:has-text("Sign in or create account"), '
+                                'button:has-text("Sign in or create account"), '
+                                'a[href*="/login"], '
+                                '[data-test="accountNav-signIn"]'
+                            )
+                            if await sign_in_btn.first.is_visible(timeout=5000):
+                                await human_click_element(page, sign_in_btn)
+                                logger.info("Test login %s: clicked 'Sign in or create account' in side panel", retailer_name)
+                                await wait_for_page_ready(page, timeout=15000)
+                                await random_delay(page, 500, 1500)
+                        except Exception:
+                            # Vision fallback for the sign-in button in the panel
+                            await vision_click(page, "Sign in or create account button")
+                            await wait_for_page_ready(page, timeout=15000)
 
                     if not signin_clicked:
                         page_desc = await vision_read_page(page)
@@ -823,7 +870,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 if not email_found:
                     if await vision_fill(page, "email or username input", email):
                         email_found = True
-                        await page.wait_for_timeout(1000)
+                        await random_delay(page, 800, 1200)
                     else:
                         page_desc = await vision_read_page(page)
                         msg = f"{retailer_name} login page did not load — no email/username field found at {current_url}"
@@ -1023,23 +1070,25 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 banner_text = await error_banner.first.inner_text(timeout=1000)
                                 if "something went wrong" in banner_text.lower() or "try again" in banner_text.lower():
                                     logger.info("Test login %s: server error on first attempt, retrying", retailer_name)
-                                    await page.wait_for_timeout(2000)
+                                    await random_delay(page, 1500, 2500)
                                     # Clear and re-type email, then submit again
                                     try:
-                                        await page.locator(email_sel).first.click()
-                                        await page.locator(email_sel).first.press("Control+a")
-                                        await page.keyboard.type(email, delay=40)
-                                        await page.wait_for_timeout(500)
+                                        email_loc = page.locator(email_sel).first
+                                        await human_click_element(page, email_loc)
+                                        await email_loc.press("Control+a")
+                                        await human_type(page, email)
+                                        await random_delay(page, 300, 600)
                                         # Re-use the same multi-strategy click
+                                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                                         for btn_text in ["Continue with email", "Continue", "Sign in"]:
                                             try:
                                                 btn = page.get_by_role("button", name=btn_text, exact=False)
                                                 if await btn.first.is_visible(timeout=500):
-                                                    await btn.first.click()
+                                                    await human_click_element(page, btn)
                                                     break
                                             except Exception:
                                                 continue
-                                        await page.wait_for_timeout(3000)
+                                        await wait_for_page_ready(page, timeout=10000)
                                     except Exception:
                                         pass
                         except Exception:
@@ -1213,7 +1262,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     else:
                         # Vision fallback for password entry
                         if await vision_fill(page, "password input", password):
-                            await page.wait_for_timeout(500)
+                            await random_delay(page, 400, 700)
                             await vision_click(page, "Sign In / Continue / Verify button")
                         else:
                             page_desc = await vision_read_page(page)
