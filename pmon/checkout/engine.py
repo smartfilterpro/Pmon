@@ -62,6 +62,7 @@ import base64
 import json
 import logging
 import os
+import random
 from pathlib import Path
 
 from pmon.config import Config, AccountCredentials, Profile
@@ -1895,16 +1896,28 @@ class CheckoutEngine:
             await random_delay(page, 500, 1500)
 
             # Step 3: Add to cart
+            await sweep_popups(page)
             if not await self._smart_click(
                 page, "Add to Cart",
                 'button:has-text("Add to Cart"), button:has-text("Add to Bag")',
                 timeout=10000,
             ):
-                error = await self._smart_read_error(page)
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found")
+                # Popup may have blocked the click — sweep and retry
+                if await sweep_popups(page):
+                    await self._smart_click(
+                        page, "Add to Cart",
+                        'button:has-text("Add to Cart"), button:has-text("Add to Bag")',
+                        timeout=5000,
+                    )
+                else:
+                    error = await self._smart_read_error(page)
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found")
             await random_delay(page, 1500, 2500)
+
+            # Sweep popups after add-to-cart (promo offers, warranty, etc.)
+            await sweep_popups(page)
 
             # Step 4: Navigate to cart/checkout
             if not await self._smart_click(
@@ -1915,6 +1928,11 @@ class CheckoutEngine:
                 # Try navigating directly
                 await page.goto("https://www.pokemoncenter.com/cart", wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=10000)
+            await sweep_popups(page)
+
+            # Human-like: glance at cart before proceeding to checkout
+            await idle_scroll(page)
+            await random_delay(page, 500, 1500)
 
             if not await self._smart_click(
                 page, "Checkout",
@@ -1923,6 +1941,7 @@ class CheckoutEngine:
             ):
                 raise Exception("Checkout button not found")
             await wait_for_page_ready(page, timeout=15000)
+            await sweep_popups(page)
 
             # Step 5: Handle payment form (PKC requires payment entry every time)
             await self._pkc_fill_checkout_form(page, profile, creds)
@@ -2047,8 +2066,11 @@ class CheckoutEngine:
                 if await state_elem.is_visible(timeout=1000):
                     current = await state_elem.input_value(timeout=500)
                     if not current:
+                        # Human-like: click the dropdown first, pause, then select
+                        await human_click_element(page, state_elem)
+                        await random_delay(page, 200, 500)
                         await state_elem.select_option(value=profile.state)
-                        await random_delay(page, 200, 400)
+                        await random_delay(page, 300, 600)
             except Exception:
                 pass
 
@@ -2117,7 +2139,7 @@ class CheckoutEngine:
                         await card_in_frame.wait_for(state="visible", timeout=3000)
                         await card_in_frame.click()
                         await random_delay(page, 100, 250)
-                        await card_in_frame.type(creds.card_number, delay=50)
+                        await card_in_frame.type(creds.card_number, delay=random.randint(45, 120))
                         card_filled = True
 
                         # Expiry inside iframe
@@ -2133,7 +2155,7 @@ class CheckoutEngine:
                                 exp_value = f"{creds.card_exp_month}/{creds.card_exp_year[-2:]}" if creds.card_exp_year else creds.card_exp_month
                                 await exp_input.click()
                                 await random_delay(page, 100, 200)
-                                await exp_input.type(exp_value, delay=50)
+                                await exp_input.type(exp_value, delay=random.randint(50, 130))
                         except Exception:
                             pass
 
@@ -2149,7 +2171,7 @@ class CheckoutEngine:
                             if await cvv_input.is_visible(timeout=1000):
                                 await cvv_input.click()
                                 await random_delay(page, 100, 200)
-                                await cvv_input.type(creds.card_cvv, delay=50)
+                                await cvv_input.type(creds.card_cvv, delay=random.randint(55, 140))
                         except Exception:
                             pass
 
