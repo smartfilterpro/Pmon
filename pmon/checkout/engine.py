@@ -857,21 +857,36 @@ class CheckoutEngine:
                 break
 
     async def _sign_in_target(self, page, creds: AccountCredentials):
-        await page.goto(
-            "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
-            wait_until="domcontentloaded",
-        )
-        await page.wait_for_timeout(2000)
-
-        # Dismiss Target privacy/cookie overlay that blocks pointer events
-        await self._dismiss_target_overlay(page)
+        login_url = "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username"
 
         email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
         pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'
 
+        # Target's login is a React SPA — domcontentloaded fires before React
+        # renders the form.  Use "load" and then poll for the email field,
+        # retrying with a full page reload if the form never appears.
+        email_input = None
+        for attempt in range(3):
+            if attempt == 0:
+                await page.goto(login_url, wait_until="load")
+            else:
+                logger.warning("Target login: form not rendered (attempt %d/3) — reloading", attempt)
+                await page.reload(wait_until="load")
+
+            await self._dismiss_target_overlay(page)
+
+            # Poll for the email field to appear (React hydration)
+            try:
+                email_input = page.locator(email_sel).first
+                await email_input.wait_for(state="visible", timeout=15000)
+                break  # form rendered
+            except Exception:
+                email_input = None
+
+        if email_input is None:
+            raise RuntimeError("Target login page did not render — email field not found after 3 attempts")
+
         # Step 1: Enter email/phone
-        email_input = page.locator(email_sel).first
-        await email_input.wait_for(state="visible", timeout=10000)
 
         # Try keyboard.type() first (human-like), verify it worked, fall back to fill()
         await email_input.click(force=True)
