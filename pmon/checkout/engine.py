@@ -1063,34 +1063,76 @@ class CheckoutEngine:
                 break
 
     async def _sign_in_target(self, page, creds: AccountCredentials):
-        login_url = "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username"
+        # Target has NO dedicated /login page — it redirects to homepage.
+        # Login is triggered by clicking the account icon on the homepage,
+        # which opens a side panel with "Sign in or create account".
 
         email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
         pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'
         submit_sel = 'button[type="submit"]'
 
+        account_link_sel = (
+            '[data-test="@web/AccountLink"], #account, #accountNav, '
+            'a[href*="/account"], a:has-text("Sign in"), '
+            'button:has-text("Sign in"), '
+            '[data-test="accountNav-signIn"], '
+            '[data-test="@web/AccountLink-signIn"]'
+        )
+
+        sign_in_panel_btn_sel = (
+            'a:has-text("Sign in or create account"), '
+            'button:has-text("Sign in or create account"), '
+            'a[href*="/login"], '
+            '[data-test="accountNav-signIn"]'
+        )
+
         # --- Start network monitor to observe OAuth flow ---
         net_monitor = NetworkMonitor(page)
         await net_monitor.start()
 
-        # Target's login is a React SPA — domcontentloaded fires before React
-        # renders the form.  Use "load" and then poll for the email field,
-        # retrying with a full page reload if the form never appears.
+        # Step 0: Navigate to homepage and open the sign-in panel
         email_input = None
         for attempt in range(3):
             if attempt == 0:
-                await page.goto(login_url, wait_until="load")
+                await page.goto("https://www.target.com", wait_until="domcontentloaded")
             else:
                 logger.warning("Target login: form not rendered (attempt %d/3) — reloading", attempt)
-                await page.reload(wait_until="load")
+                await page.reload(wait_until="domcontentloaded")
 
-            # Wait for the page to be truly ready (not just DOM loaded)
             await wait_for_page_ready(page, timeout=15000)
-
-            # Sweep for any popups/overlays blocking the form
             await sweep_popups(page)
 
-            # Human-like: move mouse around while waiting for form
+            # Human-like: browse the page before clicking sign-in
+            await random_mouse_jitter(page)
+            await random_delay(page, 500, 1500)
+
+            # Click account icon to open side panel
+            try:
+                account_link = page.locator(account_link_sel)
+                if await account_link.first.is_visible(timeout=8000):
+                    await human_click_element(page, account_link)
+                    await random_delay(page, 1000, 2000)
+                else:
+                    # Vision fallback for account icon
+                    await self._smart_click(page, "Account or Sign in icon", account_link_sel, timeout=5000)
+                    await random_delay(page, 1000, 2000)
+            except Exception:
+                await self._smart_click(page, "Account or Sign in icon", account_link_sel, timeout=5000)
+                await random_delay(page, 1000, 2000)
+
+            # Click "Sign in or create account" in the side panel
+            try:
+                sign_in_btn = page.locator(sign_in_panel_btn_sel)
+                if await sign_in_btn.first.is_visible(timeout=5000):
+                    await human_click_element(page, sign_in_btn)
+                    logger.info("Target login: clicked 'Sign in or create account' in side panel")
+                    await wait_for_page_ready(page, timeout=15000)
+                    await random_delay(page, 500, 1500)
+            except Exception:
+                # May have navigated directly to login form
+                pass
+
+            await sweep_popups(page)
             await random_mouse_jitter(page)
 
             # Poll for the email field to appear (React hydration)
@@ -1103,7 +1145,7 @@ class CheckoutEngine:
 
         if email_input is None:
             await net_monitor.stop()
-            raise RuntimeError("Target login page did not render — email field not found after 3 attempts")
+            raise RuntimeError("Target login form did not render — email field not found after 3 attempts")
 
         # Step 1: Enter email/phone — human-like
 
