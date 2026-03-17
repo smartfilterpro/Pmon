@@ -1,4 +1,44 @@
-"""API-based checkout - uses direct HTTP calls instead of browser automation."""
+"""API-based checkout - uses direct HTTP calls instead of browser automation.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+This file implements direct HTTP API-based checkout for Target and Walmart.
+The Target API checkout (_checkout_target) is the "fast path" — if it works,
+no browser is needed. Key issues:
+
+1. GSP LOGIN UNRELIABLE: _tgt_gsp_login() attempts Target's OAuth flow via
+   direct HTTP calls. This almost always fails because PerimeterX blocks
+   API-level login attempts. The code correctly falls back to session cookie
+   import, but the login code is effectively dead weight.
+
+2. UNDOCUMENTED API ENDPOINTS: The Target checkout endpoints
+   (carts.target.com/web_checkouts/v1/*) are undocumented and reverse-
+   engineered. They may have changed since implementation. The code tries
+   multiple endpoint variants (PUT /checkout, POST /checkout, POST
+   /checkout/place_order, POST /place_order) as a brute-force approach.
+   This is fragile but reasonable given no official API exists.
+
+3. FULFILLMENT TYPE GUESSING: _tgt_add_to_cart() tries "DIGITAL" then "STS"
+   fulfillment types. "DIGITAL" maps to "SHIPT" (shipping) and "STS" maps
+   to "PICKUP". The fulfillment type naming is confusing and may not match
+   current Target API expectations.
+
+4. ADDRESS ENDPOINT SHOTGUNNING: _tgt_set_shipping_address() tries 4
+   different endpoint patterns to set the shipping address. This logs
+   heavily but may mask the real failure. If ALL 4 fail, it returns True
+   anyway hoping Target auto-applies the default address.
+
+5. NO PRICE GUARD: Same as browser flow — no max_price check before
+   placing the order.
+
+6. SESSION VALIDATION IS GOOD: _tgt_validate_session() checks both profile
+   and cart endpoints, which is a solid approach.
+
+7. SESSION COOKIE IMPORT IS THE REAL AUTH: The most reliable auth method is
+   importing cookies from a real browser session via the dashboard. This
+   pattern should be preserved and emphasized in the rewrite.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -25,7 +65,7 @@ HEADERS = {
     "Accept": "application/json, text/html, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br, zstd",
-    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not?A_Brand";v="24"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "empty",
