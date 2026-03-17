@@ -641,8 +641,9 @@ class CheckoutEngine:
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
 
-            # Sweep all popups/overlays (cookie consent, promos, etc.)
+            # Sweep all popups/overlays (cookie consent, promos, health consent, etc.)
             await sweep_popups(page)
+            await self._dismiss_health_consent_modal(page)
 
             # Human-like: glance at the page before interacting
             await idle_scroll(page)
@@ -659,6 +660,10 @@ class CheckoutEngine:
             # Sweep popups again after sign-in (welcome back, promos)
             await sweep_popups(page)
 
+            # Dismiss Health Data Consent modal if present — Target shows this on
+            # health-related products and it blocks all page interaction.
+            await self._dismiss_health_consent_modal(page)
+
             # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
             add_to_cart_sel = (
                 'button[data-test="shipItButton"], button[data-test="shippingButton"], '
@@ -667,6 +672,7 @@ class CheckoutEngine:
             add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
             if not add_to_cart_clicked:
                 # Popup may have blocked the click — sweep and retry
+                await self._dismiss_health_consent_modal(page)
                 if await sweep_popups(page):
                     add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
                 if not add_to_cart_clicked:
@@ -814,21 +820,31 @@ class CheckoutEngine:
         try:
             # Look for the modal by role or common selectors
             consent_selectors = [
-                # Dialog-level selectors
+                # Target's known data-test attribute for health consent
+                '[data-test="healthFlagModalAcceptButton"]',
                 '[data-test="health-consent-modal"] button:has-text("Agree")',
                 '[data-test="healthConsentModal"] button:has-text("Agree")',
+                # "I understand" / "I accept" — common health consent wording
+                'button:has-text("I understand")',
+                'button:has-text("I accept")',
                 # Generic modal with health-related text + agree/acknowledge button
-                'dialog button:has-text("I agree")',
-                'dialog button:has-text("Agree")',
-                'dialog button:has-text("Acknowledge")',
-                'dialog button:has-text("Accept")',
-                'dialog button:has-text("Continue")',
-                # Div-based modals (Target uses both <dialog> and div overlays)
                 '[role="dialog"] button:has-text("I agree")',
                 '[role="dialog"] button:has-text("Agree")',
                 '[role="dialog"] button:has-text("Acknowledge")',
                 '[role="dialog"] button:has-text("Accept")',
                 '[role="dialog"] button:has-text("Continue")',
+                '[role="dialog"] button:has-text("confirm")',
+                '[role="dialog"] button:has-text("agree")',
+                '[aria-modal="true"] button:has-text("I agree")',
+                '[aria-modal="true"] button:has-text("Agree")',
+                '[aria-modal="true"] button:has-text("I understand")',
+                '[aria-modal="true"] button:has-text("Accept")',
+                'dialog button:has-text("I agree")',
+                'dialog button:has-text("Agree")',
+                'dialog button:has-text("Acknowledge")',
+                'dialog button:has-text("Accept")',
+                'dialog button:has-text("Continue")',
+                'dialog button:has-text("I understand")',
                 # Broader: any visible button with agree/acknowledge text
                 'button:has-text("I agree")',
                 'button:has-text("Agree and continue")',
