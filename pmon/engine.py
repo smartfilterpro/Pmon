@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime
 
 from pmon.config import Config, Product
@@ -28,6 +29,10 @@ class PmonEngine:
 
         # Track which products we've already notified about (avoid spam)
         self._notified: set[str] = set()
+
+        # Track products that have been successfully purchased (user_id:url).
+        # Once purchased, auto-checkout is disabled and monitoring skips the product.
+        self._purchased: set[str] = set()
 
         # Monitor instances (cached per retailer)
         self._monitors: dict[str, BaseMonitor] = {}
@@ -94,7 +99,10 @@ class PmonEngine:
         while self._running:
             self.sync_products_from_db()
             await self._check_all()
-            await asyncio.sleep(self.config.poll_interval)
+            # Add ±20% jitter to poll interval to avoid exact-interval bot fingerprint.
+            # e.g. 30s → sleeps between 24s and 36s each cycle.
+            jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
+            await asyncio.sleep(self.config.poll_interval + jitter)
 
         self.state.is_running = False
 
@@ -105,16 +113,33 @@ class PmonEngine:
         logger.info("Monitor stopped")
 
     async def _check_all(self):
-        """Check stock on all monitored products."""
+        """Check stock on all monitored products.
+
+        Adds small random delays between requests to avoid burst patterns
+        that PerimeterX flags as bot traffic.
+        """
         if not self.config.products:
             return
 
+        # Shuffle order each cycle so we don't always hit the same retailer first
+        products = list(self.config.products)
+        random.shuffle(products)
+
+        # Stagger requests with small delays (0.5-2s between each) to look human.
+        # Simultaneous burst requests to the same retailer from one IP = instant flag.
         tasks = []
-        for product in self.config.products:
+        for i, product in enumerate(products):
             monitor = self._get_monitor(product.retailer)
-            tasks.append(self._check_product(monitor, product))
+            delay = i * random.uniform(0.5, 2.0)
+            tasks.append(self._delayed_check(monitor, product, delay))
 
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _delayed_check(self, monitor, product, delay: float):
+        """Check a product after a short delay."""
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await self._check_product(monitor, product)
 
     async def _check_product(self, monitor: BaseMonitor, product: Product):
         result = await monitor.safe_check(product.url, product.name)
@@ -140,8 +165,9 @@ class PmonEngine:
                         if notifier:
                             await notifier.notify_in_stock(result)
 
-                        # Auto-checkout if enabled for this user's product
-                        if p["auto_checkout"]:
+                        # Auto-checkout if enabled and not already purchased
+                        purchase_key = f"{user_id}:{product.url}"
+                        if p["auto_checkout"] and purchase_key not in self._purchased:
                             await self._auto_checkout_for_user(p, user_id)
 
         elif result.status == StockStatus.OUT_OF_STOCK:
@@ -156,15 +182,17 @@ class PmonEngine:
             )
 
     async def _auto_checkout_for_user(self, product_row: dict, user_id: int):
-        """Auto-checkout a product for a specific user."""
+        """Auto-checkout a product for a specific user.
+
+        On successful checkout, disables auto-checkout for this product so the
+        bot doesn't keep buying it.
+        """
         if not self.checkout_engine:
             self.checkout_engine = CheckoutEngine(self.config)
             await self.checkout_engine.start()
 
         logger.info(f"Auto-checkout for user {user_id}: {product_row['name']}")
 
-        # Load user's retailer credentials
-        accounts = db.get_retailer_accounts(user_id)
         retailer = product_row["retailer"]
 
         checkout_result = await self.checkout_engine.attempt_checkout(
@@ -186,6 +214,26 @@ class PmonEngine:
         )
 
         self.state.add_checkout(checkout_result)
+
+        # On success: mark as purchased and disable auto-checkout for this product
+        if checkout_result.status == CheckoutStatus.SUCCESS:
+            purchase_key = f"{user_id}:{product_row['url']}"
+            self._purchased.add(purchase_key)
+            logger.info(
+                f"PURCHASED: {product_row['name']} for user {user_id} — "
+                f"disabling auto-checkout to prevent duplicate orders"
+            )
+
+            # Disable auto_checkout in the database so it stays off across restarts
+            try:
+                conn = db.get_db()
+                conn.execute(
+                    "UPDATE products SET auto_checkout = 0 WHERE user_id = ? AND url = ?",
+                    (user_id, product_row["url"]),
+                )
+                conn.commit()
+            except Exception as exc:
+                logger.error(f"Failed to disable auto-checkout in DB: {exc}")
 
         # Notify
         await self._console_notifier.notify_checkout(checkout_result)
@@ -220,6 +268,7 @@ class PmonEngine:
             )
 
         self.state.add_checkout(checkout_result)
+        return checkout_result
 
     async def init_checkout(self):
         """Initialize the checkout engine (API + optional browser)."""

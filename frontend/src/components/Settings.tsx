@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import {
   getSettings, updateSettings, getAccounts, setAccount, testAccount,
   setupTotp, confirmTotp, disableTotp, checkAuth,
+  getSessions, importSession, deleteSession,
 } from '../hooks/useApi';
 import type { User } from '../types';
-import { Save, Bell, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { Save, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader, Cookie, Trash2, Upload } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import AdminPanel from './AdminPanel';
 import './Settings.css';
@@ -36,6 +37,13 @@ export default function Settings({ user }: Props) {
   const [testResult, setTestResult] = useState<Record<string, { ok: boolean; message: string } | null>>({});
   const [testLoading, setTestLoading] = useState<Record<string, boolean>>({});
 
+  // Sessions (cookie import)
+  const [sessions, setSessions] = useState<Record<string, { has_session: boolean; cookie_count?: number; updated_at?: string }>>({});
+  const [importRetailer, setImportRetailer] = useState('');
+  const [importCookies, setImportCookies] = useState('');
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState<{ ok: boolean; message: string } | null>(null);
+
   // 2FA
   const [totpEnabled, setTotpEnabled] = useState(user.totp_enabled);
   const [totpUri, setTotpUri] = useState('');
@@ -44,12 +52,17 @@ export default function Settings({ user }: Props) {
   const [totpError, setTotpError] = useState('');
   const [totpSuccess, setTotpSuccess] = useState('');
 
+  const refreshSessions = () => {
+    getSessions().then(data => setSessions(data.sessions || {}));
+  };
+
   useEffect(() => {
     getSettings().then(data => {
       setPollInterval(data.settings.poll_interval);
       setDiscordWebhook(data.settings.discord_webhook || '');
     });
     getAccounts().then(data => setAccounts(data.accounts || {}));
+    refreshSessions();
     // Refresh TOTP status from server (user prop may be stale)
     checkAuth().then(u => { if (u) setTotpEnabled(u.totp_enabled); });
   }, []);
@@ -117,6 +130,38 @@ export default function Settings({ user }: Props) {
     setRetailerPassword('');
   };
 
+  const handleImportCookies = async () => {
+    if (!importRetailer || !importCookies.trim()) return;
+    setImportLoading(true);
+    setImportResult(null);
+    try {
+      // Try to parse as JSON first, fall back to raw cookie string
+      let cookies: string | object = importCookies.trim();
+      try {
+        cookies = JSON.parse(importCookies.trim());
+      } catch {
+        // Not JSON — send as raw cookie string (name=val; name=val)
+      }
+      const data = await importSession(importRetailer, cookies as string);
+      if (data.ok) {
+        setImportResult({ ok: true, message: `Imported ${data.cookie_count} cookies` });
+        setImportCookies('');
+        refreshSessions();
+      } else {
+        setImportResult({ ok: false, message: data.error || 'Import failed' });
+      }
+    } catch {
+      setImportResult({ ok: false, message: 'Request failed' });
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const handleDeleteSession = async (retailerId: string) => {
+    await deleteSession(retailerId);
+    refreshSessions();
+  };
+
   return (
     <div className="settings">
       <h2>Settings</h2>
@@ -182,7 +227,9 @@ export default function Settings({ user }: Props) {
                       onClick={() => handleTestLogin(r.id)}
                       disabled={testLoading[r.id]}
                     >
-                      {testLoading[r.id] ? <><Loader size={12} className="spin" /> Testing...</> : 'Test Login'}
+                      {testLoading[r.id]
+                        ? <><Loader size={12} className="spin" /> Testing...</>
+                        : r.id === 'walmart' ? 'Test Session' : 'Test Login'}
                     </button>
                   )}
                   <button className="action-btn" onClick={() => startEditAccount(r.id)}>
@@ -212,6 +259,82 @@ export default function Settings({ user }: Props) {
                 <Save size={14} /> {accountSaved === editRetailer ? 'Saved!' : 'Save'}
               </button>
               <button className="cancel-btn" onClick={() => setEditRetailer('')}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Session Cookies */}
+      <div className="settings-section">
+        <h3><Cookie size={16} /> Session Cookies</h3>
+        <p className="section-desc">
+          Import session cookies from your browser to enable checkout. This is required for Target and Walmart
+          because their bot protection blocks programmatic login. <strong>How to get cookies:</strong> Log into
+          the retailer in your browser, open DevTools (F12) &gt; Application &gt; Cookies, copy all cookies as
+          JSON or as a <code>name=value; name=value</code> string.
+        </p>
+        <div className="retailer-list">
+          {RETAILERS.map(r => {
+            const s = sessions[r.id];
+            return (
+              <div key={r.id} className="retailer-row">
+                <div className="retailer-info">
+                  <strong>{r.name}</strong>
+                  {s?.has_session ? (
+                    <span className="retailer-email">
+                      {s.cookie_count} cookies imported
+                      {s.updated_at && <> &middot; {new Date(s.updated_at).toLocaleDateString()}</>}
+                    </span>
+                  ) : (
+                    <span className="retailer-none">No session imported</span>
+                  )}
+                </div>
+                <div className="retailer-actions">
+                  <button className="action-btn" onClick={() => {
+                    setImportRetailer(importRetailer === r.id ? '' : r.id);
+                    setImportCookies('');
+                    setImportResult(null);
+                  }}>
+                    <Upload size={12} /> Import
+                  </button>
+                  {s?.has_session && (
+                    <button className="action-btn" style={{ color: 'var(--red)' }}
+                      onClick={() => handleDeleteSession(r.id)}>
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {importRetailer && (
+          <div className="retailer-edit">
+            <h4>Import Cookies for {RETAILERS.find(r => r.id === importRetailer)?.name}</h4>
+            <div className="setting-field">
+              <label>
+                Paste cookies (JSON array, JSON object, or raw cookie string)
+              </label>
+              <textarea
+                className="cookie-input"
+                rows={4}
+                value={importCookies}
+                onChange={e => setImportCookies(e.target.value)}
+                placeholder={'[{"name":"SessionID","value":"abc123",...}]\nor\nSessionID=abc123; visitorId=xyz789'}
+              />
+            </div>
+            {importResult && (
+              <div className={`test-result ${importResult.ok ? 'test-ok' : 'test-fail'}`} style={{ marginBottom: 8 }}>
+                {importResult.ok ? <CheckCircle size={12} /> : <XCircle size={12} />}
+                {importResult.message}
+              </div>
+            )}
+            <div className="retailer-edit-actions">
+              <button className="save-btn" onClick={handleImportCookies} disabled={importLoading || !importCookies.trim()}>
+                {importLoading ? <><Loader size={14} className="spin" /> Importing...</> : <><Upload size={14} /> Import Cookies</>}
+              </button>
+              <button className="cancel-btn" onClick={() => setImportRetailer('')}>Cancel</button>
             </div>
           </div>
         )}

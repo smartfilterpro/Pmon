@@ -18,17 +18,52 @@ logger = logging.getLogger(__name__)
 # Directory to store browser session data (cookies, etc.)
 SESSION_DIR = Path(__file__).parent.parent.parent / ".sessions"
 
-# Stealth JS to inject into every page to reduce bot detection
+# Stealth JS to inject into every page to reduce bot detection.
+# This patches the most common signals that PerimeterX/DataDome look for.
 STEALTH_JS = """
+// Remove webdriver flag (Playwright sets this by default)
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+delete navigator.__proto__.webdriver;
+
+// Languages & plugins must look realistic
 Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-window.chrome = {runtime: {}};
+Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+        // Return realistic plugin array (Chrome PDF plugins)
+        const plugins = [
+            {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+            {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+            {name: 'Native Client', filename: 'internal-nacl-plugin'},
+        ];
+        plugins.refresh = () => {};
+        return plugins;
+    }
+});
+
+// Chrome object must exist and look real
+window.chrome = {
+    runtime: {
+        onMessage: {addListener: () => {}, removeListener: () => {}},
+        sendMessage: () => {},
+        connect: () => ({onMessage: {addListener: () => {}}, postMessage: () => {}}),
+    },
+    loadTimes: () => ({}),
+    csi: () => ({}),
+};
+
+// Permissions API patch
 const originalQuery = window.navigator.permissions.query;
 window.navigator.permissions.query = (parameters) =>
     parameters.name === 'notifications'
         ? Promise.resolve({state: Notification.permission})
         : originalQuery(parameters);
+
+// Prevent detection via iframe contentWindow checks
+const origGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+Object.getOwnPropertyDescriptor = function(obj, prop) {
+    if (prop === 'webdriver') return undefined;
+    return origGetOwnPropertyDescriptor(obj, prop);
+};
 """
 
 
@@ -311,6 +346,31 @@ class CheckoutEngine:
         except Exception as exc:
             logger.debug("Failed to load session cookies for %s: %s", retailer, exc)
 
+    def _load_user_credentials(
+        self, retailer: str, user_id: int | None = None
+    ) -> AccountCredentials | None:
+        """Load credentials from database (preferred) or config.yaml (fallback).
+
+        The dashboard stores credentials in the DB per-user.  Config.yaml is
+        only used as a legacy fallback for single-user / CLI mode.
+        """
+        if user_id is not None:
+            try:
+                from pmon import database as db
+                accounts = db.get_retailer_accounts(user_id)
+                acct = accounts.get(retailer)
+                if acct and acct.get("email"):
+                    logger.debug("Loaded %s credentials from database for user %d", retailer, user_id)
+                    return AccountCredentials(
+                        email=acct["email"],
+                        password=acct.get("password", ""),
+                    )
+            except Exception as exc:
+                logger.debug("Failed to load DB credentials for %s: %s", retailer, exc)
+
+        # Fallback: config.yaml (single-user / CLI mode)
+        return self.config.accounts.get(retailer)
+
     async def attempt_checkout(
         self,
         url: str,
@@ -327,7 +387,9 @@ class CheckoutEngine:
         actually purchasing.
         """
         profile = self.config.profiles.get(profile_name) or Profile()
-        creds = self.config.accounts.get(retailer)
+
+        # Load credentials from DB (dashboard) first, then fall back to config.yaml
+        creds = self._load_user_credentials(retailer, user_id)
 
         # Load stored session cookies for API checkout
         self._load_user_sessions(retailer, user_id)
@@ -338,7 +400,7 @@ class CheckoutEngine:
                 retailer=retailer,
                 product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message=f"No credentials for {retailer}. Add them in config.",
+                error_message=f"No credentials for {retailer}. Add them via Dashboard > Settings > Accounts.",
             )
 
         if dry_run:
@@ -381,16 +443,23 @@ class CheckoutEngine:
 
     async def _get_context(self, retailer: str):
         """Get or create a browser context with persistent cookies and stealth."""
+        from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
+
         storage_path = SESSION_DIR / f"{retailer}.json"
         ctx_kwargs = dict(
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
+                f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                f"AppleWebKit/537.36 (KHTML, like Gecko) "
+                f"Chrome/{_CHROME_FULL} Safari/537.36"
             ),
             viewport={"width": 1366, "height": 768},
             locale="en-US",
             timezone_id="America/New_York",
+            extra_http_headers={
+                "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            },
         )
         if storage_path.exists():
             ctx_kwargs["storage_state"] = str(storage_path)
@@ -426,11 +495,13 @@ class CheckoutEngine:
                     await page.goto(url, wait_until="domcontentloaded")
                     await page.wait_for_timeout(2000)
 
-            # Try to add to cart — decline coverage if offered
-            if not await self._smart_click(
-                page, "Add to cart / Ship it",
-                'button[data-test="shipItButton"], button:has-text("Add to cart"), button:has-text("Ship it")',
-            ):
+            # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
+            add_to_cart_clicked = await self._smart_click(
+                page, "Ship it / Add to cart",
+                'button[data-test="shipItButton"], button[data-test="shippingButton"], '
+                'button:has-text("Ship it"), button:has-text("Add to cart")',
+            )
+            if not add_to_cart_clicked:
                 error = await self._smart_read_error(page)
                 if error:
                     raise Exception(f"Cannot add to cart: {error}")
@@ -440,7 +511,8 @@ class CheckoutEngine:
             # Decline optional coverage/warranty if modal appears
             await self._smart_click(
                 page, "No thanks / Decline coverage",
-                'button[data-test="espModalContent-declineCoverageButton"], button:has-text("No thanks")',
+                'button[data-test="espModalContent-declineCoverageButton"], button:has-text("No thanks"), '
+                'button:has-text("No, thanks")',
                 timeout=2000,
             )
             await page.wait_for_timeout(500)
@@ -448,25 +520,43 @@ class CheckoutEngine:
             # Go to cart via modal button or direct navigation
             if not await self._smart_click(
                 page, "View cart & check out",
-                'button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"]',
+                'button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"], '
+                'button:has-text("View cart"), button:has-text("View cart & check out")',
                 timeout=3000,
             ):
                 await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                 await page.wait_for_timeout(2000)
 
+            # --- Handle delivery method selection on cart page ---
+            # Target requires choosing "Shipping" or "Pickup" for each item.
+            # If there's a "Choose delivery method" prompt, select shipping.
+            await self._target_select_delivery(page)
+
             # Click checkout
             if not await self._smart_click(
                 page, "Check out",
-                'button[data-test="checkout-button"], button:has-text("Check out"), a:has-text("Check out")',
+                'button[data-test="checkout-button"], button:has-text("Check out"), '
+                'a:has-text("Check out"), button[data-test="checkout-btn"]',
             ):
                 raise Exception("Checkout button not found")
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(5000)
+
+            # --- Handle checkout page steps ---
+            # Target's checkout can have multiple pages: delivery, payment, review.
+            # We need to navigate through them to reach "Place your order".
+            await self._target_navigate_checkout(page)
 
             # Place order — assumes saved payment on Target account
+            place_order_sel = (
+                'button:has-text("Place your order"), '
+                'button[data-test="placeOrderButton"], '
+                'button:has-text("Place order")'
+            )
+
             if dry_run:
                 # Verify the "Place your order" button is visible, but don't click it
                 try:
-                    btn = page.locator('button:has-text("Place your order")')
+                    btn = page.locator(place_order_sel)
                     if await btn.first.is_visible(timeout=10000):
                         logger.info("DRY RUN: 'Place your order' button found — checkout flow verified")
                         await self._save_context(context, "target")
@@ -491,7 +581,7 @@ class CheckoutEngine:
 
             if await self._smart_click(
                 page, "Place your order",
-                'button:has-text("Place your order")',
+                place_order_sel,
                 timeout=10000,
             ):
                 await page.wait_for_timeout(5000)
@@ -589,6 +679,143 @@ class CheckoutEngine:
         except Exception as exc:
             logger.debug("Target overlay dismiss failed (non-fatal): %s", exc)
 
+    async def _target_select_delivery(self, page):
+        """Select shipping/delivery method on Target cart page.
+
+        Target shows "Choose a delivery method" for each item in the cart.
+        We need to click "Shipping" (or the shipping radio/button) so the
+        checkout button becomes active.
+        """
+        try:
+            # Check if delivery method selection is needed
+            needs_delivery = False
+            for indicator in [
+                'text="Choose a delivery method"',
+                'text="Choose delivery method"',
+                '[data-test="fulfillment-cell"]',
+            ]:
+                try:
+                    loc = page.locator(indicator)
+                    if await loc.first.is_visible(timeout=2000):
+                        needs_delivery = True
+                        break
+                except Exception:
+                    continue
+
+            if not needs_delivery:
+                logger.debug("Target cart: delivery method already selected or not needed")
+                return
+
+            logger.info("Target cart: selecting delivery method (Shipping)")
+
+            # Try clicking shipping option — Target uses various UI patterns:
+            # 1. Radio button with "Shipping" / "Ship" label
+            # 2. Button/link with "Shipping" text
+            # 3. Fulfillment cell with shipping icon
+            shipping_clicked = False
+            shipping_selectors = [
+                'button[data-test="fulfillmentOptionShipping"]',
+                'button:has-text("Shipping")',
+                'button:has-text("Ship")',
+                '[data-test="shipping-option"]',
+                'label:has-text("Shipping")',
+                'div[data-test="fulfillment-cell"] button:first-child',
+                'input[type="radio"][value*="SHIP" i]',
+                'button:has-text("Standard")',
+            ]
+            for sel in shipping_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.is_visible(timeout=1000):
+                        await loc.click()
+                        shipping_clicked = True
+                        logger.info("Target cart: clicked shipping via %s", sel)
+                        break
+                except Exception:
+                    continue
+
+            if not shipping_clicked:
+                # Vision fallback
+                shipping_clicked = await self._smart_click(
+                    page, "Shipping delivery option",
+                    "",
+                    timeout=2000,
+                )
+
+            if shipping_clicked:
+                await page.wait_for_timeout(2000)
+
+                # Target sometimes shows a "Save" or "Apply" button after selecting delivery
+                for save_sel in [
+                    'button:has-text("Save")',
+                    'button:has-text("Apply")',
+                    'button:has-text("Update")',
+                ]:
+                    try:
+                        loc = page.locator(save_sel).first
+                        if await loc.is_visible(timeout=1000):
+                            await loc.click()
+                            await page.wait_for_timeout(1000)
+                            break
+                    except Exception:
+                        continue
+            else:
+                logger.warning("Target cart: could not select delivery method — checkout may fail")
+
+        except Exception as exc:
+            logger.debug("Target delivery selection error (non-fatal): %s", exc)
+
+    async def _target_navigate_checkout(self, page):
+        """Navigate through Target's multi-step checkout pages.
+
+        Target's checkout may have these steps:
+        1. Delivery address (if not saved)
+        2. Delivery method / shipping speed
+        3. Payment method (if not saved)
+        4. Order review with "Place your order" button
+
+        We try to click "Continue" / "Save and continue" through each step
+        until we reach the final review page.
+        """
+        continue_sel = (
+            'button[data-test="save-and-continue-button"], '
+            'button:has-text("Save and continue"), '
+            'button:has-text("Continue"), '
+            'button:has-text("Save & continue")'
+        )
+
+        # Click "Continue" / "Save and continue" up to 4 times to progress through steps
+        for step in range(4):
+            # Check if "Place your order" is already visible — we're done
+            try:
+                place_btn = page.locator('button:has-text("Place your order"), button:has-text("Place order")')
+                if await place_btn.first.is_visible(timeout=2000):
+                    logger.info("Target checkout: reached order review page (step %d)", step)
+                    return
+            except Exception:
+                pass
+
+            # Try clicking continue/save
+            try:
+                continue_btn = page.locator(continue_sel).first
+                if await continue_btn.is_visible(timeout=3000):
+                    await continue_btn.click()
+                    logger.info("Target checkout: clicked continue (step %d)", step + 1)
+                    await page.wait_for_timeout(3000)
+                else:
+                    # No continue button and no place order button — try vision
+                    clicked = await self._smart_click(
+                        page, "Continue or Save and continue button",
+                        continue_sel,
+                        timeout=2000,
+                    )
+                    if not clicked:
+                        logger.info("Target checkout: no more continue buttons found (step %d)", step)
+                        break
+                    await page.wait_for_timeout(3000)
+            except Exception:
+                break
+
     async def _sign_in_target(self, page, creds: AccountCredentials):
         await page.goto(
             "https://www.target.com/login?client_id=ecom-web-1.0.0&ui_namespace=ui-default&back_button_action=browser&keep_me_signed_in=true&kmsi_default=true&actions=create_session_request_username",
@@ -602,11 +829,30 @@ class CheckoutEngine:
         email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
         pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'
 
-        # Step 1: Enter email/phone using keyboard.type() for human-like input
-        await page.locator(email_sel).first.wait_for(state="visible", timeout=10000)
-        await page.locator(email_sel).first.click()
-        await page.locator(email_sel).first.press("Control+a")
+        # Step 1: Enter email/phone
+        email_input = page.locator(email_sel).first
+        await email_input.wait_for(state="visible", timeout=10000)
+
+        # Try keyboard.type() first (human-like), verify it worked, fall back to fill()
+        await email_input.click(force=True)
+        await page.wait_for_timeout(300)
+        await email_input.press("Control+a")
         await page.keyboard.type(creds.email, delay=40)
+        await page.wait_for_timeout(500)
+
+        # Verify the value actually got entered — Target's JS can clear it
+        try:
+            actual_value = await email_input.input_value(timeout=1000)
+            if actual_value != creds.email:
+                logger.warning("Target sign-in: keyboard.type() produced '%s', expected '%s' — using fill()",
+                              actual_value[:20], creds.email[:20])
+                await email_input.fill(creds.email)
+                await page.wait_for_timeout(300)
+        except Exception:
+            # If we can't read the value, try fill() as backup
+            logger.warning("Target sign-in: could not verify email input — using fill() as backup")
+            await email_input.fill(creds.email)
+            await page.wait_for_timeout(300)
 
         # Check if password is already visible (single-step) or multi-step
         pass_visible = False
@@ -628,6 +874,14 @@ class CheckoutEngine:
                 "Continue with email", "Continue", "Sign in", "Next",
             ], 'button[type="submit"], button:has-text("Continue")')
             await page.wait_for_timeout(3000)
+
+            # Check if we navigated away from login after email submit
+            # (e.g. Target may redirect to homepage if already authenticated)
+            post_email_url = page.url
+            login_indicators = ["/login", "/signin", "/sign-in", "/identity"]
+            if not any(ind in post_email_url.lower() for ind in login_indicators):
+                logger.info("Target sign-in: navigated away from login after email submit (%s) — may already be signed in", post_email_url)
+                return  # Let the caller check success via URL/cookies
 
             # Step 3: Auth method picker — Target shows "Enter your password"
             pw_option_clicked = False

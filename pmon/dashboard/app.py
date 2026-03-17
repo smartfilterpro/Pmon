@@ -223,7 +223,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.post("/api/products/test_cart")
     async def api_test_cart(request: Request, user: dict = Depends(get_current_user)):
         """Dry-run checkout: adds to cart and goes through checkout flow but stops
-        before placing the order. Useful for testing without actually buying."""
+        before placing the order. Returns the actual result (pass/fail)."""
         data = await request.json()
         url = data["url"]
         products = db.get_user_products(user["id"])
@@ -232,9 +232,21 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return JSONResponse({"error": "Product not found"}, 404)
 
         from pmon.config import Product
+        from pmon.models import CheckoutStatus
         p = Product(url=url, name=product["name"], auto_checkout=True)
-        asyncio.create_task(engine.manual_checkout(p, user_id=user["id"], dry_run=True))
-        return {"ok": True, "message": "Test cart (dry run) started — will stop before placing order"}
+        try:
+            result = await engine.manual_checkout(p, user_id=user["id"], dry_run=True)
+        except Exception as e:
+            logger.error("Test cart failed for %s: %s", url, e)
+            return {"ok": False, "message": f"Test cart failed: {e}"}
+
+        if result and result.status == CheckoutStatus.SUCCESS:
+            return {"ok": True, "message": f"Test cart passed — dry run completed for {product['name']}"}
+        elif result and result.error_message:
+            return {"ok": False, "message": f"Test cart failed: {result.error_message}"}
+        else:
+            status = result.status.value if result else "unknown"
+            return {"ok": False, "message": f"Test cart finished with status: {status}"}
 
     # --- Retailer accounts ---
 
@@ -277,6 +289,107 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         email = acc["email"]
         password = acc["password"]
+
+        # --- Walmart: browser login is blocked by PerimeterX press-and-hold CAPTCHA.
+        # Instead, validate that imported session cookies work via API call.
+        if retailer == "walmart":
+            return await _test_walmart_session(user)
+
+        return await _test_retailer_browser(user, retailer, email, password)
+
+    async def _test_walmart_session(user: dict):
+        """Test Walmart account by validating imported session cookies via API.
+
+        Walmart uses aggressive PerimeterX bot protection with a press-and-hold
+        CAPTCHA that cannot be solved by headless browsers.  Instead of attempting
+        browser login (which always fails), we validate that the user's imported
+        session cookies are still valid by making an API call to Walmart's
+        lightweight config endpoint.
+        """
+        import json as _json
+        import httpx
+        from pmon.monitors.base import DEFAULT_HEADERS
+
+        session = db.get_retailer_session(user["id"], "walmart")
+        if not session or not session.get("cookies_json"):
+            return {
+                "ok": False,
+                "message": (
+                    "Walmart blocks automated browsers with CAPTCHA. "
+                    "You must import session cookies instead:\n"
+                    "1. Log into walmart.com in your browser\n"
+                    "2. Open DevTools (F12) > Application > Cookies\n"
+                    "3. Copy all cookies using a browser extension (e.g. EditThisCookie)\n"
+                    "4. Paste them in Settings > Session Cookies > Walmart > Import"
+                ),
+            }
+
+        try:
+            cookies = _json.loads(session["cookies_json"])
+        except Exception:
+            return {"ok": False, "message": "Saved session cookies are corrupted — re-import them"}
+
+        if not cookies:
+            return {"ok": False, "message": "No session cookies found — import them via Settings > Session Cookies"}
+
+        # Validate session by hitting a lightweight API endpoint
+        try:
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                http2=True,
+            ) as client:
+                for name, value in cookies.items():
+                    client.cookies.set(name, str(value), domain=".walmart.com")
+
+                # Try the account API to see if we're authenticated
+                resp = await client.get(
+                    "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                    "?configNames=identity",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Accept": "application/json",
+                        "Sec-Fetch-Dest": "empty",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Referer": "https://www.walmart.com/",
+                    },
+                )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Check if identity config indicates logged in
+                    identity = data.get("identity", {})
+                    is_logged_in = identity.get("isLoggedIn", False)
+                    if is_logged_in:
+                        logger.info("Walmart: session cookies valid (logged in)")
+                        return {"ok": True, "message": f"Walmart session valid — {len(cookies)} cookies active"}
+
+                    # Even if not definitively logged in, 200 means cookies aren't expired
+                    logger.info("Walmart: session cookies accepted (HTTP 200)")
+                    return {"ok": True, "message": f"Walmart session cookies accepted ({len(cookies)} cookies) — if checkout fails, re-import fresh cookies"}
+
+                elif resp.status_code == 403:
+                    return {
+                        "ok": False,
+                        "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
+                    }
+                else:
+                    return {
+                        "ok": False,
+                        "message": f"Walmart session check returned HTTP {resp.status_code}. Try re-importing cookies.",
+                    }
+
+        except Exception as exc:
+            logger.error("Walmart session validation error: %s", exc)
+            return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
+
+    async def _test_retailer_browser(user: dict, retailer: str, email: str, password: str):
+        """Test retailer login credentials using Playwright browser automation."""
+        import base64
+        import json
+        import os
 
         try:
             from playwright.async_api import async_playwright
@@ -385,7 +498,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         LOGIN_URLS = {
             "target": "https://www.target.com/login",
-            "walmart": "https://www.walmart.com/account/login",
+            "walmart": "https://identity.walmart.com/signin",
             "bestbuy": "https://www.bestbuy.com/identity/global/signin",
             "pokemoncenter": "https://www.pokemoncenter.com/account/login",
         }
@@ -415,11 +528,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "error": '[data-test="error"], .error-message, #error, [class*="error" i], [role="alert"]',
             },
             "walmart": {
-                "email": 'input[name="email"], input[type="email"], input[id*="email" i], input[type="tel"], input[name="phone"], input[id*="phone" i], #phone-number, input[autocomplete="tel"]',
+                "email": 'input[name="email"], input[type="email"], input[id*="email" i], input[type="tel"], input[name="phone"], input[id*="phone" i], #phone-number, input[autocomplete="tel"], input[autocomplete="username"]',
                 "password": 'input[type="password"], input[name="password"], input[id*="password" i]',
-                "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
-                "success": 'a[href*="/account"], [data-automation-id="account"], [data-tl-id*="account"]',
-                "error": '[data-automation-id="error"], .error-message, [class*="error" i], [role="alert"]',
+                "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue"), button[data-automation-id="signin-submit-btn"]',
+                "success": 'a[href*="/account"], [data-automation-id="account"], [data-tl-id*="account"], [data-testid*="account"]',
+                "error": '[data-automation-id="error"], .error-message, [class*="error" i], [role="alert"], [data-testid*="error"]',
             },
             "bestbuy": {
                 "email": '#fld-e, input[id="user.emailAddress"], input[type="email"], input[name="email"]',
@@ -440,18 +553,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         sel = SELECTORS[retailer]
         retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center"}[retailer]
 
-        # Stealth JS to inject into every page to reduce bot detection
-        STEALTH_JS = """
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        window.chrome = {runtime: {}};
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters) =>
-            parameters.name === 'notifications'
-                ? Promise.resolve({state: Notification.permission})
-                : originalQuery(parameters);
-        """
+        # Import shared stealth JS and Chrome version from checkout engine
+        from pmon.checkout.engine import STEALTH_JS
+        from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
 
         try:
             pw = await async_playwright().start()
@@ -465,20 +569,69 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "--disable-features=VizDisplayCompositor",
                 ],
             )
+
+            # Create browser context WITHOUT storage_state first (avoids blank page
+            # caused by malformed cookies).  We'll add cookies AFTER context creation
+            # which is more resilient to bad data.
             context = await browser.new_context(
                 user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
+                    f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    f"AppleWebKit/537.36 (KHTML, like Gecko) "
+                    f"Chrome/{_CHROME_FULL} Safari/537.36"
                 ),
                 viewport={"width": 1366, "height": 768},
                 locale="en-US",
                 timezone_id="America/New_York",
+                extra_http_headers={
+                    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                },
             )
             await context.add_init_script(STEALTH_JS)
+
+            # Load previously saved session cookies AFTER context creation.
+            # Using add_cookies() instead of storage_state avoids blank page issues
+            # when cookie data is malformed or has unexpected fields.
+            try:
+                existing_session = db.get_retailer_session(user["id"], retailer)
+                if existing_session and existing_session.get("cookies_json"):
+                    import json as _json
+                    saved_cookies = _json.loads(existing_session["cookies_json"])
+                    if saved_cookies:
+                        domain_map = {
+                            "target": ".target.com",
+                            "walmart": ".walmart.com",
+                            "bestbuy": ".bestbuy.com",
+                            "pokemoncenter": ".pokemoncenter.com",
+                        }
+                        pw_cookies = []
+                        for name, value in saved_cookies.items():
+                            pw_cookies.append({
+                                "name": str(name),
+                                "value": str(value),
+                                "domain": domain_map.get(retailer, f".{retailer}.com"),
+                                "path": "/",
+                            })
+                        await context.add_cookies(pw_cookies)
+                        logger.info("Test login %s: loaded %d saved session cookies", retailer_name, len(pw_cookies))
+            except Exception as exc:
+                logger.debug("Could not load saved session for test login: %s (continuing without)", exc)
+
             page = await context.new_page()
 
             try:
+                # --- Warm up: visit homepage first to establish cookies ---
+                # PerimeterX flags sessions that jump straight to /login without
+                # ever loading the homepage.  A quick homepage visit first reduces
+                # the chance of being blocked on the login page.
+                try:
+                    await page.goto(HOME_URLS[retailer], wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(2000)
+                    logger.info("Test login %s: homepage warm-up OK", retailer_name)
+                except Exception as warm_err:
+                    logger.debug("Test login %s: homepage warm-up failed: %s", retailer_name, warm_err)
+
                 # --- Navigate to login page ---
                 landed_on_login = False
                 nav_failed = False
@@ -491,6 +644,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 if not nav_failed:
                     await page.wait_for_timeout(3000)
 
+                    # Check for blank page — can happen when cookies/session cause
+                    # a redirect loop or when PerimeterX blocks with an empty response
+                    try:
+                        page_content = await page.content()
+                        if not page_content or len(page_content.strip()) < 100 or page_content.strip() == "<html><head></head><body></body></html>":
+                            logger.warning("Test login %s: blank page detected after navigation — retrying without cookies", retailer_name)
+                            # Clear cookies and retry
+                            await context.clear_cookies()
+                            await page.goto(LOGIN_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
+                            await page.wait_for_timeout(3000)
+                    except Exception:
+                        pass
+
                 current_url = page.url
 
                 # Determine if we actually landed on a login page
@@ -501,10 +667,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 if "blocked" in current_url or "captcha" in current_url or "challenge" in current_url:
                     landed_on_login = False
 
-                # Content-level bot block detection (e.g. Pokemon Center IP block)
-                if landed_on_login:
+                # Content-level bot block detection (applies to any page, not just login)
+                async def _check_bot_block(pg, context_msg: str = "") -> dict | None:
+                    """Check current page for bot-block / error indicators.
+                    Returns an error response dict if blocked, None if OK."""
                     try:
-                        body_text = await page.locator("body").first.inner_text(timeout=2000)
+                        body_text = await pg.locator("body").first.inner_text(timeout=2000)
                         body_lower = body_text.lower() if body_text else ""
                         block_phrases = [
                             "unusual activity",
@@ -514,18 +682,40 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             "your ip",
                             "technical issues",
                             "technical difficulties",
+                            "we're having technical",
+                            "something went wrong",
+                            "access denied",
+                            "please verify you are a human",
+                            "are you a robot",
                         ]
                         if any(phrase in body_lower for phrase in block_phrases):
-                            page_desc = await vision_read_page(page)
+                            page_desc = await vision_read_page(pg)
                             msg = f"{retailer_name}: access blocked (bot/IP detection)"
+                            if context_msg:
+                                msg = f"{retailer_name}: {context_msg}"
                             if page_desc:
                                 msg += f" — {page_desc}"
+                            msg += (
+                                ". Tip: import session cookies from your browser instead "
+                                "(Settings > Session Cookies)."
+                            )
                             return {"ok": False, "message": msg}
                     except Exception:
                         pass
+                    return None
+
+                if landed_on_login:
+                    block_result = await _check_bot_block(page)
+                    if block_result:
+                        return block_result
 
                 # --- Fallback: if redirected away from login, go to homepage and find sign-in link ---
                 if not landed_on_login or nav_failed:
+                    # Before retrying, check if we're on a bot-block page
+                    block_result = await _check_bot_block(page, "blocked before reaching login page")
+                    if block_result:
+                        return block_result
+
                     logger.info("Test login %s: direct login URL missed (landed on %s), trying homepage approach", retailer_name, current_url)
                     try:
                         await page.goto(HOME_URLS[retailer], wait_until="domcontentloaded", timeout=45000)
@@ -537,6 +727,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         return {"ok": False, "message": msg}
 
                     await page.wait_for_timeout(3000)
+
+                    # Check homepage for bot block too
+                    block_result = await _check_bot_block(page, "homepage blocked by bot detection")
+                    if block_result:
+                        return block_result
 
                     # Try to click the sign-in link from the homepage
                     signin_clicked = False
@@ -641,12 +836,26 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             msg += f" (page shows: {page_desc})"
                         return {"ok": False, "message": msg}
 
-                # Use keyboard.type() for human-like input instead of fill() which is a bot tell
+                # Enter email — try keyboard.type() first, verify, fall back to fill()
                 if email_found and not await _page_has_value(page, email_sel, email):
+                    email_input = page.locator(email_sel).first
                     # Use force=True to bypass any remaining overlay interception
-                    await page.locator(email_sel).first.click(force=True)
-                    await page.locator(email_sel).first.press("Control+a")
+                    await email_input.click(force=True)
+                    await page.wait_for_timeout(300)
+                    await email_input.press("Control+a")
                     await page.keyboard.type(email, delay=40)
+                    await page.wait_for_timeout(500)
+
+                    # Verify it actually took — Target's JS can clear or reset the field
+                    if not await _page_has_value(page, email_sel, email):
+                        logger.warning("Test login %s: keyboard.type() did not fill email — using fill()", retailer_name)
+                        await email_input.fill(email)
+                        await page.wait_for_timeout(300)
+                        # Final check — if still empty, try triple-click + type
+                        if not await _page_has_value(page, email_sel, email):
+                            await email_input.click(click_count=3, force=True)
+                            await page.keyboard.type(email, delay=30)
+                            await page.wait_for_timeout(300)
 
                 # Check if password field is visible yet (single-step) or needs submit first (multi-step)
                 pass_visible = False
@@ -745,6 +954,61 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         # Log what page we're on after submit attempt
                         post_submit_url = page.url
                         logger.info("Test login %s: after submit, URL is %s", retailer_name, post_submit_url)
+
+                        # Check if we navigated away from login entirely (e.g. Target redirects to homepage)
+                        # This can mean: already logged in, or email accepted and session created
+                        login_path_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com"]
+                        still_on_login_after_email = any(ind in post_submit_url.lower() for ind in login_path_indicators)
+
+                        if not still_on_login_after_email:
+                            logger.info("Test login %s: navigated away from login after email submit (URL: %s) — checking if logged in", retailer_name, post_submit_url)
+                            # Check for success indicators on the page we landed on
+                            success_el = page.locator(sel["success"])
+                            try:
+                                if await success_el.first.is_visible(timeout=3000):
+                                    logger.info("Test login %s: success indicator found after email redirect — already logged in", retailer_name)
+                                    # Save cookies and return success
+                                    try:
+                                        browser_cookies = await context.cookies()
+                                        cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                                        if cookies_dict:
+                                            import json as _json
+                                            db.set_retailer_session(user["id"], retailer, cookies_json=_json.dumps(cookies_dict))
+                                            if engine.checkout_engine:
+                                                engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                                engine.checkout_engine._api.reset_client(retailer)
+                                            logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                                    except Exception as cookie_err:
+                                        logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+                                    return {"ok": True, "message": f"{retailer_name} login successful — already signed in, session cookies saved"}
+                            except Exception:
+                                pass
+
+                            # No success indicator but we're on the homepage — use vision to check
+                            page_desc = await vision_read_page(page)
+                            # If page looks like a normal homepage (not an error), treat as likely success
+                            # since Target redirects to homepage after successful auth
+                            if page_desc:
+                                desc_lower = page_desc.lower()
+                                error_phrases = ["error", "incorrect", "invalid", "denied", "blocked", "failed"]
+                                if not any(phrase in desc_lower for phrase in error_phrases):
+                                    logger.info("Test login %s: on homepage with no errors — treating as success (page: %s)", retailer_name, page_desc[:100])
+                                    try:
+                                        browser_cookies = await context.cookies()
+                                        cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                                        if cookies_dict:
+                                            import json as _json
+                                            db.set_retailer_session(user["id"], retailer, cookies_json=_json.dumps(cookies_dict))
+                                            if engine.checkout_engine:
+                                                engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                                engine.checkout_engine._api.reset_client(retailer)
+                                            logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                                    except Exception as cookie_err:
+                                        logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+                                    return {"ok": True, "message": f"{retailer_name} login successful — redirected to homepage, session cookies saved"}
+                                else:
+                                    msg = f"{retailer_name} login may have failed — redirected to: {page_desc[:200]}"
+                                    return {"ok": False, "message": msg}
 
                         # Check for "Something went wrong" error and retry once
                         error_banner = page.locator('[role="alert"], .error-message, [class*="error" i], [data-test="error"]')

@@ -54,7 +54,7 @@ export async function login(username: string, password: string, totpCode?: strin
     body: JSON.stringify({ username, password, totp_code: totpCode }),
   });
   const data = await resp.json();
-  if (!resp.ok) return { error: data.error, needs_totp: data.needs_totp };
+  if (!resp.ok) return { error: data.error, needs_totp: data.needs_totp, pending: data.pending };
   localStorage.setItem('pmon_token', data.token);
   return data;
 }
@@ -176,6 +176,23 @@ export async function testAccount(retailer: string) {
     method: 'POST',
     body: JSON.stringify({ retailer }),
   })).json();
+}
+
+// --- Sessions (cookie import for checkout) ---
+
+export async function getSessions() {
+  return (await apiFetch('/sessions')).json();
+}
+
+export async function importSession(retailer: string, cookies: string) {
+  return (await apiFetch('/sessions/import', {
+    method: 'POST',
+    body: JSON.stringify({ retailer, cookies }),
+  })).json();
+}
+
+export async function deleteSession(retailer: string) {
+  return (await apiFetch(`/sessions/${retailer}`, { method: 'DELETE' })).json();
 }
 
 // --- 2FA ---
