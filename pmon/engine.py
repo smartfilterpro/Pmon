@@ -267,6 +267,24 @@ class PmonEngine:
                 error_message=checkout_result.error_message,
             )
 
+            # On success: disable auto-buy to prevent duplicate orders
+            if checkout_result.status == CheckoutStatus.SUCCESS:
+                purchase_key = f"{user_id}:{product.url}"
+                self._purchased.add(purchase_key)
+                logger.info(
+                    "PURCHASED (manual): %s for user %s — disabling auto-checkout",
+                    product.name, user_id,
+                )
+                try:
+                    conn = db.get_db()
+                    conn.execute(
+                        "UPDATE products SET auto_checkout = 0 WHERE user_id = ? AND url = ?",
+                        (user_id, product.url),
+                    )
+                    conn.commit()
+                except Exception as exc:
+                    logger.error("Failed to disable auto-checkout in DB: %s", exc)
+
         self.state.add_checkout(checkout_result)
         return checkout_result
 
