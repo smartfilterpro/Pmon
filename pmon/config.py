@@ -69,6 +69,10 @@ class AccountCredentials:
     email: str = ""
     password: str = ""
     card_cvv: str = ""
+    card_number: str = ""
+    card_exp_month: str = ""
+    card_exp_year: str = ""
+    card_name: str = ""
 
 
 @dataclass

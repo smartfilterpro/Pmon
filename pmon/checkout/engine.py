@@ -507,6 +507,10 @@ class CheckoutEngine:
                         email=acct["email"],
                         password=acct.get("password", ""),
                         card_cvv=acct.get("card_cvv", ""),
+                        card_number=acct.get("card_number", ""),
+                        card_exp_month=acct.get("card_exp_month", ""),
+                        card_exp_year=acct.get("card_exp_year", ""),
+                        card_name=acct.get("card_name", ""),
                     )
             except Exception as exc:
                 logger.debug("Failed to load DB credentials for %s: %s", retailer, exc)
@@ -1571,20 +1575,326 @@ class CheckoutEngine:
             await page.close()
             await context.close()
 
+    async def _sign_in_pokemoncenter(self, page, creds: AccountCredentials):
+        """Pokemon Center sign-in via homepage modal.
+
+        Mirrors the Target login approach: navigate to homepage first to
+        establish tracking cookies (PerimeterX/__ssobj, Monetate, Quantum
+        Metric, Datadog, OneTrust), then open the sign-in modal from the
+        header, fill email/password with human-like behaviour, and wait
+        for the auth API response.
+
+        Network flow observed:
+          1. GET https://www.pokemoncenter.com  (homepage — warms cookies)
+          2. Click header sign-in icon → login modal renders
+          3. Form fields: #login-email (type=email), #login-password (type=password)
+          4. Submit → POST /tpci-ecommweb-api/auth/login
+          5. On success: profile API call, SSAccountSignInCustomEvent tracking,
+             redirect to /account
+        """
+
+        # --- CSS selectors (multiple fallbacks, ordered by specificity) ---
+        email_sel = (
+            '#login-email, '
+            'input[id*="login-email" i], '
+            'input[name="email"][type="email"], '
+            'input[type="email"], '
+            'input[autocomplete="email"], '
+            'input[autocomplete="username"]'
+        )
+        pass_sel = (
+            '#login-password, '
+            'input[id*="login-password" i], '
+            'input[name="password"], '
+            'input[type="password"]'
+        )
+        submit_sel = (
+            'button[type="submit"], '
+            'button:has-text("Sign In"), '
+            'button:has-text("Log In")'
+        )
+
+        # Header sign-in link/icon (multiple selector strategies)
+        sign_in_header_sel = (
+            'a:has-text("Sign In"), '
+            'button:has-text("Sign In"), '
+            'a[href*="/account/login"], '
+            '[class*="sign-in" i], '
+            '[class*="header-sign-in" i], '
+            '[data-testid*="sign-in" i], '
+            '[data-testid*="signin" i], '
+            'a:has-text("Log In"), '
+            'button:has-text("Log In")'
+        )
+
+        # --- Start network monitor to track auth API calls ---
+        net_monitor = NetworkMonitor(page)
+        # Add Pokemon Center specific patterns
+        net_monitor.add_pattern("pkc_auth_login", "tpci-ecommweb-api/auth/login")
+        net_monitor.add_pattern("pkc_profile", "tpci-ecommweb-api/profile/data")
+        net_monitor.add_pattern("pkc_cart", "tpci-ecommweb-api/cart/data")
+        net_monitor.add_pattern("pkc_account_event", "SSAccountSignInCustomEvent")
+        net_monitor.add_pattern("pkc_resource_api", "site/resourceapi/account")
+        await net_monitor.start()
+
+        # ──────────────────────────────────────────────────────────
+        # Step 0: Navigate to homepage and warm up cookies
+        # ──────────────────────────────────────────────────────────
+        email_input = None
+        for attempt in range(3):
+            if attempt == 0:
+                logger.info("PKC login: navigating to homepage for cookie warm-up")
+                await page.goto("https://www.pokemoncenter.com", wait_until="domcontentloaded")
+            else:
+                logger.warning("PKC login: form not rendered (attempt %d/3) — reloading", attempt)
+                await page.reload(wait_until="domcontentloaded")
+
+            await wait_for_page_ready(page, timeout=15000)
+            await sweep_popups(page)
+
+            # Human-like: browse page briefly before clicking sign-in
+            await random_mouse_jitter(page)
+            await idle_scroll(page)
+            await random_delay(page, 800, 2000)
+
+            # ──────────────────────────────────────────────────────
+            # Step 1: Click header sign-in to open the login modal
+            # ──────────────────────────────────────────────────────
+            sign_in_clicked = False
+
+            # Strategy 1: CSS selectors for header sign-in link
+            try:
+                sign_in_link = page.locator(sign_in_header_sel)
+                if await sign_in_link.first.is_visible(timeout=8000):
+                    await human_click_element(page, sign_in_link)
+                    sign_in_clicked = True
+                    logger.info("PKC login: clicked header sign-in link via CSS")
+            except Exception:
+                pass
+
+            # Strategy 2: get_by_role for links/buttons
+            if not sign_in_clicked:
+                for role_type in ["link", "button"]:
+                    for text in ["Sign In", "Log In", "Sign in", "Log in"]:
+                        try:
+                            elem = page.get_by_role(role_type, name=text, exact=False)
+                            if await elem.first.is_visible(timeout=1000):
+                                await human_click_element(page, elem)
+                                sign_in_clicked = True
+                                logger.info("PKC login: clicked sign-in via get_by_role('%s', '%s')", role_type, text)
+                                break
+                        except Exception:
+                            continue
+                    if sign_in_clicked:
+                        break
+
+            # Strategy 3: Vision fallback for sign-in icon/link
+            if not sign_in_clicked:
+                logger.info("PKC login: trying vision for sign-in link")
+                sign_in_clicked = await self._smart_click(
+                    page, "Sign In link or account icon in the page header",
+                    sign_in_header_sel, timeout=5000,
+                )
+
+            if not sign_in_clicked:
+                # Last resort: navigate directly to login page
+                logger.warning("PKC login: header sign-in not found — navigating to /account/login")
+                await page.goto("https://www.pokemoncenter.com/account/login", wait_until="domcontentloaded")
+                await wait_for_page_ready(page, timeout=15000)
+
+            await random_delay(page, 1000, 2500)
+            await sweep_popups(page)
+
+            # ──────────────────────────────────────────────────────
+            # Step 2: Wait for email field to render (React hydration)
+            # ──────────────────────────────────────────────────────
+            try:
+                email_input = page.locator(email_sel).first
+                await email_input.wait_for(state="visible", timeout=10000)
+                break  # form rendered successfully
+            except Exception:
+                email_input = None
+
+        if email_input is None:
+            await net_monitor.stop()
+            raise RuntimeError(
+                "PKC login form did not render — email field not found after 3 attempts"
+            )
+
+        # ──────────────────────────────────────────────────────────
+        # Step 3: Fill email — human-like typing
+        # ──────────────────────────────────────────────────────────
+        await random_mouse_jitter(page)
+        await human_click_element(page, page.locator(email_sel))
+        await random_delay(page, 200, 500)
+        await email_input.press("Control+a")
+        await human_type(page, creds.email)
+        await random_delay(page, 300, 700)
+
+        # Verify the value actually got entered (PKC React may clear it)
+        try:
+            actual_value = await email_input.input_value(timeout=1000)
+            if actual_value != creds.email:
+                logger.warning(
+                    "PKC sign-in: human_type() produced '%s', expected '%s' — using fill()",
+                    actual_value[:20], creds.email[:20],
+                )
+                await email_input.fill(creds.email)
+                await random_delay(page, 200, 400)
+        except Exception:
+            logger.warning("PKC sign-in: could not verify email input — using fill() as backup")
+            await email_input.fill(creds.email)
+            await random_delay(page, 200, 400)
+
+        # ──────────────────────────────────────────────────────────
+        # Step 4: Fill password — human-like typing
+        # ──────────────────────────────────────────────────────────
+        pass_found = False
+        try:
+            await page.locator(pass_sel).first.wait_for(state="visible", timeout=5000)
+            pass_found = True
+        except Exception:
+            pass
+
+        if pass_found:
+            await human_click_element(page, page.locator(pass_sel))
+            await random_delay(page, 150, 400)
+            await human_type(page, creds.password)
+            await random_delay(page, 200, 600)
+
+            # Verify password was entered
+            try:
+                pw_value = await page.locator(pass_sel).first.input_value(timeout=1000)
+                if not pw_value:
+                    logger.warning("PKC sign-in: human_type() did not fill password — using fill()")
+                    await page.locator(pass_sel).first.fill(creds.password)
+                    await random_delay(page, 200, 400)
+            except Exception:
+                pass
+        else:
+            # Vision fallback for password field
+            logger.warning("PKC sign-in: password field not found via selectors — trying vision")
+            vision_filled = await self._smart_fill(
+                page, "password input field", pass_sel, creds.password,
+            )
+            if not vision_filled:
+                await net_monitor.stop()
+                raise RuntimeError("PKC sign-in: password field did not appear")
+
+        # ──────────────────────────────────────────────────────────
+        # Step 5: Click Sign In button
+        # ──────────────────────────────────────────────────────────
+        await wait_for_button_enabled(page, submit_sel, timeout=10000)
+        await random_delay(page, 200, 500)
+
+        pre_url = page.url
+        await self._multi_strategy_click(page, "Sign In", [
+            "Sign In", "Log In", "Continue", "Submit",
+        ], submit_sel)
+
+        # ──────────────────────────────────────────────────────────
+        # Step 6: Wait for login to complete via network monitoring
+        # ──────────────────────────────────────────────────────────
+        # PKC login POSTs to /tpci-ecommweb-api/auth/login, then
+        # fires profile/cart API calls and tracking events on success.
+        auth_ok = await net_monitor.wait_for("pkc_auth_login", expected_count=1, timeout=15000)
+
+        if auth_ok:
+            logger.info("PKC login: auth API responded")
+            # Give profile/cart calls time to fire (confirms session)
+            try:
+                await net_monitor.wait_for("pkc_profile", expected_count=1, timeout=5000)
+            except Exception:
+                pass
+            try:
+                await net_monitor.wait_for("pkc_cart", expected_count=1, timeout=3000)
+            except Exception:
+                pass
+        else:
+            # Fallback: check URL change (successful login navigates away)
+            logger.warning("PKC login: auth API not observed — checking URL change")
+            await wait_for_url_change(page, pre_url, timeout=10000)
+
+        # Wait for page to settle after login
+        await wait_for_page_ready(page, timeout=10000)
+
+        # Check for PerimeterX / bot blocks during login
+        if net_monitor.was_blocked():
+            blocked = net_monitor.get_blocked_details()
+            logger.warning("PKC login: blocked %d request(s) during login", len(blocked))
+
+        await net_monitor.stop()
+
+        # Sweep post-login popups (cookie consent, welcome back, etc.)
+        await sweep_popups(page)
+
+        # ──────────────────────────────────────────────────────────
+        # Step 7: Verify login success
+        # ──────────────────────────────────────────────────────────
+        final_url = page.url
+
+        # Check if we landed on /account (success) or still on login
+        if "/account" in final_url and "/login" not in final_url:
+            logger.info("PKC login: success — redirected to %s", final_url)
+            return
+
+        # Check if we're back on homepage (modal closed = success)
+        if final_url.rstrip("/") == "https://www.pokemoncenter.com":
+            # Verify by checking if sign-in link is gone / My Account is visible
+            try:
+                my_acct = page.locator('a:has-text("My Account"), a[href="/account"]')
+                if await my_acct.first.is_visible(timeout=3000):
+                    logger.info("PKC login: success — 'My Account' link visible on homepage")
+                    return
+            except Exception:
+                pass
+            # Check header changed from "Sign In" to account indicator
+            try:
+                still_sign_in = page.locator(sign_in_header_sel)
+                if await still_sign_in.first.is_visible(timeout=2000):
+                    logger.warning("PKC login: may have failed — 'Sign In' still visible in header")
+                else:
+                    logger.info("PKC login: success — sign-in link no longer visible")
+                    return
+            except Exception:
+                logger.info("PKC login: assuming success (sign-in check inconclusive)")
+                return
+
+        # If we got here with no clear failure signal, check for error messages
+        error_msg = await self._smart_read_error(page)
+        if error_msg:
+            logger.warning("PKC login: error detected — %s", error_msg)
+        else:
+            logger.info("PKC login: completed (final URL: %s)", final_url)
+
     async def _checkout_pokemoncenter(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
-        """Pokemon Center checkout flow."""
+        """Pokemon Center checkout flow.
+
+        Uses the same anti-bot approach as Target: homepage warm-up to
+        establish tracking cookies, human-like sign-in via modal, then
+        proceed to product page for add-to-cart and checkout.
+        """
         context = await self._get_context("pokemoncenter")
         page = await context.new_page()
 
         try:
+            # Step 1: Sign in via homepage modal (establishes cookies first)
+            await self._sign_in_pokemoncenter(page, creds)
+            await self._save_context(context, "pokemoncenter")
+
+            # Step 2: Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
-
-            # PKC often has queue — wait for page to load
-            # Add to cart
             await sweep_popups(page)
+
+            # Human-like: brief page browse before adding to cart
+            await random_mouse_jitter(page)
+            await idle_scroll(page)
+            await random_delay(page, 500, 1500)
+
+            # Step 3: Add to cart
             if not await self._smart_click(
                 page, "Add to Cart",
                 'button:has-text("Add to Cart"), button:has-text("Add to Bag")',
@@ -1596,47 +1906,34 @@ class CheckoutEngine:
                 raise Exception("Add to cart button not found")
             await random_delay(page, 1500, 2500)
 
-            # Navigate to cart/checkout
+            # Step 4: Navigate to cart/checkout
             if not await self._smart_click(
                 page, "Go to Cart",
-                'a[href*="cart"], a:has-text("Cart"), a:has-text("Bag")',
+                'a[href*="cart"], a:has-text("Cart"), a:has-text("Bag"), '
+                'button:has-text("View Cart"), a:has-text("View Cart")',
             ):
-                raise Exception("Cart link not found")
+                # Try navigating directly
+                await page.goto("https://www.pokemoncenter.com/cart", wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=10000)
 
             if not await self._smart_click(
                 page, "Checkout",
-                'button:has-text("Checkout"), a:has-text("Checkout")',
+                'button:has-text("Checkout"), a:has-text("Checkout"), '
+                'button:has-text("Check Out"), a:has-text("Check Out")',
             ):
                 raise Exception("Checkout button not found")
-            await wait_for_page_ready(page, timeout=10000)
+            await wait_for_page_ready(page, timeout=15000)
 
-            # Sign in if needed (may redirect to access.pokemon.com SSO)
-            current_url = page.url
-            if "access.pokemon.com" in current_url or "sso.pokemon.com" in current_url:
-                email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
-                pass_sel = 'input[type="password"], input[name="password"]'
-            else:
-                email_sel = 'input[type="email"], input[name="email"], input[type="text"][autocomplete="email"], input[type="text"][autocomplete="username"], input[id*="email" i], input[id*="login" i], input[name*="email" i], input[name*="login" i]'
-                pass_sel = 'input[type="password"], input[name="password"], input[id*="password" i]'
+            # Step 5: Handle payment form (PKC requires payment entry every time)
+            await self._pkc_fill_checkout_form(page, profile, creds)
 
-            # Try selector-based sign-in (human-like via _smart_fill), fall back to vision
-            email_filled = await self._smart_fill(page, "email", email_sel, creds.email, timeout=5000)
-            if email_filled:
-                await self._smart_fill(page, "password", pass_sel, creds.password)
-                await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
-                await self._multi_strategy_click(page, "Sign In", [
-                    "Sign In", "Log In", "Continue",
-                ], 'button[type="submit"], button:has-text("Sign In")')
-                await wait_for_page_ready(page, timeout=10000)
-            else:
-                # No email field found by selectors — try full vision sign-in
-                await self._smart_sign_in(page, creds, "pokemoncenter")
-
-            # Place order — assumes saved payment on account
+            # Step 6: Place order
             if dry_run:
                 try:
-                    btn = page.locator('button:has-text("Place Order"), button:has-text("Submit Order")')
+                    btn = page.locator(
+                        'button:has-text("Place Order"), button:has-text("Submit Order"), '
+                        'button:has-text("Complete Order"), button:has-text("Pay Now")'
+                    )
                     if await btn.first.is_visible(timeout=15000):
                         logger.info("DRY RUN: 'Place Order' button found — checkout flow verified")
                         await self._save_context(context, "pokemoncenter")
@@ -1661,7 +1958,8 @@ class CheckoutEngine:
 
             if await self._smart_click(
                 page, "Place Order",
-                'button:has-text("Place Order"), button:has-text("Submit Order")',
+                'button:has-text("Place Order"), button:has-text("Submit Order"), '
+                'button:has-text("Complete Order"), button:has-text("Pay Now")',
                 timeout=15000,
             ):
                 await wait_for_page_ready(page, timeout=10000)
@@ -1693,6 +1991,300 @@ class CheckoutEngine:
         finally:
             await page.close()
             await context.close()
+
+    async def _pkc_fill_checkout_form(self, page, profile: Profile, creds: AccountCredentials):
+        """Fill the Pokemon Center checkout form (shipping + payment).
+
+        PKC requires payment entry on every checkout (no saved cards).
+        The checkout page has shipping address fields and payment fields
+        (card number, expiry, CVV). Shipping address may be pre-filled
+        if saved on the account.
+
+        Uses human-like typing and the same anti-bot patterns as the
+        login flow.
+        """
+        await sweep_popups(page)
+        await random_mouse_jitter(page)
+
+        # --- Shipping address (fill only if fields are empty) ---
+        shipping_fields = [
+            ('#firstName, input[name="firstName"], input[name="first_name"], '
+             'input[autocomplete="given-name"]', profile.first_name),
+            ('#lastName, input[name="lastName"], input[name="last_name"], '
+             'input[autocomplete="family-name"]', profile.last_name),
+            ('#address1, input[name="address1"], input[name="address_line1"], '
+             'input[autocomplete="address-line1"]', profile.address_line1),
+            ('#address2, input[name="address2"], input[name="address_line2"], '
+             'input[autocomplete="address-line2"]', profile.address_line2),
+            ('#city, input[name="city"], input[autocomplete="address-level2"]', profile.city),
+            ('#zipCode, input[name="zipCode"], input[name="zip"], input[name="postalCode"], '
+             'input[autocomplete="postal-code"]', profile.zip_code),
+            ('#phone, input[name="phone"], input[type="tel"], '
+             'input[autocomplete="tel"]', profile.phone),
+            ('#email, input[name="email"][autocomplete="email"]', profile.email or creds.email),
+        ]
+
+        for sel, value in shipping_fields:
+            if not value:
+                continue
+            try:
+                field_elem = page.locator(sel).first
+                if await field_elem.is_visible(timeout=1000):
+                    current_val = await field_elem.input_value(timeout=500)
+                    if not current_val:  # only fill if empty (may be pre-filled)
+                        await human_click_element(page, field_elem)
+                        await random_delay(page, 100, 250)
+                        await human_type(page, value)
+                        await random_delay(page, 150, 400)
+            except Exception:
+                continue
+
+        # Handle state dropdown (if present and not pre-filled)
+        if profile.state:
+            try:
+                state_sel = '#state, select[name="state"], select[name="region"], select[autocomplete="address-level1"]'
+                state_elem = page.locator(state_sel).first
+                if await state_elem.is_visible(timeout=1000):
+                    current = await state_elem.input_value(timeout=500)
+                    if not current:
+                        await state_elem.select_option(value=profile.state)
+                        await random_delay(page, 200, 400)
+            except Exception:
+                pass
+
+        # Click Continue/Next to proceed to payment (if multi-step checkout)
+        try:
+            continue_btn = page.locator(
+                'button:has-text("Continue"), button:has-text("Next"), '
+                'button:has-text("Continue to Payment"), '
+                'button:has-text("Save & Continue")'
+            )
+            if await continue_btn.first.is_visible(timeout=3000):
+                await human_click_element(page, continue_btn)
+                await wait_for_page_ready(page, timeout=10000)
+                await random_delay(page, 500, 1000)
+        except Exception:
+            pass
+
+        await sweep_popups(page)
+
+        # --- Payment information (PKC requires every time) ---
+        if not creds.card_number:
+            logger.warning("PKC checkout: no card number in credentials — payment form cannot be filled")
+            return
+
+        # Card number — may be in an iframe (common with payment processors)
+        card_filled = False
+
+        # Strategy 1: Direct input on page
+        card_sel = (
+            '#cardNumber, input[name="cardNumber"], input[name="card_number"], '
+            'input[name="ccnumber"], input[autocomplete="cc-number"], '
+            'input[data-testid*="card-number" i], input[placeholder*="Card number" i]'
+        )
+        try:
+            card_input = page.locator(card_sel).first
+            if await card_input.is_visible(timeout=3000):
+                await human_click_element(page, card_input)
+                await random_delay(page, 100, 250)
+                await human_type(page, creds.card_number)
+                card_filled = True
+                await random_delay(page, 200, 500)
+        except Exception:
+            pass
+
+        # Strategy 2: Payment iframe (Stripe, Braintree, etc.)
+        if not card_filled:
+            payment_iframe_sels = [
+                'iframe[name*="card" i]', 'iframe[name*="payment" i]',
+                'iframe[src*="braintree" i]', 'iframe[src*="stripe" i]',
+                'iframe[title*="card" i]', 'iframe[title*="payment" i]',
+                'iframe[id*="card" i]', 'iframe[id*="braintree" i]',
+            ]
+            for iframe_sel in payment_iframe_sels:
+                try:
+                    iframe_elem = page.locator(iframe_sel).first
+                    if await iframe_elem.is_visible(timeout=2000):
+                        frame = page.frame_locator(iframe_sel)
+                        # Card number inside iframe
+                        iframe_card_sel = (
+                            'input[name="cardnumber"], input[name="card-number"], '
+                            'input[autocomplete="cc-number"], input[name="number"], '
+                            'input[data-fieldtype="encryptedCardNumber"], '
+                            'input[placeholder*="Card" i]'
+                        )
+                        card_in_frame = frame.locator(iframe_card_sel).first
+                        await card_in_frame.wait_for(state="visible", timeout=3000)
+                        await card_in_frame.click()
+                        await random_delay(page, 100, 250)
+                        await card_in_frame.type(creds.card_number, delay=50)
+                        card_filled = True
+
+                        # Expiry inside iframe
+                        exp_sel = (
+                            'input[name="exp-date"], input[name="expiryDate"], '
+                            'input[autocomplete="cc-exp"], '
+                            'input[data-fieldtype="encryptedExpiryDate"], '
+                            'input[placeholder*="MM" i]'
+                        )
+                        try:
+                            exp_input = frame.locator(exp_sel).first
+                            if await exp_input.is_visible(timeout=1000):
+                                exp_value = f"{creds.card_exp_month}/{creds.card_exp_year[-2:]}" if creds.card_exp_year else creds.card_exp_month
+                                await exp_input.click()
+                                await random_delay(page, 100, 200)
+                                await exp_input.type(exp_value, delay=50)
+                        except Exception:
+                            pass
+
+                        # CVV inside iframe
+                        cvv_sel = (
+                            'input[name="cvc"], input[name="cvv"], '
+                            'input[autocomplete="cc-csc"], '
+                            'input[data-fieldtype="encryptedSecurityCode"], '
+                            'input[placeholder*="CVV" i], input[placeholder*="CVC" i]'
+                        )
+                        try:
+                            cvv_input = frame.locator(cvv_sel).first
+                            if await cvv_input.is_visible(timeout=1000):
+                                await cvv_input.click()
+                                await random_delay(page, 100, 200)
+                                await cvv_input.type(creds.card_cvv, delay=50)
+                        except Exception:
+                            pass
+
+                        break
+                except Exception:
+                    continue
+
+        # Strategy 3: Vision fallback for card number
+        if not card_filled:
+            logger.info("PKC checkout: card number field not found — trying vision")
+            card_filled = await self._smart_fill(
+                page, "credit card number input field", card_sel, creds.card_number,
+            )
+
+        if not card_filled:
+            logger.warning("PKC checkout: could not fill card number")
+            return
+
+        # Expiry fields (separate month/year or combined — on main page)
+        if creds.card_exp_month:
+            # Try combined MM/YY field first
+            exp_combined_sel = (
+                'input[name="expiry"], input[name="expiryDate"], '
+                'input[autocomplete="cc-exp"], input[placeholder*="MM/YY" i], '
+                'input[placeholder*="MM / YY" i]'
+            )
+            exp_filled = False
+            try:
+                exp_input = page.locator(exp_combined_sel).first
+                if await exp_input.is_visible(timeout=1000):
+                    exp_value = f"{creds.card_exp_month}/{creds.card_exp_year[-2:]}" if creds.card_exp_year else creds.card_exp_month
+                    await human_click_element(page, exp_input)
+                    await random_delay(page, 100, 200)
+                    await human_type(page, exp_value)
+                    exp_filled = True
+                    await random_delay(page, 200, 400)
+            except Exception:
+                pass
+
+            # Try separate month/year fields
+            if not exp_filled:
+                month_sel = (
+                    '#expiryMonth, select[name="expiryMonth"], select[name="exp_month"], '
+                    'input[name="expiryMonth"], input[autocomplete="cc-exp-month"], '
+                    'select[autocomplete="cc-exp-month"]'
+                )
+                year_sel = (
+                    '#expiryYear, select[name="expiryYear"], select[name="exp_year"], '
+                    'input[name="expiryYear"], input[autocomplete="cc-exp-year"], '
+                    'select[autocomplete="cc-exp-year"]'
+                )
+                try:
+                    month_elem = page.locator(month_sel).first
+                    if await month_elem.is_visible(timeout=1000):
+                        tag = await month_elem.evaluate("el => el.tagName.toLowerCase()")
+                        if tag == "select":
+                            await month_elem.select_option(value=creds.card_exp_month)
+                        else:
+                            await human_click_element(page, month_elem)
+                            await random_delay(page, 100, 200)
+                            await human_type(page, creds.card_exp_month)
+                        await random_delay(page, 150, 300)
+                except Exception:
+                    pass
+
+                if creds.card_exp_year:
+                    try:
+                        year_elem = page.locator(year_sel).first
+                        if await year_elem.is_visible(timeout=1000):
+                            tag = await year_elem.evaluate("el => el.tagName.toLowerCase()")
+                            if tag == "select":
+                                # Try full year first, then last 2 digits
+                                try:
+                                    await year_elem.select_option(value=creds.card_exp_year)
+                                except Exception:
+                                    await year_elem.select_option(value=creds.card_exp_year[-2:])
+                            else:
+                                await human_click_element(page, year_elem)
+                                await random_delay(page, 100, 200)
+                                await human_type(page, creds.card_exp_year)
+                            await random_delay(page, 150, 300)
+                    except Exception:
+                        pass
+
+        # CVV (on main page)
+        if creds.card_cvv:
+            cvv_sel = (
+                '#cvv, #securityCode, input[name="cvv"], input[name="cvc"], '
+                'input[name="securityCode"], input[autocomplete="cc-csc"], '
+                'input[placeholder*="CVV" i], input[placeholder*="CVC" i], '
+                'input[placeholder*="Security" i]'
+            )
+            try:
+                cvv_input = page.locator(cvv_sel).first
+                if await cvv_input.is_visible(timeout=2000):
+                    await human_click_element(page, cvv_input)
+                    await random_delay(page, 100, 200)
+                    await human_type(page, creds.card_cvv)
+                    await random_delay(page, 200, 400)
+            except Exception:
+                logger.warning("PKC checkout: could not fill CVV field")
+
+        # Cardholder name (if field exists)
+        if creds.card_name:
+            name_sel = (
+                '#cardholderName, input[name="cardholderName"], input[name="name"], '
+                'input[autocomplete="cc-name"], input[placeholder*="Name on card" i], '
+                'input[placeholder*="Cardholder" i]'
+            )
+            try:
+                name_input = page.locator(name_sel).first
+                if await name_input.is_visible(timeout=1000):
+                    await human_click_element(page, name_input)
+                    await random_delay(page, 100, 200)
+                    await human_type(page, creds.card_name)
+                    await random_delay(page, 200, 400)
+            except Exception:
+                pass
+
+        # Billing address — check "same as shipping" checkbox first
+        try:
+            same_as_shipping = page.locator(
+                'input[type="checkbox"][name*="billing" i], '
+                'input[type="checkbox"][id*="sameAs" i], '
+                'label:has-text("Same as shipping")'
+            )
+            if await same_as_shipping.first.is_visible(timeout=1000):
+                is_checked = await same_as_shipping.first.is_checked()
+                if not is_checked:
+                    await human_click_element(page, same_as_shipping)
+                    await random_delay(page, 200, 400)
+        except Exception:
+            pass
+
+        logger.info("PKC checkout: payment form filled")
 
     async def _checkout_bestbuy(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
