@@ -1,4 +1,59 @@
-"""Checkout engine: API-first with optional Playwright browser fallback."""
+"""Checkout engine: API-first with optional Playwright browser fallback.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+This file contains the browser-based checkout engine with Playwright. It
+currently implements a Target checkout flow (_checkout_target) that is BROKEN
+due to Target site changes. Key issues identified:
+
+1. NO POPUP HANDLER: The bot has no universal popup/modal handler. Target now
+   shows new interstitials (cookie consent, "sign in for deals" modals,
+   age gates, delivery method pickers, "Choose a store" sheets) that block
+   the checkout flow. The _dismiss_target_overlay() method only handles
+   cookie/privacy overlays via a fixed list of selectors — it does NOT
+   detect or dismiss arbitrary modals, dialogs, or interstitials.
+
+2. LINEAR FLOW WITH NO RECOVERY: The _checkout_target() method runs steps
+   sequentially with no retry logic. If any step fails (e.g. a popup blocks
+   "Add to cart"), the entire checkout aborts. There is no mechanism to
+   detect that a step failed due to an unexpected UI element vs. a real error.
+
+3. HARDCODED SELECTORS: Selectors like 'button[data-test="shipItButton"]' and
+   'button[data-test="addToCartModalViewCartCheckout"]' are brittle. Target
+   frequently renames data-test attributes. The _smart_click() vision fallback
+   helps but is only used after CSS selectors fail — it doesn't proactively
+   sweep for blockers BEFORE attempting clicks.
+
+4. NO PRICE GUARD: The bot will place an order at ANY price. There is no
+   max_price check before clicking "Place your order". A price spike or
+   wrong product could result in an unintended expensive purchase.
+
+5. SIGN-IN FLOW FRAGILE: _sign_in_target() handles the multi-step Target
+   login but has no recovery if the login page doesn't render (after 3
+   retries it raises RuntimeError and aborts). The login flow also doesn't
+   handle CAPTCHAs or 2FA prompts from Target.
+
+6. STEALTH JS IS GOOD: The STEALTH_JS injection is comprehensive (webdriver
+   flag removal, WebGL spoofing, canvas noise, chrome object emulation).
+   This should be preserved in the rewrite.
+
+7. SESSION PERSISTENCE WORKS: _get_context()/_save_context() correctly use
+   Playwright's storage_state for cookie persistence. This pattern is sound.
+
+8. VISION HELPERS ARE USEFUL: _smart_click(), _smart_fill(), _ask_vision()
+   provide a good foundation for Claude-assisted fallback. However, they
+   return coordinates for clicking — which can be fragile if the viewport
+   or page layout shifts. The rewrite should use these as a last resort
+   after the new PopupHandler has swept for blockers.
+
+9. NO SCREENSHOTS FOR DEBUGGING: Failed steps don't save screenshots. The
+   only screenshot usage is for vision API calls. Every major step should
+   save a timestamped screenshot for post-mortem debugging.
+
+10. MISSING max_price CONFIG: The Config/Profile dataclasses have no
+    max_price field. This needs to be added to enable price guards.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -545,7 +600,19 @@ class CheckoutEngine:
     async def _checkout_target(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
-        """Target checkout flow."""
+        """Target checkout flow.
+
+        AUDIT: This is the method that broke. Root causes:
+        - No popup sweep between steps (new Target modals go unhandled)
+        - No retry on individual steps (one failure = total abort)
+        - No price validation before placing order
+        - No screenshot logging for debugging failed runs
+        - Delivery method selection (_target_select_delivery) uses fixed
+          selectors that Target has changed
+        - The "Add to cart" confirmation modal handling is incomplete —
+          Target now sometimes shows "Choose a store" or "Sign in to save"
+          modals after the add-to-cart click that are not dismissed
+        """
         context = await self._get_context("target")
         page = await context.new_page()
 
@@ -694,7 +761,17 @@ class CheckoutEngine:
             return False
 
     async def _dismiss_target_overlay(self, page):
-        """Dismiss Target's privacy/cookie consent overlay that blocks clicks."""
+        """Dismiss Target's privacy/cookie consent overlay that blocks clicks.
+
+        AUDIT: This is the ONLY popup-handling code in the entire checkout flow.
+        It only handles cookie/privacy overlays via a hardcoded selector list.
+        It does NOT handle: age gates, "sign in for deals" modals, "Choose a
+        store" pickers, add-to-cart confirmation drawers, delivery option sheets,
+        CAPTCHA interstitials, or any [role="dialog"]/[aria-modal="true"] elements.
+        The JS fallback (removing overlay elements) is aggressive and may break
+        React's virtual DOM state. The rewrite needs a universal PopupHandler
+        that runs after every major action and detects ANY modal/dialog/overlay.
+        """
         try:
             # Try clicking common accept/close buttons inside the floating-ui portal overlay
             for sel in [
@@ -846,6 +923,13 @@ class CheckoutEngine:
 
         We try to click "Continue" / "Save and continue" through each step
         until we reach the final review page.
+
+        AUDIT: This method has no popup handling between steps. If Target shows
+        an "address suggestion" modal, a "promo code" interstitial, or any other
+        unexpected dialog during checkout navigation, this method will fail to
+        find the "Continue" button (it's behind the modal) and silently break.
+        The rewrite must call popup_handler.sweep() before each continue click.
+        Also: no price check is performed before reaching the "Place order" page.
         """
         continue_sel = (
             'button[data-test="save-and-continue-button"], '
