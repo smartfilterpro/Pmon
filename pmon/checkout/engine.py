@@ -1242,63 +1242,151 @@ class CheckoutEngine:
             # Step 3: Auth method picker — Target shows "Enter your password"
             pw_option_clicked = False
 
-            # Strategy 1: get_by_role("button") for button-style pickers
-            for option_text in ["Enter your password", "Enter password", "Password", "Use password"]:
-                try:
-                    opt = page.get_by_role("button", name=option_text, exact=False)
-                    if await opt.first.is_visible(timeout=500):
-                        await human_click_element(page, opt)
-                        pw_option_clicked = True
-                        break
-                except Exception:
-                    continue
+            # Re-dismiss overlays (Target's consent modal can reappear after email submit)
+            await sweep_popups(page)
 
-            # Strategy 2: get_by_role("radio") for radio-button pickers (Walmart)
+            # Check if password field is already visible (no picker needed)
+            try:
+                if await page.locator(pass_sel).first.is_visible(timeout=2000):
+                    pw_option_clicked = True
+                    logger.info("Target sign-in: password field already visible (no auth picker)")
+            except Exception:
+                pass
+
+            pw_texts = [
+                "Enter your password", "Enter password",
+                "Password", "Use password", "Sign in with password",
+                "password",
+            ]
+
+            # Strategy 1: get_by_role("button") for button-style pickers
+            if not pw_option_clicked:
+                for option_text in pw_texts:
+                    try:
+                        opt = page.get_by_role("button", name=option_text, exact=False)
+                        if await opt.first.is_visible(timeout=500):
+                            await human_click_element(page, opt)
+                            pw_option_clicked = True
+                            logger.info("Target sign-in: clicked auth method via get_by_role('button', '%s')", option_text)
+                            break
+                    except Exception:
+                        continue
+
+            # Strategy 2: get_by_role("link") — Target often uses <a> tags for auth options
+            if not pw_option_clicked:
+                for option_text in pw_texts:
+                    try:
+                        opt = page.get_by_role("link", name=option_text, exact=False)
+                        if await opt.first.is_visible(timeout=500):
+                            await human_click_element(page, opt)
+                            pw_option_clicked = True
+                            logger.info("Target sign-in: clicked auth method via get_by_role('link', '%s')", option_text)
+                            break
+                    except Exception:
+                        continue
+
+            # Strategy 3: get_by_role("radio") for radio-button pickers
             if not pw_option_clicked:
                 try:
                     opt = page.get_by_role("radio", name="Password", exact=False)
                     if await opt.first.is_visible(timeout=500):
                         await human_click_element(page, opt)
                         pw_option_clicked = True
+                        logger.info("Target sign-in: clicked auth method via get_by_role('radio')")
                 except Exception:
                     pass
 
-            # Strategy 3: get_by_text (catches divs/links/labels acting as buttons)
+            # Strategy 4: get_by_text (catches divs/spans/labels acting as buttons)
             if not pw_option_clicked:
-                for option_text in ["Enter your password", "Enter password", "Password"]:
+                for option_text in pw_texts:
                     try:
-                        opt = page.get_by_text(option_text, exact=True)
+                        opt = page.get_by_text(option_text, exact=False)
                         if await opt.first.is_visible(timeout=500):
                             await human_click_element(page, opt)
                             pw_option_clicked = True
+                            logger.info("Target sign-in: clicked auth method via get_by_text('%s')", option_text)
                             break
                     except Exception:
                         continue
 
-            # Strategy 4: CSS selectors (labels for radio, buttons, links)
+            # Strategy 5: CSS selectors (labels for radio, buttons, links, list items)
             if not pw_option_clicked:
-                password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password"), label:has-text("Password"), input[type="radio"][value*="password" i]')
+                password_option = page.locator(
+                    'button:has-text("password"), a:has-text("password"), '
+                    '[data-test*="password" i], div:has-text("Enter your password"), '
+                    'label:has-text("Password"), input[type="radio"][value*="password" i], '
+                    'li:has-text("password"), span:has-text("Enter your password")'
+                )
                 try:
                     if await password_option.first.is_visible(timeout=1000):
                         await human_click_element(page, password_option)
                         pw_option_clicked = True
+                        logger.info("Target sign-in: clicked auth method via CSS selector")
                 except Exception:
                     pass
 
-            # Strategy 5: Vision fallback
+            # Strategy 6: JS click — find any clickable element containing "password" text
             if not pw_option_clicked:
-                logger.info("Sign-in: trying vision for auth method picker")
-                pw_option_clicked = await self._smart_click(page, "Password option (radio button or link)", "", timeout=1000)
+                try:
+                    clicked_js = await page.evaluate("""() => {
+                        const els = document.querySelectorAll('a, button, [role="button"], [role="link"], li, div[tabindex], span[tabindex]');
+                        for (const el of els) {
+                            const text = (el.textContent || '').toLowerCase().trim();
+                            if (text.includes('password') && !text.includes('forgot') && el.offsetParent !== null) {
+                                el.click();
+                                return el.tagName + ': ' + text.substring(0, 60);
+                            }
+                        }
+                        return null;
+                    }""")
+                    if clicked_js:
+                        pw_option_clicked = True
+                        logger.info("Target sign-in: clicked auth method via JS: %s", clicked_js)
+                except Exception:
+                    pass
+
+            # Strategy 7: Vision fallback
+            if not pw_option_clicked:
+                logger.info("Target sign-in: trying vision for auth method picker")
+                pw_option_clicked = await self._smart_click(
+                    page, "Password option (radio button or link to select password sign-in method)", "", timeout=2000
+                )
 
             if pw_option_clicked:
                 await wait_for_page_ready(page, timeout=8000)
+            else:
+                logger.warning("Target sign-in: could not find password auth method option")
 
-            # Step 4: Enter password — human-like
-            await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
-            await human_click_element(page, page.locator(pass_sel))
-            await random_delay(page, 150, 300)
-            await human_type(page, creds.password)
-            await random_delay(page, 200, 500)
+            # Step 4: Enter password — human-like, with vision fallback
+            pass_found = False
+            try:
+                await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
+                pass_found = True
+            except Exception:
+                pass
+
+            if pass_found:
+                await human_click_element(page, page.locator(pass_sel))
+                await random_delay(page, 150, 300)
+                await human_type(page, creds.password)
+                await random_delay(page, 200, 500)
+                # Verify password was entered; if empty, fall back to fill()
+                try:
+                    pw_value = await page.locator(pass_sel).first.input_value(timeout=1000)
+                    if not pw_value:
+                        logger.warning("Target sign-in: human_type() did not fill password — using fill()")
+                        await page.locator(pass_sel).first.fill(creds.password)
+                        await random_delay(page, 200, 400)
+                except Exception:
+                    pass
+            else:
+                # Vision fallback for password entry
+                logger.warning("Target sign-in: password field not found via selectors — trying vision")
+                vision_filled = await self._smart_fill(
+                    page, "password input field", pass_sel, creds.password
+                )
+                if not vision_filled:
+                    raise RuntimeError("Target sign-in: password field did not appear after selecting auth method")
 
             # Wait for Sign In button to be enabled (grayed-out fix)
             await wait_for_button_enabled(page, submit_sel, timeout=15000)
