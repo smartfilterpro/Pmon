@@ -26,6 +26,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _fix_utc_timestamps(row: dict, *fields: str) -> None:
+    """Append 'Z' to SQLite UTC timestamps so browsers interpret them correctly."""
+    for f in fields:
+        val = row.get(f)
+        if val and not val.endswith(("Z", "+00:00")):
+            row[f] = val.replace(" ", "T") + "Z"
+
+
 DASHBOARD_DIR = Path(__file__).parent
 DIST_DIR = DASHBOARD_DIR / "static" / "dist"
 
@@ -159,6 +168,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             })
 
         checkouts = db.get_checkout_log(user_id, limit=30)
+        for c in checkouts:
+            _fix_utc_timestamps(c, "created_at")
 
         return {
             "is_running": engine.state.is_running,
@@ -1416,6 +1427,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.get("/api/errors")
     async def api_errors(user: dict = Depends(get_current_user)):
         errors = db.get_error_log(user["id"], limit=100)
+        for e in errors:
+            _fix_utc_timestamps(e, "created_at")
         return {"errors": errors}
 
     # --- Admin endpoints ---
@@ -1428,11 +1441,15 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.get("/api/admin/users")
     async def api_admin_users(user: dict = Depends(require_admin)):
         users = db.get_all_users()
+        for u in users:
+            _fix_utc_timestamps(u, "created_at", "last_login")
         return {"users": users}
 
     @app.get("/api/admin/pending")
     async def api_admin_pending(user: dict = Depends(require_admin)):
         pending = db.get_pending_users()
+        for p in pending:
+            _fix_utc_timestamps(p, "created_at")
         return {"pending": pending}
 
     @app.post("/api/admin/approve")
@@ -1468,10 +1485,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 import json as _json
                 try:
                     cookies = _json.loads(session["cookies_json"])
+                    updated = session["updated_at"]
+                    if updated and not updated.endswith(("Z", "+00:00")):
+                        updated = updated.replace(" ", "T") + "Z"
                     result[retailer] = {
                         "has_session": True,
                         "cookie_count": len(cookies),
-                        "updated_at": session["updated_at"],
+                        "updated_at": updated,
                     }
                 except Exception:
                     result[retailer] = {"has_session": False}
