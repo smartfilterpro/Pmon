@@ -43,6 +43,7 @@ class Profile:
 class AccountCredentials:
     email: str = ""
     password: str = ""
+    card_cvv: str = ""
 
 
 @dataclass

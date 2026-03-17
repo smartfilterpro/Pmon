@@ -256,7 +256,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         # Don't send passwords back
         safe = {}
         for retailer, acc in accounts.items():
-            safe[retailer] = {"email": acc["email"], "has_password": bool(acc["password"])}
+            safe[retailer] = {
+                "email": acc["email"],
+                "has_password": bool(acc["password"]),
+                "has_cvv": bool(acc.get("card_cvv")),
+            }
         return {"accounts": safe}
 
     @app.post("/api/accounts")
@@ -265,9 +269,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         retailer = data.get("retailer", "").strip()
         email = data.get("email", "").strip()
         password = data.get("password", "")
+        card_cvv = data.get("card_cvv", "").strip()
         if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
-        db.set_retailer_account(user["id"], retailer, email, password)
+        db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv)
         return {"ok": True}
 
     @app.post("/api/accounts/test")
@@ -295,7 +300,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if retailer == "walmart":
             return await _test_walmart_session(user)
 
-        return await _test_retailer_browser(user, retailer, email, password)
+        # --- All other retailers: use Playwright browser automation ---
+        return await _test_login_browser(retailer, email, password, user)
 
     async def _test_walmart_session(user: dict):
         """Test Walmart account by validating imported session cookies via API.
@@ -385,8 +391,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             logger.error("Walmart session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
 
-    async def _test_retailer_browser(user: dict, retailer: str, email: str, password: str):
-        """Test retailer login credentials using Playwright browser automation."""
+    async def _test_login_browser(retailer: str, email: str, password: str, user: dict):
+        """Test retailer login using Playwright browser automation."""
         import base64
         import json
         import os

@@ -141,6 +141,12 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
     if "approved" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
+
+    # Add card_cvv to retailer_accounts (needed for Target checkout)
+    acct_cols = {row[1] for row in conn.execute("PRAGMA table_info(retailer_accounts)").fetchall()}
+    if "card_cvv" not in acct_cols:
+        conn.execute("ALTER TABLE retailer_accounts ADD COLUMN card_cvv TEXT DEFAULT ''")
+
     conn.commit()
 
 
@@ -298,23 +304,26 @@ def get_retailer_accounts(user_id: int) -> dict[str, dict]:
     return {r["retailer"]: dict(r) for r in rows}
 
 
-def set_retailer_account(user_id: int, retailer: str, email: str, password: str):
+def set_retailer_account(user_id: int, retailer: str, email: str, password: str,
+                         card_cvv: str = ""):
     db = get_db()
     if password:
-        # Update both email and password
         db.execute(
-            """INSERT INTO retailer_accounts (user_id, retailer, email, password)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(user_id, retailer) DO UPDATE SET email=excluded.email, password=excluded.password""",
-            (user_id, retailer, email, password),
+            """INSERT INTO retailer_accounts (user_id, retailer, email, password, card_cvv)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, retailer) DO UPDATE SET
+                 email=excluded.email, password=excluded.password,
+                 card_cvv=CASE WHEN excluded.card_cvv != '' THEN excluded.card_cvv ELSE retailer_accounts.card_cvv END""",
+            (user_id, retailer, email, password, card_cvv),
         )
     else:
-        # Empty password — only update the email, keep existing password
         db.execute(
-            """INSERT INTO retailer_accounts (user_id, retailer, email, password)
-               VALUES (?, ?, ?, '')
-               ON CONFLICT(user_id, retailer) DO UPDATE SET email=excluded.email""",
-            (user_id, retailer, email),
+            """INSERT INTO retailer_accounts (user_id, retailer, email, password, card_cvv)
+               VALUES (?, ?, ?, '', ?)
+               ON CONFLICT(user_id, retailer) DO UPDATE SET
+                 email=excluded.email,
+                 card_cvv=CASE WHEN excluded.card_cvv != '' THEN excluded.card_cvv ELSE retailer_accounts.card_cvv END""",
+            (user_id, retailer, email, card_cvv),
         )
     db.commit()
 
