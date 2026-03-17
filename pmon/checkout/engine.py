@@ -1,4 +1,59 @@
-"""Checkout engine: API-first with optional Playwright browser fallback."""
+"""Checkout engine: API-first with optional Playwright browser fallback.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+This file contains the browser-based checkout engine with Playwright. It
+currently implements a Target checkout flow (_checkout_target) that is BROKEN
+due to Target site changes. Key issues identified:
+
+1. NO POPUP HANDLER: The bot has no universal popup/modal handler. Target now
+   shows new interstitials (cookie consent, "sign in for deals" modals,
+   age gates, delivery method pickers, "Choose a store" sheets) that block
+   the checkout flow. The _dismiss_target_overlay() method only handles
+   cookie/privacy overlays via a fixed list of selectors — it does NOT
+   detect or dismiss arbitrary modals, dialogs, or interstitials.
+
+2. LINEAR FLOW WITH NO RECOVERY: The _checkout_target() method runs steps
+   sequentially with no retry logic. If any step fails (e.g. a popup blocks
+   "Add to cart"), the entire checkout aborts. There is no mechanism to
+   detect that a step failed due to an unexpected UI element vs. a real error.
+
+3. HARDCODED SELECTORS: Selectors like 'button[data-test="shipItButton"]' and
+   'button[data-test="addToCartModalViewCartCheckout"]' are brittle. Target
+   frequently renames data-test attributes. The _smart_click() vision fallback
+   helps but is only used after CSS selectors fail — it doesn't proactively
+   sweep for blockers BEFORE attempting clicks.
+
+4. NO PRICE GUARD: The bot will place an order at ANY price. There is no
+   max_price check before clicking "Place your order". A price spike or
+   wrong product could result in an unintended expensive purchase.
+
+5. SIGN-IN FLOW FRAGILE: _sign_in_target() handles the multi-step Target
+   login but has no recovery if the login page doesn't render (after 3
+   retries it raises RuntimeError and aborts). The login flow also doesn't
+   handle CAPTCHAs or 2FA prompts from Target.
+
+6. STEALTH JS IS GOOD: The STEALTH_JS injection is comprehensive (webdriver
+   flag removal, WebGL spoofing, canvas noise, chrome object emulation).
+   This should be preserved in the rewrite.
+
+7. SESSION PERSISTENCE WORKS: _get_context()/_save_context() correctly use
+   Playwright's storage_state for cookie persistence. This pattern is sound.
+
+8. VISION HELPERS ARE USEFUL: _smart_click(), _smart_fill(), _ask_vision()
+   provide a good foundation for Claude-assisted fallback. However, they
+   return coordinates for clicking — which can be fragile if the viewport
+   or page layout shifts. The rewrite should use these as a last resort
+   after the new PopupHandler has swept for blockers.
+
+9. NO SCREENSHOTS FOR DEBUGGING: Failed steps don't save screenshots. The
+   only screenshot usage is for vision API calls. Every major step should
+   save a timestamped screenshot for post-mortem debugging.
+
+10. MISSING max_price CONFIG: The Config/Profile dataclasses have no
+    max_price field. This needs to be added to enable price guards.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -545,7 +600,19 @@ class CheckoutEngine:
     async def _checkout_target(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
-        """Target checkout flow."""
+        """Target checkout flow.
+
+        AUDIT: This is the method that broke. Root causes:
+        - No popup sweep between steps (new Target modals go unhandled)
+        - No retry on individual steps (one failure = total abort)
+        - No price validation before placing order
+        - No screenshot logging for debugging failed runs
+        - Delivery method selection (_target_select_delivery) uses fixed
+          selectors that Target has changed
+        - The "Add to cart" confirmation modal handling is incomplete —
+          Target now sometimes shows "Choose a store" or "Sign in to save"
+          modals after the add-to-cart click that are not dismissed
+        """
         context = await self._get_context("target")
         page = await context.new_page()
 
@@ -556,6 +623,9 @@ class CheckoutEngine:
 
             # Dismiss privacy/cookie overlay if present
             await self._dismiss_target_overlay(page)
+
+            # Dismiss Health Data Consent modal if present (health-related products)
+            await self._dismiss_health_consent_modal(page)
 
             # Check if we need to sign in
             if not await self._is_signed_in_target(page):
@@ -572,11 +642,23 @@ class CheckoutEngine:
                 'button:has-text("Ship it"), button:has-text("Add to cart")',
             )
             if not add_to_cart_clicked:
-                error = await self._smart_read_error(page)
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found")
+                # Health Data Consent modal may have appeared and blocked the click
+                if await self._dismiss_health_consent_modal(page):
+                    # Retry add-to-cart after dismissing the consent modal
+                    add_to_cart_clicked = await self._smart_click(
+                        page, "Ship it / Add to cart",
+                        'button[data-test="shipItButton"], button[data-test="shippingButton"], '
+                        'button:has-text("Ship it"), button:has-text("Add to cart")',
+                    )
+                if not add_to_cart_clicked:
+                    error = await self._smart_read_error(page)
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found")
             await page.wait_for_timeout(1500)
+
+            # Health Data Consent modal can also appear AFTER clicking add-to-cart
+            await self._dismiss_health_consent_modal(page)
 
             # Decline optional coverage/warranty if modal appears
             await self._smart_click(
@@ -693,8 +775,77 @@ class CheckoutEngine:
         except Exception:
             return False
 
+    async def _dismiss_health_consent_modal(self, page) -> bool:
+        """Dismiss Target's Health Data Consent modal if present.
+
+        Target shows this modal for health-related products (supplements,
+        vitamins, health monitors, etc.), requiring users to agree to Terms
+        and Health Privacy Policy before adding to cart.  Returns True if a
+        modal was dismissed.
+        """
+        try:
+            # Look for the modal by role or common selectors
+            consent_selectors = [
+                # Dialog-level selectors
+                '[data-test="health-consent-modal"] button:has-text("Agree")',
+                '[data-test="healthConsentModal"] button:has-text("Agree")',
+                # Generic modal with health-related text + agree/acknowledge button
+                'dialog button:has-text("I agree")',
+                'dialog button:has-text("Agree")',
+                'dialog button:has-text("Acknowledge")',
+                'dialog button:has-text("Accept")',
+                'dialog button:has-text("Continue")',
+                # Div-based modals (Target uses both <dialog> and div overlays)
+                '[role="dialog"] button:has-text("I agree")',
+                '[role="dialog"] button:has-text("Agree")',
+                '[role="dialog"] button:has-text("Acknowledge")',
+                '[role="dialog"] button:has-text("Accept")',
+                '[role="dialog"] button:has-text("Continue")',
+                # Broader: any visible button with agree/acknowledge text
+                'button:has-text("I agree")',
+                'button:has-text("Agree and continue")',
+            ]
+            for sel in consent_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click(timeout=3000)
+                        logger.info("Health consent modal: dismissed via '%s'", sel)
+                        await page.wait_for_timeout(1000)
+                        return True
+                except Exception:
+                    continue
+
+            # Vision fallback: ask Claude to find and click the agree button
+            if self._vision_available:
+                clicked = await self._smart_click(
+                    page,
+                    "Health Data Consent agree/acknowledge button",
+                    "",
+                    timeout=2000,
+                )
+                if clicked:
+                    logger.info("Health consent modal: dismissed via vision fallback")
+                    await page.wait_for_timeout(1000)
+                    return True
+
+            return False
+        except Exception as exc:
+            logger.debug("Health consent modal dismiss failed (non-fatal): %s", exc)
+            return False
+
     async def _dismiss_target_overlay(self, page):
-        """Dismiss Target's privacy/cookie consent overlay that blocks clicks."""
+        """Dismiss Target's privacy/cookie consent overlay that blocks clicks.
+
+        AUDIT: This is the ONLY popup-handling code in the entire checkout flow.
+        It only handles cookie/privacy overlays via a hardcoded selector list.
+        It does NOT handle: age gates, "sign in for deals" modals, "Choose a
+        store" pickers, add-to-cart confirmation drawers, delivery option sheets,
+        CAPTCHA interstitials, or any [role="dialog"]/[aria-modal="true"] elements.
+        The JS fallback (removing overlay elements) is aggressive and may break
+        React's virtual DOM state. The rewrite needs a universal PopupHandler
+        that runs after every major action and detects ANY modal/dialog/overlay.
+        """
         try:
             # Try clicking common accept/close buttons inside the floating-ui portal overlay
             for sel in [
@@ -846,6 +997,13 @@ class CheckoutEngine:
 
         We try to click "Continue" / "Save and continue" through each step
         until we reach the final review page.
+
+        AUDIT: This method has no popup handling between steps. If Target shows
+        an "address suggestion" modal, a "promo code" interstitial, or any other
+        unexpected dialog during checkout navigation, this method will fail to
+        find the "Continue" button (it's behind the modal) and silently break.
+        The rewrite must call popup_handler.sweep() before each continue click.
+        Also: no price check is performed before reaching the "Place order" page.
         """
         continue_sel = (
             'button[data-test="save-and-continue-button"], '
