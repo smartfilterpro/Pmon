@@ -466,20 +466,41 @@ button:has-text("I am 21")
 [data-test="ageGateConfirm"]
 ```
 
-### 3.5 Health Consent Modal
+### 3.5 Health Data Consent Modal
 
-**When:** Health-related products (medications, supplements).
+**When:** Health-related products (supplements, vitamins, health monitors, Pokemon
+cards with health supplements, etc.). Appears on PRODUCT PAGE load, BEFORE
+add-to-cart can be clicked. Also can appear after add-to-cart on some products.
 
-**Appearance:** "I understand this product..." consent.
+**Appearance:** Modal dialog titled "Health Data Consent" informing users that
+"some information collected may be health data under certain state laws" and
+requiring agreement to "Terms and Health Privacy Policy". Blocks ALL page
+interaction until acknowledged.
 
-**Selectors (already implemented):**
+**CRITICAL:** Must be dismissed BEFORE attempting add-to-cart. The checkout
+engine calls `_dismiss_health_consent_modal()` explicitly on the product page
+and also on retry if add-to-cart fails.
+
+**Selectors (implemented in both sweep_popups and _dismiss_health_consent_modal):**
 ```
 button[data-test="healthFlagModalAcceptButton"]
 button:has-text("I understand")
 button:has-text("I accept")
 button:has-text("Accept")
+button:has-text("I agree")
 [role="dialog"] button:has-text("confirm")
 [role="dialog"] button:has-text("agree")
+[role="dialog"] button:has-text("I agree")
+[role="dialog"] button:has-text("Agree")
+[role="dialog"] button:has-text("Accept")
+[role="dialog"] button:has-text("Continue")
+[aria-modal="true"] button:has-text("I agree")
+[aria-modal="true"] button:has-text("Agree")
+[aria-modal="true"] button:has-text("I understand")
+[aria-modal="true"] button:has-text("Accept")
+dialog button:has-text("I agree")
+dialog button:has-text("Agree")
+dialog button:has-text("I understand")
 ```
 
 ### 3.6 CAPTCHA / PerimeterX Challenge

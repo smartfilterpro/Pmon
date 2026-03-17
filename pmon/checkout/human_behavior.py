@@ -388,9 +388,24 @@ _POPUP_DISMISS_SELECTORS = [
     ('[role="dialog"] button:has-text("Close")', "dialog (Close)"),
     ('[aria-modal="true"] button:has-text("Not now")', "modal (Not now)"),
     ('[aria-modal="true"] button:has-text("Close")', "modal (Close)"),
-    # Health consent
-    ('dialog button:has-text("I agree")', "health consent (I agree)"),
-    ('dialog button:has-text("Agree")', "health consent (Agree)"),
+    # Health consent — Target shows a Health Data Consent modal on health-related
+    # products (supplements, vitamins, etc.) requiring agreement before shopping.
+    ('[data-test="healthFlagModalAcceptButton"]', "health consent (data-test)"),
+    ('button:has-text("I understand")', "health consent (I understand)"),
+    ('button:has-text("I accept")', "health consent (I accept)"),
+    ('[role="dialog"] button:has-text("I agree")', "health consent (role=dialog, I agree)"),
+    ('[role="dialog"] button:has-text("Agree")', "health consent (role=dialog, Agree)"),
+    ('[role="dialog"] button:has-text("confirm")', "health consent (role=dialog, confirm)"),
+    ('[role="dialog"] button:has-text("agree")', "health consent (role=dialog, agree)"),
+    ('[role="dialog"] button:has-text("Accept")', "health consent (role=dialog, Accept)"),
+    ('[role="dialog"] button:has-text("Continue")', "health consent (role=dialog, Continue)"),
+    ('[aria-modal="true"] button:has-text("I agree")', "health consent (aria-modal, I agree)"),
+    ('[aria-modal="true"] button:has-text("Agree")', "health consent (aria-modal, Agree)"),
+    ('[aria-modal="true"] button:has-text("I understand")', "health consent (aria-modal, I understand)"),
+    ('[aria-modal="true"] button:has-text("Accept")', "health consent (aria-modal, Accept)"),
+    ('dialog button:has-text("I agree")', "health consent (dialog, I agree)"),
+    ('dialog button:has-text("Agree")', "health consent (dialog, Agree)"),
+    ('dialog button:has-text("I understand")', "health consent (dialog, I understand)"),
     # Age gate
     ('button:has-text("Yes, I am")', "age gate (Yes)"),
     ('[data-test="ageGateConfirm"]', "age gate (confirm)"),
