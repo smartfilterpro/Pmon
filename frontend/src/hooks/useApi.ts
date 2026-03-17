@@ -164,10 +164,10 @@ export async function getAccounts() {
   return (await apiFetch('/accounts')).json();
 }
 
-export async function setAccount(retailer: string, email: string, password: string) {
+export async function setAccount(retailer: string, email: string, password: string, card_cvv: string = '') {
   return (await apiFetch('/accounts', {
     method: 'POST',
-    body: JSON.stringify({ retailer, email, password }),
+    body: JSON.stringify({ retailer, email, password, card_cvv }),
   })).json();
 }
 

@@ -1,4 +1,40 @@
-"""Target stock monitor."""
+"""Target stock monitor.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+This file handles stock MONITORING only (not checkout). It checks whether a
+Target product is in stock via the Redsky PDP API or HTML scraping.
+
+STATUS: Mostly functional but with known issues:
+
+1. API ENDPOINT UPDATED: The PDP_URL was already updated from the deprecated
+   pdp_fulfillment_v1 (410 Gone) to pdp_client_v1. This is correct as of
+   the last site check.
+
+2. API KEY ROTATION: Three API keys are tried in sequence. Target rotates
+   these periodically. If all 3 fail, the scraping fallback kicks in.
+   This is a reasonable strategy.
+
+3. PERIMETERX HANDLING: The warm-up visit and visitor_id rotation on 403s
+   is a good anti-detection pattern. The _warmed_up flag resets when
+   PerimeterX blocks us, forcing a re-warm on next request.
+
+4. SCRAPING FALLBACK IS THOROUGH: Four strategies are tried — JSON-LD,
+   availability_status regex, __PRELOADED_QUERIES__ parsing, and text-based
+   checks. This is well-designed.
+
+5. NO PRICE EXTRACTION IN SCRAPING: Some scraping paths return an empty
+   price string. The PDP API path correctly extracts formatted_current_price.
+
+6. THIS FILE IS INDEPENDENT FROM CHECKOUT: Stock monitoring works via API
+   calls (httpx), while checkout uses Playwright browser automation. The
+   monitor correctly detects stock status — the breakage is in the checkout
+   flow, not here.
+
+7. STORE ID HARDCODED: pricing_store_id is hardcoded to "3991". This should
+   ideally be configurable per user location for accurate pickup availability.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -26,6 +62,7 @@ class TargetMonitor(BaseMonitor):
 
     # Multiple API keys to try (Target rotates these periodically)
     API_KEYS = [
+        "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
         "9f36aeafbe60771e321a7cc95a78140772ab3e96",
         "ff457966e64d5e877fdbad070f276d18ecec4a01",
     ]

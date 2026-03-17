@@ -1,4 +1,29 @@
-"""Configuration management for Pmon."""
+"""Configuration management for Pmon.
+
+AUDIT FINDINGS (2026-03-17):
+=============================================================================
+Data model gaps that affect the Target checkout rewrite:
+
+1. NO max_price FIELD: Neither Product nor Profile has a max_price field.
+   The checkout flow needs this to implement a price guard (abort if total
+   exceeds max_price before clicking "Place order").
+
+2. NO card_cvv IN Profile: CVV is stored in AccountCredentials (via the
+   database's retailer_accounts table), not in Profile. This is correct —
+   CVV should be per-retailer-account, not per-profile.
+
+3. NO store_id FIELD: Target's API needs a store ID for pickup availability.
+   Currently hardcoded to "3991" in the monitor. Should be configurable.
+
+4. Product.auto_checkout IS BOOLEAN: No quantity support at product level
+   for auto-checkout (the DB has a quantity column but it's not used in
+   the checkout flow).
+
+5. ENVIRONMENT VARIABLE OVERRIDES: Poll interval and discord webhook can
+   be overridden via env vars (PMON_POLL_INTERVAL, PMON_DISCORD_WEBHOOK).
+   This is good for Railway deployment.
+=============================================================================
+"""
 
 from __future__ import annotations
 
@@ -43,6 +68,7 @@ class Profile:
 class AccountCredentials:
     email: str = ""
     password: str = ""
+    card_cvv: str = ""
 
 
 @dataclass
