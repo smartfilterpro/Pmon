@@ -571,8 +571,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-web-security",
                     "--disable-features=VizDisplayCompositor",
+                    # Suppress automation-related flags that leak to JS/CDP
+                    "--disable-infobars",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-extensions",
+                    "--no-first-run",
+                    # GPU flags to avoid headless WebGL fingerprint leaks
+                    "--use-gl=angle",
+                    "--use-angle=d3d11",
                 ],
             )
 
@@ -586,10 +595,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     f"Chrome/{_CHROME_FULL} Safari/537.36"
                 ),
                 viewport={"width": 1366, "height": 768},
+                screen={"width": 1920, "height": 1080},
                 locale="en-US",
                 timezone_id="America/New_York",
+                color_scheme="light",
                 extra_http_headers={
-                    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not-A.Brand";v="24"',
+                    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not?A_Brand";v="24"',
                     "Sec-Ch-Ua-Mobile": "?0",
                     "Sec-Ch-Ua-Platform": '"Windows"',
                 },
