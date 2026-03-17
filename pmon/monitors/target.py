@@ -1,46 +1,19 @@
 """Target stock monitor.
 
-AUDIT FINDINGS (2026-03-17):
-=============================================================================
-This file handles stock MONITORING only (not checkout). It checks whether a
-Target product is in stock via the Redsky PDP API or HTML scraping.
+Uses the Redsky API (same as Target's web frontend) to check stock status.
+Two endpoints are tried:
+1. product_fulfillment_and_variation_hierarchy_v1 — returns location-aware
+   fulfillment data (shipping, pickup, delivery availability)
+2. pdp_client_v1 — returns full product data including price and fulfillment
 
-STATUS: Mostly functional but with known issues:
-
-1. API ENDPOINT UPDATED: The PDP_URL was already updated from the deprecated
-   pdp_fulfillment_v1 (410 Gone) to pdp_client_v1. This is correct as of
-   the last site check.
-
-2. API KEY ROTATION: Three API keys are tried in sequence. Target rotates
-   these periodically. If all 3 fail, the scraping fallback kicks in.
-   This is a reasonable strategy.
-
-3. PERIMETERX HANDLING: The warm-up visit and visitor_id rotation on 403s
-   is a good anti-detection pattern. The _warmed_up flag resets when
-   PerimeterX blocks us, forcing a re-warm on next request.
-
-4. SCRAPING FALLBACK IS THOROUGH: Four strategies are tried — JSON-LD,
-   availability_status regex, __PRELOADED_QUERIES__ parsing, and text-based
-   checks. This is well-designed.
-
-5. NO PRICE EXTRACTION IN SCRAPING: Some scraping paths return an empty
-   price string. The PDP API path correctly extracts formatted_current_price.
-
-6. THIS FILE IS INDEPENDENT FROM CHECKOUT: Stock monitoring works via API
-   calls (httpx), while checkout uses Playwright browser automation. The
-   monitor correctly detects stock status — the breakage is in the checkout
-   flow, not here.
-
-7. STORE ID HARDCODED: pricing_store_id is hardcoded to "3991". This should
-   ideally be configurable per user location for accurate pickup availability.
-=============================================================================
+Both endpoints require matching the exact query parameters that Target's
+real frontend sends, including is_bot=false, store_id, and location data.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import random
 import re
 import uuid
 
@@ -55,40 +28,38 @@ logger = logging.getLogger(__name__)
 class TargetMonitor(BaseMonitor):
     retailer_name = "target"
 
-    # Target's Redsky PDP API for stock checking
-    # NOTE: pdp_fulfillment_v1 was deprecated (returns 410 Gone as of ~2026-03).
-    # pdp_client_v1 is the current endpoint used by the Target web frontend.
-    PDP_URL = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+    # Target's Redsky API endpoints (same base, different aggregation paths)
+    REDSKY_BASE = "https://redsky.target.com/redsky_aggregations/v1/web"
+    PDP_URL = f"{REDSKY_BASE}/pdp_client_v1"
+    FULFILLMENT_URL = f"{REDSKY_BASE}/product_fulfillment_and_variation_hierarchy_v1"
 
-    # Multiple API keys to try (Target rotates these periodically)
+    # API keys observed from Target's real frontend (2026-03-17)
     API_KEYS = [
-        "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
         "9f36aeafbe60771e321a7cc95a78140772ab3e96",
+        "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
         "ff457966e64d5e877fdbad070f276d18ecec4a01",
     ]
 
+    # Default store / location — used when user hasn't configured their own.
+    # These values come from the network capture (store 2845, Baltimore MD).
+    DEFAULT_STORE_ID = "2845"
+    DEFAULT_ZIP = "21224"
+    DEFAULT_STATE = "MD"
+    DEFAULT_LAT = "39.282024"
+    DEFAULT_LNG = "-76.569695"
+
     def __init__(self):
         super().__init__()
-        # Generate a stable visitor ID for the session (UUID without dashes).
-        # Target's frontend generates this on first visit and sends it with
-        # every Redsky API call.  Without it, PerimeterX flags the request.
         self._visitor_id: str = uuid.uuid4().hex
-        # Track whether we've "warmed up" by visiting the site first
         self._warmed_up: bool = False
 
     def _extract_tcin(self, url: str) -> str | None:
         """Extract TCIN (Target product ID) from URL."""
-        # Target URLs look like: /p/product-name/-/A-12345678
         match = re.search(r"A-(\d+)", url)
         return match.group(1) if match else None
 
     async def _warm_up(self, client):
-        """Make an initial page visit to establish cookies/session like a real browser.
-
-        PerimeterX tracks whether a visitor has loaded the real Target page before
-        hitting API endpoints.  Skipping this step causes API calls to get 403'd
-        after a few requests.
-        """
+        """Visit Target homepage to establish PerimeterX session cookies."""
         if self._warmed_up:
             return
         try:
@@ -106,10 +77,10 @@ class TargetMonitor(BaseMonitor):
                 self._warmed_up = True
                 logger.debug("Target: warm-up visit OK, cookies established")
         except Exception as e:
-            logger.debug(f"Target: warm-up visit failed: {e}")
+            logger.debug("Target: warm-up visit failed: %s", e)
 
     def _redsky_headers(self, url: str) -> dict:
-        """Build headers that match what Target's frontend sends to Redsky."""
+        """Build headers matching Target's real frontend Redsky requests."""
         return {
             **API_HEADERS,
             "Referer": url,
@@ -124,36 +95,95 @@ class TargetMonitor(BaseMonitor):
         tcin = self._extract_tcin(url)
         if not tcin:
             return StockResult(
-                url=url,
-                retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.ERROR,
+                url=url, retailer=self.retailer_name,
+                product_name=product_name, status=StockStatus.ERROR,
                 error_message="Could not extract TCIN from URL",
             )
 
         client = await self.get_client()
-
-        # Warm up session on first request (establishes PerimeterX cookies)
         await self._warm_up(client)
 
-        # Try the Redsky PDP API first (faster and more reliable)
+        store_id = self.DEFAULT_STORE_ID
+
+        # --- Strategy 1: product_fulfillment_and_variation_hierarchy_v1 ---
+        # This is the endpoint Target's frontend calls for fulfillment data.
+        # It returns location-aware availability (shipping, pickup, delivery).
+        for api_key in self.API_KEYS:
+            fulfillment_params = {
+                "key": api_key,
+                "tcin": tcin,
+                "is_bot": "false",
+                "store_id": store_id,
+                "required_store_id": store_id,
+                "pricing_store_id": store_id,
+                "has_pricing_store_id": "true",
+                "scheduled_delivery_store_id": store_id,
+                "latitude": self.DEFAULT_LAT,
+                "longitude": self.DEFAULT_LNG,
+                "state": self.DEFAULT_STATE,
+                "zip": self.DEFAULT_ZIP,
+                "paid_membership": "false",
+                "base_membership": "true",
+                "card_membership": "false",
+                "visitor_id": self._visitor_id,
+                "channel": "WEB",
+                "page": f"/p/A-{tcin}",
+            }
+            try:
+                resp = await client.get(
+                    self.FULFILLMENT_URL,
+                    params=fulfillment_params,
+                    headers=self._redsky_headers(url),
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    result = self._parse_fulfillment(url, product_name, data)
+                    if result.status != StockStatus.UNKNOWN:
+                        logger.info(
+                            "Target stock for %s: %s (via fulfillment API)",
+                            product_name, result.status.value,
+                        )
+                        return result
+                    # If UNKNOWN, fall through to pdp_client_v1
+                    logger.debug("Target: fulfillment API returned UNKNOWN for %s, trying pdp_client_v1", tcin)
+                    break  # Got 200, no need to try other keys for this endpoint
+                elif resp.status_code == 403:
+                    logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id", tcin)
+                    self._visitor_id = uuid.uuid4().hex
+                    self._warmed_up = False
+                else:
+                    logger.debug("Target: fulfillment API returned %d for %s", resp.status_code, tcin)
+                    break
+            except Exception as e:
+                logger.debug("Target: fulfillment API failed for %s: %s", tcin, e)
+                break
+
+        # --- Strategy 2: pdp_client_v1 (full product data) ---
+        # Matches the exact parameters Target's frontend sends.
         api_attempted = False
         api_all_blocked = True
         for api_key in self.API_KEYS:
-            params = {
+            pdp_params = {
                 "key": api_key,
                 "tcin": tcin,
-                "channel": "WEB",
-                "visitor_id": self._visitor_id,
+                "is_bot": "false",
+                "store_id": store_id,
+                "pricing_store_id": store_id,
+                "has_pricing_store_id": "true",
                 "has_financing_options": "true",
-                "pricing_store_id": "3991",
+                "include_obsolete": "true",
+                "skip_personalized": "true",
+                "skip_variation_hierarchy": "true",
+                "visitor_id": self._visitor_id,
+                "channel": "WEB",
+                "page": f"/p/A-{tcin}",
             }
 
             try:
                 api_attempted = True
                 resp = await client.get(
                     self.PDP_URL,
-                    params=params,
+                    params=pdp_params,
                     headers=self._redsky_headers(url),
                 )
                 if resp.status_code == 200:
@@ -161,155 +191,150 @@ class TargetMonitor(BaseMonitor):
                     data = resp.json()
                     result = self._parse_pdp(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
-                        logger.info("Target stock for %s: %s (via Redsky API)", product_name, result.status.value)
+                        logger.info("Target stock for %s: %s (via pdp_client_v1)", product_name, result.status.value)
                         return result
                     else:
-                        logger.warning("Target: Redsky returned 200 but parse returned UNKNOWN for %s", tcin)
+                        logger.warning("Target: pdp_client_v1 returned 200 but parse returned UNKNOWN for %s", tcin)
                 elif resp.status_code == 403:
-                    logger.warning(
-                        "Target: Redsky returned 403 for %s with key ...%s — rotating visitor_id",
-                        tcin, api_key[-6:],
-                    )
-                    # PerimeterX flagged us — rotate visitor ID and reset warm-up
+                    logger.warning("Target: pdp_client_v1 403 for %s with key ...%s", tcin, api_key[-6:])
                     self._visitor_id = uuid.uuid4().hex
                     self._warmed_up = False
                 elif resp.status_code == 410:
                     api_all_blocked = False
-                    logger.debug("Redsky pdp_client_v1 returned 410 for %s with key ...%s", tcin, api_key[-6:])
+                    logger.debug("Target: pdp_client_v1 returned 410 for %s", tcin)
                 else:
                     api_all_blocked = False
-                    logger.warning("Target: Redsky returned %d for %s with key ...%s", resp.status_code, tcin, api_key[-6:])
+                    logger.warning("Target: pdp_client_v1 returned %d for %s", resp.status_code, tcin)
             except Exception as e:
-                logger.debug("Redsky API failed for %s with key ...%s: %s", tcin, api_key[-6:], e)
+                logger.debug("Target: pdp_client_v1 failed for %s: %s", tcin, e)
 
         if api_attempted and api_all_blocked:
-            logger.warning(
-                "Target: ALL Redsky API keys returned 403 for %s — PerimeterX is blocking. "
-                "Falling back to scraping (which may also fail for React SPA pages).",
-                tcin,
-            )
+            logger.warning("Target: ALL API keys blocked for %s — falling back to scrape", tcin)
 
-        # Fallback: scrape the product page
+        # --- Strategy 3: HTML scrape ---
         logger.info("Target stock for %s: falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
+
+    def _parse_fulfillment(self, url: str, product_name: str, data: dict) -> StockResult:
+        """Parse product_fulfillment_and_variation_hierarchy_v1 response."""
+        try:
+            product = data.get("data", {}).get("product", {})
+            fulfillment = product.get("fulfillment", {})
+            price_info = product.get("price", {})
+            price = price_info.get("formatted_current_price", "")
+
+            logger.debug("Target fulfillment response keys: %s", list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A")
+
+            # This endpoint returns detailed fulfillment with availability per method
+            return self._check_fulfillment_availability(url, product_name, product, fulfillment, price)
+        except (KeyError, TypeError) as e:
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name, status=StockStatus.UNKNOWN,
+                error_message=f"Could not parse fulfillment data: {e}",
+            )
 
     def _parse_pdp(self, url: str, product_name: str, data: dict) -> StockResult:
         """Parse pdp_client_v1 response for stock status."""
         try:
             product = data.get("data", {}).get("product", {})
             fulfillment = product.get("fulfillment", {})
-
             price_info = product.get("price", {})
             price = price_info.get("formatted_current_price", "")
 
-            # Log the fulfillment structure for debugging stock detection issues
-            logger.debug("Target stock check fulfillment data: %s", json.dumps(fulfillment, indent=2)[:2000])
+            logger.debug("Target pdp_client_v1 fulfillment data: %s", json.dumps(fulfillment, indent=2)[:2000])
 
-            # pdp_client_v1 uses several availability indicators:
-
-            # 1. Top-level is_out_of_stock_in_all_store_locations / product_id checks
-            if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
-                # Explicitly NOT out of stock = in stock somewhere
-                logger.debug("Target stock: is_out_of_stock_in_all_store_locations=false → IN_STOCK")
-
-            # 2. shipping_options.availability_status (legacy, still present sometimes)
-            shipping = fulfillment.get("shipping_options", {})
-            ship_status = shipping.get("availability_status", "")
-            if ship_status == "IN_STOCK":
-                return StockResult(
-                    url=url, retailer=self.retailer_name,
-                    product_name=product_name,
-                    status=StockStatus.IN_STOCK, price=price,
-                )
-
-            # 3. Check scheduled_delivery and shipping availability_status_v2
-            for method_key in ("shipping_options", "scheduled_delivery"):
-                method = fulfillment.get(method_key, {})
-                v2 = method.get("availability_status_v2", [])
-                if isinstance(v2, list):
-                    for entry in v2:
-                        if isinstance(entry, dict) and entry.get("is_available"):
-                            return StockResult(
-                                url=url, retailer=self.retailer_name,
-                                product_name=product_name,
-                                status=StockStatus.IN_STOCK, price=price,
-                            )
-
-            # 4. Check store_options / in_store_only pickup
-            store_options = fulfillment.get("store_options", [])
-            if isinstance(store_options, list):
-                for opt in store_options:
-                    if opt.get("order_pickup", {}).get("availability_status") == "IN_STOCK":
-                        return StockResult(
-                            url=url, retailer=self.retailer_name,
-                            product_name=product_name,
-                            status=StockStatus.IN_STOCK, price=price,
-                        )
-
-            # 5. Check product-level availability indicators
-            #    Target sometimes puts availability at the product level, not under fulfillment
-            product_avail = product.get("availability", {})
-            if isinstance(product_avail, dict):
-                avail_status = product_avail.get("availability_status", "")
-                if avail_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
-
-            # 6. Check fulfillment.shipping_options for online-only availability
-            #    Online-only items may use different keys
-            ship_reason = shipping.get("reason_code", "")
-            if ship_reason in ("SHIP_ELIGIBLE", "SHIPPING_ELIGIBLE"):
-                return StockResult(
-                    url=url, retailer=self.retailer_name,
-                    product_name=product_name,
-                    status=StockStatus.IN_STOCK, price=price,
-                )
-
-            # 7. Broad string search in fulfillment data as last resort
-            fulfillment_str = json.dumps(fulfillment)
-            if '"IN_STOCK"' in fulfillment_str or '"AVAILABLE"' in fulfillment_str:
-                return StockResult(
-                    url=url, retailer=self.retailer_name,
-                    product_name=product_name,
-                    status=StockStatus.IN_STOCK, price=price,
-                )
-
-            # 8. Check entire product JSON for availability signals
-            #    (covers any new/changed field locations)
-            product_str = json.dumps(product)
-            positive_signals = ['"IN_STOCK"', '"LIMITED_STOCK"', '"SHIP_ELIGIBLE"', '"SHIPPING_ELIGIBLE"']
-            if any(signal in product_str for signal in positive_signals):
-                logger.info("Target stock: found availability signal in product data via broad search")
-                return StockResult(
-                    url=url, retailer=self.retailer_name,
-                    product_name=product_name,
-                    status=StockStatus.IN_STOCK, price=price,
-                )
-
-            # Log when we're about to return OUT_OF_STOCK so we can debug
-            logger.warning(
-                "Target stock: no availability signals found for %s — returning OUT_OF_STOCK. "
-                "Fulfillment keys: %s. Product keys: %s",
-                product_name,
-                list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A",
-                list(product.keys()) if isinstance(product, dict) else "N/A",
-            )
-
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK, price=price,
-            )
+            return self._check_fulfillment_availability(url, product_name, product, fulfillment, price)
         except (KeyError, TypeError) as e:
             return StockResult(
                 url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.UNKNOWN,
+                product_name=product_name, status=StockStatus.UNKNOWN,
                 error_message=f"Could not parse PDP data: {e}",
             )
+
+    def _check_fulfillment_availability(
+        self, url: str, product_name: str, product: dict, fulfillment: dict, price: str,
+    ) -> StockResult:
+        """Shared logic to check availability from fulfillment data.
+
+        Checks multiple fields and structures that Target uses to indicate
+        stock status, in order of reliability.
+        """
+        def _in_stock(reason: str = "") -> StockResult:
+            if reason:
+                logger.debug("Target stock: %s → IN_STOCK", reason)
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.IN_STOCK, price=price,
+            )
+
+        # 1. is_out_of_stock_in_all_store_locations — explicit flag
+        if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
+            return _in_stock("is_out_of_stock_in_all_store_locations=false")
+
+        # 2. shipping_options.availability_status
+        shipping = fulfillment.get("shipping_options", {})
+        if shipping.get("availability_status") == "IN_STOCK":
+            return _in_stock("shipping_options.availability_status=IN_STOCK")
+
+        # 3. availability_status_v2 across all fulfillment methods
+        for method_key in ("shipping_options", "scheduled_delivery"):
+            method = fulfillment.get(method_key, {})
+            v2 = method.get("availability_status_v2", [])
+            if isinstance(v2, list):
+                for entry in v2:
+                    if isinstance(entry, dict) and entry.get("is_available"):
+                        return _in_stock(f"{method_key}.availability_status_v2.is_available=true")
+
+        # 4. store_options — pickup availability
+        store_options = fulfillment.get("store_options", [])
+        if isinstance(store_options, list):
+            for opt in store_options:
+                pickup = opt.get("order_pickup", {})
+                if pickup.get("availability_status") == "IN_STOCK":
+                    return _in_stock("store_options.order_pickup=IN_STOCK")
+                # Also check ship_to_store, in_store_only
+                for sub_key in ("ship_to_store", "in_store_only"):
+                    sub = opt.get(sub_key, {})
+                    if sub.get("availability_status") == "IN_STOCK":
+                        return _in_stock(f"store_options.{sub_key}=IN_STOCK")
+
+        # 5. Product-level availability (sometimes present outside fulfillment)
+        product_avail = product.get("availability", {})
+        if isinstance(product_avail, dict):
+            avail_status = product_avail.get("availability_status", "")
+            if avail_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
+                return _in_stock(f"product.availability.availability_status={avail_status}")
+
+        # 6. shipping reason_code for online-only items
+        reason_code = shipping.get("reason_code", "")
+        if reason_code in ("SHIP_ELIGIBLE", "SHIPPING_ELIGIBLE"):
+            return _in_stock(f"shipping_options.reason_code={reason_code}")
+
+        # 7. Broad string search across fulfillment JSON
+        fulfillment_str = json.dumps(fulfillment)
+        if '"IN_STOCK"' in fulfillment_str or '"AVAILABLE"' in fulfillment_str:
+            return _in_stock("broad fulfillment string search")
+
+        # 8. Broad string search across entire product JSON
+        product_str = json.dumps(product)
+        positive_signals = ['"IN_STOCK"', '"LIMITED_STOCK"', '"SHIP_ELIGIBLE"', '"SHIPPING_ELIGIBLE"']
+        if any(signal in product_str for signal in positive_signals):
+            return _in_stock("broad product string search")
+
+        # Nothing found → OUT_OF_STOCK
+        logger.warning(
+            "Target stock: no availability signals found for %s — returning OUT_OF_STOCK. "
+            "Fulfillment keys: %s",
+            product_name,
+            list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A",
+        )
+        return StockResult(
+            url=url, retailer=self.retailer_name,
+            product_name=product_name,
+            status=StockStatus.OUT_OF_STOCK, price=price,
+        )
 
     async def _scrape_page(self, url: str, product_name: str, client) -> StockResult:
         resp = await client.get(
@@ -335,16 +360,14 @@ class TargetMonitor(BaseMonitor):
         resp.raise_for_status()
         html = resp.text
 
-        # Strategy 1: Parse schema.org JSON-LD (Target includes this in initial HTML)
+        # Strategy 1: Parse schema.org JSON-LD
         soup = BeautifulSoup(html, "html.parser")
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 ld_data = json.loads(script.string or "")
-                # Handle both single objects and arrays
                 items = ld_data if isinstance(ld_data, list) else [ld_data]
                 for item in items:
                     offers = item.get("offers", {})
-                    # offers can be a single dict or a list
                     offer_list = offers if isinstance(offers, list) else [offers]
                     for offer in offer_list:
                         avail = offer.get("availability", "")
@@ -354,82 +377,69 @@ class TargetMonitor(BaseMonitor):
 
                         if "InStock" in avail:
                             return StockResult(
-                                url=url,
-                                retailer=self.retailer_name,
+                                url=url, retailer=self.retailer_name,
                                 product_name=product_name,
-                                status=StockStatus.IN_STOCK,
-                                price=price,
+                                status=StockStatus.IN_STOCK, price=price,
                             )
                         elif "OutOfStock" in avail:
                             return StockResult(
-                                url=url,
-                                retailer=self.retailer_name,
+                                url=url, retailer=self.retailer_name,
                                 product_name=product_name,
-                                status=StockStatus.OUT_OF_STOCK,
-                                price=price,
+                                status=StockStatus.OUT_OF_STOCK, price=price,
                             )
             except (json.JSONDecodeError, TypeError, AttributeError):
                 continue
 
-        # Strategy 2: Look for availability_status in embedded JSON/JS data
+        # Strategy 2: Regex for availability_status in embedded JS data
         if re.search(r'"availability_status"\s*:\s*"IN_STOCK"', html):
             price = ""
             price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', html)
             if price_match:
                 price = price_match.group(1)
             return StockResult(
-                url=url,
-                retailer=self.retailer_name,
+                url=url, retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.IN_STOCK,
-                price=price,
+                status=StockStatus.IN_STOCK, price=price,
             )
 
-        # Strategy 3: Check for preloaded query data (Target's __TGT_DATA__ / window.__PRELOADED_QUERIES__)
+        # Strategy 3: __PRELOADED_QUERIES__ data
         preloaded_match = re.search(r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>', html, re.S)
         if preloaded_match:
             try:
                 preloaded = json.loads(preloaded_match.group(1))
-                # Walk the preloaded data looking for availability
                 preloaded_str = json.dumps(preloaded)
                 if '"IN_STOCK"' in preloaded_str:
                     price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', preloaded_str)
                     price = price_match.group(1) if price_match else ""
                     return StockResult(
-                        url=url,
-                        retailer=self.retailer_name,
+                        url=url, retailer=self.retailer_name,
                         product_name=product_name,
-                        status=StockStatus.IN_STOCK,
-                        price=price,
+                        status=StockStatus.IN_STOCK, price=price,
                     )
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # Strategy 4: Simple text-based checks
+        # Strategy 4: Text-based out-of-stock detection
         if re.search(r"(out of stock|sold out|temporarily unavailable)", html, re.I):
             return StockResult(
-                url=url,
-                retailer=self.retailer_name,
+                url=url, retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.OUT_OF_STOCK,
             )
 
-        # Check for "Add to cart" button in HTML as last resort
+        # Strategy 5: "Add to cart" button presence
         add_btn = soup.find("button", attrs={"data-test": re.compile(r"addToCart|shippingButton", re.I)})
         if not add_btn:
             add_btn = soup.find("button", string=re.compile(r"add to cart", re.I))
         if add_btn and not add_btn.get("disabled"):
             return StockResult(
-                url=url,
-                retailer=self.retailer_name,
+                url=url, retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.IN_STOCK,
-                price="",
+                status=StockStatus.IN_STOCK, price="",
             )
 
         return StockResult(
-            url=url,
-            retailer=self.retailer_name,
+            url=url, retailer=self.retailer_name,
             product_name=product_name,
             status=StockStatus.UNKNOWN,
             error_message="Could not determine stock status from page",
