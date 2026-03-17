@@ -45,7 +45,7 @@ export default function LoginPage({ onLogin }: Props) {
           }
           return;
         }
-        onLogin({ user_id: loginRes.user_id, username: loginRes.username, is_admin: false, totp_enabled: false });
+        onLogin({ user_id: loginRes.user_id, username: loginRes.username, is_admin: loginRes.is_admin ?? false, totp_enabled: loginRes.totp_enabled ?? false });
       } else {
         const res = await login(username, password, needsTotp ? totpCode : undefined);
         if (res.needs_totp) {
