@@ -26,6 +26,7 @@ class TargetMonitor(BaseMonitor):
 
     # Multiple API keys to try (Target rotates these periodically)
     API_KEYS = [
+        "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
         "9f36aeafbe60771e321a7cc95a78140772ab3e96",
         "ff457966e64d5e877fdbad070f276d18ecec4a01",
     ]

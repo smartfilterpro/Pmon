@@ -27,10 +27,11 @@ export default function Settings({ user }: Props) {
   const [saved, setSaved] = useState(false);
 
   // Retailer accounts
-  const [accounts, setAccounts] = useState<Record<string, { email: string; has_password: boolean }>>({});
+  const [accounts, setAccounts] = useState<Record<string, { email: string; has_password: boolean; has_cvv: boolean }>>({});
   const [editRetailer, setEditRetailer] = useState('');
   const [retailerEmail, setRetailerEmail] = useState('');
   const [retailerPassword, setRetailerPassword] = useState('');
+  const [retailerCvv, setRetailerCvv] = useState('');
   const [accountSaved, setAccountSaved] = useState('');
 
   // Test login
@@ -75,10 +76,11 @@ export default function Settings({ user }: Props) {
 
   const handleSaveAccount = async () => {
     if (!editRetailer) return;
-    await setAccount(editRetailer, retailerEmail, retailerPassword);
+    await setAccount(editRetailer, retailerEmail, retailerPassword, retailerCvv);
     setAccountSaved(editRetailer);
     setTimeout(() => setAccountSaved(''), 2000);
     setRetailerPassword('');
+    setRetailerCvv('');
     const data = await getAccounts();
     setAccounts(data.accounts || {});
   };
@@ -128,6 +130,7 @@ export default function Settings({ user }: Props) {
     const acc = accounts[retailerId];
     setRetailerEmail(acc?.email || '');
     setRetailerPassword('');
+    setRetailerCvv('');
   };
 
   const handleImportCookies = async () => {
@@ -209,7 +212,7 @@ export default function Settings({ user }: Props) {
                 <div className="retailer-info">
                   <strong>{r.name}</strong>
                   {acc?.email ? (
-                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}</span>
+                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}{acc.has_password && !acc.has_cvv && (r.id === 'target' || r.id === 'walmart' || r.id === 'bestbuy') ? ' — missing CVV' : ''}</span>
                   ) : (
                     <span className="retailer-none">Not configured</span>
                   )}
@@ -254,6 +257,16 @@ export default function Settings({ user }: Props) {
                 onChange={e => setRetailerPassword(e.target.value)}
                 placeholder={accounts[editRetailer]?.has_password ? 'Leave blank to keep current password' : 'Enter password'} />
             </div>
+            {(editRetailer === 'target' || editRetailer === 'walmart' || editRetailer === 'bestbuy') && (
+              <div className="setting-field">
+                <label>Card CVV {accounts[editRetailer]?.has_cvv ? '(saved — leave blank to keep current)' : '(required for checkout)'}</label>
+                <input type="password" value={retailerCvv}
+                  onChange={e => setRetailerCvv(e.target.value)}
+                  placeholder={accounts[editRetailer]?.has_cvv ? 'Leave blank to keep current' : 'Enter 3-4 digit CVV'}
+                  maxLength={4}
+                  style={{ maxWidth: '120px' }} />
+              </div>
+            )}
             <div className="retailer-edit-actions">
               <button className="save-btn" onClick={handleSaveAccount}>
                 <Save size={14} /> {accountSaved === editRetailer ? 'Saved!' : 'Save'}

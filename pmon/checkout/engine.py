@@ -364,6 +364,7 @@ class CheckoutEngine:
                     return AccountCredentials(
                         email=acct["email"],
                         password=acct.get("password", ""),
+                        card_cvv=acct.get("card_cvv", ""),
                     )
             except Exception as exc:
                 logger.debug("Failed to load DB credentials for %s: %s", retailer, exc)
@@ -544,7 +545,7 @@ class CheckoutEngine:
             # --- Handle checkout page steps ---
             # Target's checkout can have multiple pages: delivery, payment, review.
             # We need to navigate through them to reach "Place your order".
-            await self._target_navigate_checkout(page)
+            await self._target_navigate_checkout(page, creds)
 
             # Place order — assumes saved payment on Target account
             place_order_sel = (
@@ -765,13 +766,13 @@ class CheckoutEngine:
         except Exception as exc:
             logger.debug("Target delivery selection error (non-fatal): %s", exc)
 
-    async def _target_navigate_checkout(self, page):
+    async def _target_navigate_checkout(self, page, creds: AccountCredentials | None = None):
         """Navigate through Target's multi-step checkout pages.
 
         Target's checkout may have these steps:
         1. Delivery address (if not saved)
         2. Delivery method / shipping speed
-        3. Payment method (if not saved)
+        3. Payment — CVV entry required even for saved cards
         4. Order review with "Place your order" button
 
         We try to click "Continue" / "Save and continue" through each step
@@ -784,8 +785,8 @@ class CheckoutEngine:
             'button:has-text("Save & continue")'
         )
 
-        # Click "Continue" / "Save and continue" up to 4 times to progress through steps
-        for step in range(4):
+        # Click "Continue" / "Save and continue" up to 5 times to progress through steps
+        for step in range(5):
             # Check if "Place your order" is already visible — we're done
             try:
                 place_btn = page.locator('button:has-text("Place your order"), button:has-text("Place order")')
@@ -794,6 +795,45 @@ class CheckoutEngine:
                     return
             except Exception:
                 pass
+
+            # Check for CVV input field — Target requires CVV even for saved cards
+            try:
+                cvv_selectors = [
+                    'input[data-test="verify-card-cvv"]',
+                    'input[name="cvv"]',
+                    'input[name="cardCvc"]',
+                    'input[id*="cvv" i]',
+                    'input[id*="cvc" i]',
+                    'input[placeholder*="CVV" i]',
+                    'input[placeholder*="CVC" i]',
+                    'input[aria-label*="CVV" i]',
+                    'input[aria-label*="security code" i]',
+                    'input[autocomplete="cc-csc"]',
+                ]
+                cvv_filled = False
+                for cvv_sel in cvv_selectors:
+                    try:
+                        cvv_input = page.locator(cvv_sel).first
+                        if await cvv_input.is_visible(timeout=500):
+                            if creds and creds.card_cvv:
+                                await cvv_input.click(force=True)
+                                await page.wait_for_timeout(200)
+                                await cvv_input.fill(creds.card_cvv)
+                                logger.info("Target checkout: entered CVV via %s", cvv_sel)
+                                cvv_filled = True
+                                await page.wait_for_timeout(500)
+                            else:
+                                logger.warning("Target checkout: CVV field found but no CVV configured! "
+                                             "Add CVV via Dashboard > Settings > Accounts > Target > Edit")
+                            break
+                    except Exception:
+                        continue
+
+                if cvv_filled:
+                    # After filling CVV, click save/continue
+                    await page.wait_for_timeout(500)
+            except Exception as exc:
+                logger.debug("Target checkout: CVV check error (non-fatal): %s", exc)
 
             # Try clicking continue/save
             try:
