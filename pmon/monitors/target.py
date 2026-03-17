@@ -137,6 +137,8 @@ class TargetMonitor(BaseMonitor):
         await self._warm_up(client)
 
         # Try the Redsky PDP API first (faster and more reliable)
+        api_attempted = False
+        api_all_blocked = True
         for api_key in self.API_KEYS:
             params = {
                 "key": api_key,
@@ -148,29 +150,47 @@ class TargetMonitor(BaseMonitor):
             }
 
             try:
+                api_attempted = True
                 resp = await client.get(
                     self.PDP_URL,
                     params=params,
                     headers=self._redsky_headers(url),
                 )
                 if resp.status_code == 200:
+                    api_all_blocked = False
                     data = resp.json()
                     result = self._parse_pdp(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
+                        logger.info("Target stock for %s: %s (via Redsky API)", product_name, result.status.value)
                         return result
+                    else:
+                        logger.warning("Target: Redsky returned 200 but parse returned UNKNOWN for %s", tcin)
                 elif resp.status_code == 403:
                     logger.warning(
-                        f"Target: Redsky returned 403 for {tcin} — rotating visitor_id"
+                        "Target: Redsky returned 403 for %s with key ...%s — rotating visitor_id",
+                        tcin, api_key[-6:],
                     )
                     # PerimeterX flagged us — rotate visitor ID and reset warm-up
                     self._visitor_id = uuid.uuid4().hex
                     self._warmed_up = False
                 elif resp.status_code == 410:
-                    logger.debug(f"Redsky pdp_client_v1 returned 410 for {tcin} with key ...{api_key[-6:]}")
+                    api_all_blocked = False
+                    logger.debug("Redsky pdp_client_v1 returned 410 for %s with key ...%s", tcin, api_key[-6:])
+                else:
+                    api_all_blocked = False
+                    logger.warning("Target: Redsky returned %d for %s with key ...%s", resp.status_code, tcin, api_key[-6:])
             except Exception as e:
-                logger.debug(f"Redsky API failed for {tcin} with key ...{api_key[-6:]}: {e}")
+                logger.debug("Redsky API failed for %s with key ...%s: %s", tcin, api_key[-6:], e)
+
+        if api_attempted and api_all_blocked:
+            logger.warning(
+                "Target: ALL Redsky API keys returned 403 for %s — PerimeterX is blocking. "
+                "Falling back to scraping (which may also fail for React SPA pages).",
+                tcin,
+            )
 
         # Fallback: scrape the product page
+        logger.info("Target stock for %s: falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
 
     def _parse_pdp(self, url: str, product_name: str, data: dict) -> StockResult:
@@ -182,8 +202,17 @@ class TargetMonitor(BaseMonitor):
             price_info = product.get("price", {})
             price = price_info.get("formatted_current_price", "")
 
+            # Log the fulfillment structure for debugging stock detection issues
+            logger.debug("Target stock check fulfillment data: %s", json.dumps(fulfillment, indent=2)[:2000])
+
             # pdp_client_v1 uses several availability indicators:
-            # 1. shipping_options.availability_status (legacy, still present sometimes)
+
+            # 1. Top-level is_out_of_stock_in_all_store_locations / product_id checks
+            if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
+                # Explicitly NOT out of stock = in stock somewhere
+                logger.debug("Target stock: is_out_of_stock_in_all_store_locations=false → IN_STOCK")
+
+            # 2. shipping_options.availability_status (legacy, still present sometimes)
             shipping = fulfillment.get("shipping_options", {})
             ship_status = shipping.get("availability_status", "")
             if ship_status == "IN_STOCK":
@@ -193,7 +222,7 @@ class TargetMonitor(BaseMonitor):
                     status=StockStatus.IN_STOCK, price=price,
                 )
 
-            # 2. Check scheduled_delivery and shipping availability_status_v2
+            # 3. Check scheduled_delivery and shipping availability_status_v2
             for method_key in ("shipping_options", "scheduled_delivery"):
                 method = fulfillment.get(method_key, {})
                 v2 = method.get("availability_status_v2", [])
@@ -206,7 +235,7 @@ class TargetMonitor(BaseMonitor):
                                 status=StockStatus.IN_STOCK, price=price,
                             )
 
-            # 3. Check store_options / in_store_only pickup
+            # 4. Check store_options / in_store_only pickup
             store_options = fulfillment.get("store_options", [])
             if isinstance(store_options, list):
                 for opt in store_options:
@@ -217,7 +246,29 @@ class TargetMonitor(BaseMonitor):
                             status=StockStatus.IN_STOCK, price=price,
                         )
 
-            # 4. Broad string search in fulfillment data as last resort
+            # 5. Check product-level availability indicators
+            #    Target sometimes puts availability at the product level, not under fulfillment
+            product_avail = product.get("availability", {})
+            if isinstance(product_avail, dict):
+                avail_status = product_avail.get("availability_status", "")
+                if avail_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
+                    return StockResult(
+                        url=url, retailer=self.retailer_name,
+                        product_name=product_name,
+                        status=StockStatus.IN_STOCK, price=price,
+                    )
+
+            # 6. Check fulfillment.shipping_options for online-only availability
+            #    Online-only items may use different keys
+            ship_reason = shipping.get("reason_code", "")
+            if ship_reason in ("SHIP_ELIGIBLE", "SHIPPING_ELIGIBLE"):
+                return StockResult(
+                    url=url, retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.IN_STOCK, price=price,
+                )
+
+            # 7. Broad string search in fulfillment data as last resort
             fulfillment_str = json.dumps(fulfillment)
             if '"IN_STOCK"' in fulfillment_str or '"AVAILABLE"' in fulfillment_str:
                 return StockResult(
@@ -225,6 +276,27 @@ class TargetMonitor(BaseMonitor):
                     product_name=product_name,
                     status=StockStatus.IN_STOCK, price=price,
                 )
+
+            # 8. Check entire product JSON for availability signals
+            #    (covers any new/changed field locations)
+            product_str = json.dumps(product)
+            positive_signals = ['"IN_STOCK"', '"LIMITED_STOCK"', '"SHIP_ELIGIBLE"', '"SHIPPING_ELIGIBLE"']
+            if any(signal in product_str for signal in positive_signals):
+                logger.info("Target stock: found availability signal in product data via broad search")
+                return StockResult(
+                    url=url, retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.IN_STOCK, price=price,
+                )
+
+            # Log when we're about to return OUT_OF_STOCK so we can debug
+            logger.warning(
+                "Target stock: no availability signals found for %s — returning OUT_OF_STOCK. "
+                "Fulfillment keys: %s. Product keys: %s",
+                product_name,
+                list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A",
+                list(product.keys()) if isinstance(product, dict) else "N/A",
+            )
 
             return StockResult(
                 url=url, retailer=self.retailer_name,
