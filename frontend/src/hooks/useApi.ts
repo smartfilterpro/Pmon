@@ -54,7 +54,7 @@ export async function login(username: string, password: string, totpCode?: strin
     body: JSON.stringify({ username, password, totp_code: totpCode }),
   });
   const data = await resp.json();
-  if (!resp.ok) return { error: data.error, needs_totp: data.needs_totp };
+  if (!resp.ok) return { error: data.error, needs_totp: data.needs_totp, pending: data.pending };
   localStorage.setItem('pmon_token', data.token);
   return data;
 }

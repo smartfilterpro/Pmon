@@ -295,6 +295,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if retailer == "walmart":
             return await _test_walmart_session(user)
 
+        return await _test_retailer_browser(user, retailer, email, password)
+
     async def _test_walmart_session(user: dict):
         """Test Walmart account by validating imported session cookies via API.
 
@@ -382,6 +384,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         except Exception as exc:
             logger.error("Walmart session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
+
+    async def _test_retailer_browser(user: dict, retailer: str, email: str, password: str):
+        """Test retailer login credentials using Playwright browser automation."""
+        import base64
+        import json
+        import os
 
         try:
             from playwright.async_api import async_playwright
