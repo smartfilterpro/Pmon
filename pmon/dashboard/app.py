@@ -397,6 +397,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         import json
         import os
 
+        from pmon.checkout.human_behavior import (
+            human_click_element,
+            human_type,
+            idle_scroll,
+            random_delay,
+            random_mouse_jitter,
+            sweep_popups,
+            wait_for_button_enabled,
+            wait_for_page_ready,
+            wait_for_url_change,
+        )
+        from pmon.checkout.network_monitor import NetworkMonitor
+
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -644,7 +657,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 # the chance of being blocked on the login page.
                 try:
                     await page.goto(HOME_URLS[retailer], wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(2000)
+                    await wait_for_page_ready(page, timeout=15000)
+                    # Human-like: move mouse around, scroll, dwell on homepage
+                    await random_mouse_jitter(page)
+                    await idle_scroll(page)
+                    await random_delay(page, 1000, 3000)
                     logger.info("Test login %s: homepage warm-up OK", retailer_name)
                 except Exception as warm_err:
                     logger.debug("Test login %s: homepage warm-up failed: %s", retailer_name, warm_err)
@@ -659,7 +676,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     nav_failed = True
 
                 if not nav_failed:
-                    await page.wait_for_timeout(3000)
+                    await wait_for_page_ready(page, timeout=15000)
 
                     # Check for blank page — can happen when cookies/session cause
                     # a redirect loop or when PerimeterX blocks with an empty response
@@ -787,51 +804,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     submit_sel = sel["submit"]
 
                 # --- Dismiss overlay modals that block interaction ---
-                # Target (and others) show floating-ui consent/privacy overlays
-                # that intercept pointer events.  Try multiple strategies:
-                overlay_selectors = [
-                    # Target's floating-ui overlay + close/accept buttons inside it
-                    '[data-floating-ui-portal] button',
-                    '[data-floating-ui-portal] [class*="close" i]',
-                    'div[class*="overlay" i] button',
-                    # Generic cookie / consent banners
-                    'button:has-text("Accept")',
-                    'button:has-text("I Accept")',
-                    'button:has-text("Accept All")',
-                    'button:has-text("Close")',
-                    '#onetrust-accept-btn-handler',
-                    '.onetrust-close-btn-handler',
-                    'button[id*="consent" i]',
-                    'button[class*="consent" i]',
-                ]
-                for overlay_sel in overlay_selectors:
-                    try:
-                        btn = page.locator(overlay_sel).first
-                        if await btn.is_visible(timeout=500):
-                            await btn.click(timeout=2000)
-                            await page.wait_for_timeout(500)
-                            logger.info("Test login %s: dismissed overlay via %s", retailer_name, overlay_sel)
-                            break
-                    except Exception:
-                        continue
-                else:
-                    # Last resort: if a floating-ui-portal overlay exists, remove it via JS
-                    try:
-                        removed = await page.evaluate("""() => {
-                            const portal = document.querySelector('[data-floating-ui-portal]');
-                            if (portal) { portal.remove(); return true; }
-                            const overlay = document.querySelector('div[class*="overlay"]');
-                            if (overlay && overlay.style.pointerEvents !== 'none') {
-                                overlay.style.pointerEvents = 'none';
-                                return true;
-                            }
-                            return false;
-                        }""")
-                        if removed:
-                            logger.info("Test login %s: removed blocking overlay via JS", retailer_name)
-                            await page.wait_for_timeout(300)
-                    except Exception:
-                        pass
+                # Uses shared sweep_popups() which handles cookie consent,
+                # sign-in prompts, store pickers, age gates, health consent,
+                # and generic dialogs with JS fallback.
+                dismissed = await sweep_popups(page)
+                if dismissed:
+                    logger.info("Test login %s: dismissed %d popup(s)", retailer_name, dismissed)
 
                 # Wait for the email field to appear (up to 15s for JS-heavy pages)
                 email_found = False
@@ -853,26 +831,27 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             msg += f" (page shows: {page_desc})"
                         return {"ok": False, "message": msg}
 
-                # Enter email — try keyboard.type() first, verify, fall back to fill()
+                # Enter email — human-like typing with verification
                 if email_found and not await _page_has_value(page, email_sel, email):
                     email_input = page.locator(email_sel).first
-                    # Use force=True to bypass any remaining overlay interception
-                    await email_input.click(force=True)
-                    await page.wait_for_timeout(300)
+                    # Move mouse to field and click like a human
+                    await human_click_element(page, email_input)
+                    await random_delay(page, 150, 350)
                     await email_input.press("Control+a")
-                    await page.keyboard.type(email, delay=40)
-                    await page.wait_for_timeout(500)
+                    # Type with variable speed (not fixed delay)
+                    await human_type(page, email)
+                    await random_delay(page, 300, 600)
 
                     # Verify it actually took — Target's JS can clear or reset the field
                     if not await _page_has_value(page, email_sel, email):
-                        logger.warning("Test login %s: keyboard.type() did not fill email — using fill()", retailer_name)
+                        logger.warning("Test login %s: human_type() did not fill email — using fill()", retailer_name)
                         await email_input.fill(email)
-                        await page.wait_for_timeout(300)
+                        await random_delay(page, 200, 400)
                         # Final check — if still empty, try triple-click + type
                         if not await _page_has_value(page, email_sel, email):
                             await email_input.click(click_count=3, force=True)
-                            await page.keyboard.type(email, delay=30)
-                            await page.wait_for_timeout(300)
+                            await human_type(page, email)
+                            await random_delay(page, 200, 400)
 
                 # Check if password field is visible yet (single-step) or needs submit first (multi-step)
                 pass_visible = False
@@ -882,20 +861,23 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     pass
 
                 if pass_visible:
-                    # Single-step: fill both and submit
+                    # Single-step: fill both and submit — human-like
                     pw_loc = page.locator(pass_sel).first
-                    await pw_loc.click()
-                    await page.wait_for_timeout(300)
-                    await page.keyboard.type(password, delay=40)
-                    await page.wait_for_timeout(300)
+                    await human_click_element(page, pw_loc)
+                    await random_delay(page, 150, 300)
+                    await human_type(page, password)
+                    await random_delay(page, 200, 500)
                     # Verify password was entered; if empty, fall back to fill()
                     try:
                         pw_val = await pw_loc.input_value(timeout=1000)
                         if not pw_val:
                             await pw_loc.fill(password)
-                            await page.wait_for_timeout(300)
+                            await random_delay(page, 200, 400)
                     except Exception:
                         pass
+                    # Wait for submit button to be enabled (grayed-out fix)
+                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                    await random_delay(page, 100, 300)
                     # Try selector click, then get_by_role, then vision
                     single_submit_clicked = await click_visible_button(page, submit_sel)
                     if not single_submit_clicked:
@@ -932,6 +914,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                     # Multi-step: submit email/phone first (unless auth picker already showing)
                     if not auth_picker_already_visible:
+                        # Wait for submit button to be enabled (grayed-out fix)
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        await random_delay(page, 100, 300)
                         # Use multiple strategies to find and click the submit/continue button
                         submit_clicked = await click_visible_button(page, submit_sel)
                         if submit_clicked:
@@ -966,7 +951,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             clicked = await vision_click(page, "Continue with email button (NOT passkey)")
                             logger.info("Test login %s: vision click result: %s", retailer_name, clicked)
 
-                        await page.wait_for_timeout(3000)
+                        # Wait for page to respond (not a fixed 3s wait)
+                        await wait_for_page_ready(page, timeout=10000)
+
+                        # Sweep popups that may have appeared after email submit
+                        await sweep_popups(page)
 
                         # Log what page we're on after submit attempt
                         post_submit_url = page.url
@@ -1063,24 +1052,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     pw_option_clicked = False
 
                     # Re-dismiss overlays (Target's consent modal can reappear after email submit)
-                    for overlay_sel in overlay_selectors:
-                        try:
-                            btn = page.locator(overlay_sel).first
-                            if await btn.is_visible(timeout=300):
-                                await btn.click(timeout=1000)
-                                await page.wait_for_timeout(300)
-                                logger.info("Test login %s: dismissed overlay (post-email) via %s", retailer_name, overlay_sel)
-                                break
-                        except Exception:
-                            continue
-                    else:
-                        try:
-                            await page.evaluate("""() => {
-                                const portal = document.querySelector('[data-floating-ui-portal]');
-                                if (portal) portal.remove();
-                            }""")
-                        except Exception:
-                            pass
+                    await sweep_popups(page)
 
                     # Check if password field is already visible (no picker needed)
                     try:
@@ -1191,7 +1163,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pw_option_clicked = await vision_click(page, "Password option (radio button or link to select password sign-in method)")
 
                     if pw_option_clicked:
-                        await page.wait_for_timeout(2000)
+                        await wait_for_page_ready(page, timeout=8000)
                     else:
                         logger.warning("Test login %s: could not find password auth method option", retailer_name)
 
@@ -1204,21 +1176,24 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pass
 
                     if pass_found:
-                        # Click the password field to focus it, then type
+                        # Click the password field to focus it, then type — human-like
                         pw_locator = page.locator(pass_sel).first
-                        await pw_locator.click(force=True)
-                        await page.wait_for_timeout(300)
-                        await page.keyboard.type(password, delay=40)
-                        await page.wait_for_timeout(300)
+                        await human_click_element(page, pw_locator)
+                        await random_delay(page, 150, 300)
+                        await human_type(page, password)
+                        await random_delay(page, 200, 500)
                         # Verify password was entered; if empty, fall back to fill()
                         try:
                             pw_value = await pw_locator.input_value(timeout=1000)
                             if not pw_value:
-                                logger.info("Test login %s: keyboard.type() did not fill password, falling back to fill()", retailer_name)
+                                logger.info("Test login %s: human_type() did not fill password, falling back to fill()", retailer_name)
                                 await pw_locator.fill(password)
-                                await page.wait_for_timeout(300)
+                                await random_delay(page, 200, 400)
                         except Exception:
                             pass
+                        # Wait for submit button to be enabled (grayed-out fix)
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        await random_delay(page, 100, 300)
                         # Multi-strategy submit after password entry
                         pw_submit_clicked = await click_visible_button(page, submit_sel)
                         if not pw_submit_clicked:
@@ -1247,7 +1222,26 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 msg += f" (page shows: {page_desc})"
                             return {"ok": False, "message": msg}
 
-                await page.wait_for_timeout(5000)
+                # Wait for login to complete via network monitoring instead of fixed 5s
+                # Start monitoring for Target's OAuth token validation
+                net_monitor = NetworkMonitor(page)
+                await net_monitor.start()
+                pre_submit_url = page.url
+
+                # Give the OAuth flow time to complete
+                login_done = await net_monitor.wait_for_login_complete(timeout=15000)
+                if not login_done:
+                    # Fallback: wait for URL change
+                    await wait_for_url_change(page, pre_submit_url, timeout=10000)
+
+                # Check if PerimeterX blocked during login
+                if net_monitor.was_blocked():
+                    logger.warning("Test login %s: PerimeterX blocked %d request(s)", retailer_name, len(net_monitor.get_blocked_details()))
+
+                await net_monitor.stop()
+
+                # Sweep any post-login popups
+                await sweep_popups(page)
 
                 # Check for success indicators
                 final_url = page.url

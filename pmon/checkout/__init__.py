@@ -25,14 +25,24 @@ WHAT BROKE:
   - The checkout flow is linear with no recovery — any unexpected element
     causes a silent failure or crash
 
-WHAT NEEDS TO BE BUILT:
-  - PopupHandler class that sweeps for ANY modal/dialog/overlay after every
-    major action, using both CSS selectors and Claude vision as fallback
-  - Each checkout step wrapped in its own retry-capable async method
+WHAT WAS BUILT:
+  - human_behavior.py — Shared module with human-like mouse movement (Bezier
+    curves), variable-speed typing, idle scrolling, random delays, and
+    universal popup sweep (sweep_popups) that detects and dismisses ANY
+    modal/dialog/overlay using both CSS selectors and JS fallback.
+  - network_monitor.py — Playwright response interceptor that tracks OAuth
+    token validations, PerimeterX collector calls, and API requests. Provides
+    wait_for_login_complete() so the bot knows when login is truly done
+    instead of guessing with fixed timeouts.
+  - Wait-for-ready helpers: wait_for_button_enabled() polls until a grayed-out
+    button becomes clickable, wait_for_page_ready() combines networkidle with
+    request quiescence checks, wait_for_url_change() replaces fixed waits
+    after form submissions.
+
+STILL NEEDED:
   - Price guard before placing order (needs max_price in config)
   - Screenshot logging at every step for debugging
-  - The existing stealth JS, session persistence, and vision helpers are
-    good foundations to build on
+  - State machine framework for retry-capable checkout steps
 
 DEPENDENCIES AVAILABLE:
   - playwright>=1.40 (in pyproject.toml, NOT in requirements.txt — inconsistency)
