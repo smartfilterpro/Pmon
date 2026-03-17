@@ -488,6 +488,9 @@ class CheckoutEngine:
             # Dismiss privacy/cookie overlay if present
             await self._dismiss_target_overlay(page)
 
+            # Dismiss Health Data Consent modal if present (health-related products)
+            await self._dismiss_health_consent_modal(page)
+
             # Check if we need to sign in
             if not await self._is_signed_in_target(page):
                 await self._sign_in_target(page, creds)
@@ -503,11 +506,23 @@ class CheckoutEngine:
                 'button:has-text("Ship it"), button:has-text("Add to cart")',
             )
             if not add_to_cart_clicked:
-                error = await self._smart_read_error(page)
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found")
+                # Health Data Consent modal may have appeared and blocked the click
+                if await self._dismiss_health_consent_modal(page):
+                    # Retry add-to-cart after dismissing the consent modal
+                    add_to_cart_clicked = await self._smart_click(
+                        page, "Ship it / Add to cart",
+                        'button[data-test="shipItButton"], button[data-test="shippingButton"], '
+                        'button:has-text("Ship it"), button:has-text("Add to cart")',
+                    )
+                if not add_to_cart_clicked:
+                    error = await self._smart_read_error(page)
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found")
             await page.wait_for_timeout(1500)
+
+            # Health Data Consent modal can also appear AFTER clicking add-to-cart
+            await self._dismiss_health_consent_modal(page)
 
             # Decline optional coverage/warranty if modal appears
             await self._smart_click(
@@ -622,6 +637,65 @@ class CheckoutEngine:
             text = await account.inner_text(timeout=3000)
             return "sign in" not in text.lower()
         except Exception:
+            return False
+
+    async def _dismiss_health_consent_modal(self, page) -> bool:
+        """Dismiss Target's Health Data Consent modal if present.
+
+        Target shows this modal for health-related products (supplements,
+        vitamins, health monitors, etc.), requiring users to agree to Terms
+        and Health Privacy Policy before adding to cart.  Returns True if a
+        modal was dismissed.
+        """
+        try:
+            # Look for the modal by role or common selectors
+            consent_selectors = [
+                # Dialog-level selectors
+                '[data-test="health-consent-modal"] button:has-text("Agree")',
+                '[data-test="healthConsentModal"] button:has-text("Agree")',
+                # Generic modal with health-related text + agree/acknowledge button
+                'dialog button:has-text("I agree")',
+                'dialog button:has-text("Agree")',
+                'dialog button:has-text("Acknowledge")',
+                'dialog button:has-text("Accept")',
+                'dialog button:has-text("Continue")',
+                # Div-based modals (Target uses both <dialog> and div overlays)
+                '[role="dialog"] button:has-text("I agree")',
+                '[role="dialog"] button:has-text("Agree")',
+                '[role="dialog"] button:has-text("Acknowledge")',
+                '[role="dialog"] button:has-text("Accept")',
+                '[role="dialog"] button:has-text("Continue")',
+                # Broader: any visible button with agree/acknowledge text
+                'button:has-text("I agree")',
+                'button:has-text("Agree and continue")',
+            ]
+            for sel in consent_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click(timeout=3000)
+                        logger.info("Health consent modal: dismissed via '%s'", sel)
+                        await page.wait_for_timeout(1000)
+                        return True
+                except Exception:
+                    continue
+
+            # Vision fallback: ask Claude to find and click the agree button
+            if self._vision_available:
+                clicked = await self._smart_click(
+                    page,
+                    "Health Data Consent agree/acknowledge button",
+                    "",
+                    timeout=2000,
+                )
+                if clicked:
+                    logger.info("Health consent modal: dismissed via vision fallback")
+                    await page.wait_for_timeout(1000)
+                    return True
+
+            return False
+        except Exception as exc:
+            logger.debug("Health consent modal dismiss failed (non-fatal): %s", exc)
             return False
 
     async def _dismiss_target_overlay(self, page):
