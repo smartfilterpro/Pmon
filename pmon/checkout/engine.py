@@ -67,6 +67,20 @@ from pathlib import Path
 from pmon.config import Config, AccountCredentials, Profile
 from pmon.models import CheckoutResult, CheckoutStatus
 from pmon.checkout.api_checkout import ApiCheckout
+from pmon.checkout.human_behavior import (
+    human_click,
+    human_click_element,
+    human_mouse_move,
+    human_type,
+    idle_scroll,
+    random_delay,
+    random_mouse_jitter,
+    sweep_popups,
+    wait_for_button_enabled,
+    wait_for_page_ready,
+    wait_for_url_change,
+)
+from pmon.checkout.network_monitor import NetworkMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -619,13 +633,14 @@ class CheckoutEngine:
         try:
             # Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
+            await wait_for_page_ready(page, timeout=15000)
 
-            # Dismiss privacy/cookie overlay if present
-            await self._dismiss_target_overlay(page)
+            # Sweep all popups/overlays (cookie consent, promos, etc.)
+            await sweep_popups(page)
 
-            # Dismiss Health Data Consent modal if present (health-related products)
-            await self._dismiss_health_consent_modal(page)
+            # Human-like: glance at the page before interacting
+            await idle_scroll(page)
+            await random_delay(page, 500, 1500)
 
             # Check if we need to sign in
             if not await self._is_signed_in_target(page):
@@ -633,32 +648,30 @@ class CheckoutEngine:
                 # Vision fallback if selector-based sign-in didn't work
                 if not await self._is_signed_in_target(page):
                     await page.goto(url, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(2000)
+                    await wait_for_page_ready(page, timeout=15000)
+
+            # Sweep popups again after sign-in (welcome back, promos)
+            await sweep_popups(page)
 
             # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
-            add_to_cart_clicked = await self._smart_click(
-                page, "Ship it / Add to cart",
+            add_to_cart_sel = (
                 'button[data-test="shipItButton"], button[data-test="shippingButton"], '
-                'button:has-text("Ship it"), button:has-text("Add to cart")',
+                'button:has-text("Ship it"), button:has-text("Add to cart")'
             )
+            add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
             if not add_to_cart_clicked:
-                # Health Data Consent modal may have appeared and blocked the click
-                if await self._dismiss_health_consent_modal(page):
-                    # Retry add-to-cart after dismissing the consent modal
-                    add_to_cart_clicked = await self._smart_click(
-                        page, "Ship it / Add to cart",
-                        'button[data-test="shipItButton"], button[data-test="shippingButton"], '
-                        'button:has-text("Ship it"), button:has-text("Add to cart")',
-                    )
+                # Popup may have blocked the click — sweep and retry
+                if await sweep_popups(page):
+                    add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
                 if not add_to_cart_clicked:
                     error = await self._smart_read_error(page)
                     if error:
                         raise Exception(f"Cannot add to cart: {error}")
                     raise Exception("Add to cart button not found")
-            await page.wait_for_timeout(1500)
+            await random_delay(page, 1000, 2000)
 
-            # Health Data Consent modal can also appear AFTER clicking add-to-cart
-            await self._dismiss_health_consent_modal(page)
+            # Sweep popups after add-to-cart (health consent, coverage offers, etc.)
+            await sweep_popups(page)
 
             # Decline optional coverage/warranty if modal appears
             await self._smart_click(
@@ -667,7 +680,7 @@ class CheckoutEngine:
                 'button:has-text("No, thanks")',
                 timeout=2000,
             )
-            await page.wait_for_timeout(500)
+            await random_delay(page, 300, 700)
 
             # Go to cart via modal button or direct navigation
             if not await self._smart_click(
@@ -677,12 +690,21 @@ class CheckoutEngine:
                 timeout=3000,
             ):
                 await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
-                await page.wait_for_timeout(2000)
+                await wait_for_page_ready(page, timeout=15000)
+
+            # Sweep popups on cart page
+            await sweep_popups(page)
 
             # --- Handle delivery method selection on cart page ---
             # Target requires choosing "Shipping" or "Pickup" for each item.
             # If there's a "Choose delivery method" prompt, select shipping.
             await self._target_select_delivery(page)
+
+            # Wait for checkout button to be enabled (it's grayed out until
+            # delivery method is selected and cart is validated)
+            checkout_sel = 'button[data-test="checkout-button"]'
+            await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+            await random_delay(page, 200, 500)
 
             # Click checkout
             if not await self._smart_click(
@@ -691,7 +713,7 @@ class CheckoutEngine:
                 'a:has-text("Check out"), button[data-test="checkout-btn"]',
             ):
                 raise Exception("Checkout button not found")
-            await page.wait_for_timeout(5000)
+            await wait_for_page_ready(page, timeout=15000)
 
             # --- Handle checkout page steps ---
             # Target's checkout can have multiple pages: delivery, payment, review.
@@ -835,70 +857,13 @@ class CheckoutEngine:
             return False
 
     async def _dismiss_target_overlay(self, page):
-        """Dismiss Target's privacy/cookie consent overlay that blocks clicks.
+        """Dismiss Target's popups, overlays, and modals.
 
-        AUDIT: This is the ONLY popup-handling code in the entire checkout flow.
-        It only handles cookie/privacy overlays via a hardcoded selector list.
-        It does NOT handle: age gates, "sign in for deals" modals, "Choose a
-        store" pickers, add-to-cart confirmation drawers, delivery option sheets,
-        CAPTCHA interstitials, or any [role="dialog"]/[aria-modal="true"] elements.
-        The JS fallback (removing overlay elements) is aggressive and may break
-        React's virtual DOM state. The rewrite needs a universal PopupHandler
-        that runs after every major action and detects ANY modal/dialog/overlay.
+        Delegates to the shared sweep_popups() utility which handles cookie
+        consent, sign-in prompts, store pickers, age gates, health consent,
+        and generic dialogs.  Kept as a method for backward compatibility.
         """
-        try:
-            # Try clicking common accept/close buttons inside the floating-ui portal overlay
-            for sel in [
-                '[data-floating-ui-portal] button:has-text("Accept")',
-                '[data-floating-ui-portal] button:has-text("accept")',
-                '[data-floating-ui-portal] button:has-text("Close")',
-                '[data-floating-ui-portal] button:has-text("Got it")',
-                '[data-floating-ui-portal] button:has-text("OK")',
-                '.styles_overlay__AJMdo + div button',
-                '#onetrust-accept-btn-handler',
-                'button[id*="accept" i]',
-                'button[id*="cookie" i]',
-            ]:
-                try:
-                    btn = page.locator(sel).first
-                    if await btn.is_visible(timeout=500):
-                        await btn.click(timeout=2000)
-                        logger.info("Target overlay: dismissed via button '%s'", sel)
-                        await page.wait_for_timeout(500)
-                        return
-                except Exception:
-                    continue
-
-            # Fallback: forcibly remove the overlay and portal via JS
-            removed = await page.evaluate("""() => {
-                let removed = 0;
-                // Remove floating-ui portal overlays
-                document.querySelectorAll('[data-floating-ui-portal]').forEach(el => {
-                    el.remove();
-                    removed++;
-                });
-                // Remove any remaining overlay divs that block pointer events
-                document.querySelectorAll('[class*="overlay"]').forEach(el => {
-                    const style = window.getComputedStyle(el);
-                    if (style.position === 'fixed' || style.position === 'absolute') {
-                        el.remove();
-                        removed++;
-                    }
-                });
-                // Also remove any inert attributes that may have been set
-                document.querySelectorAll('[data-floating-ui-inert]').forEach(el => {
-                    el.removeAttribute('data-floating-ui-inert');
-                    el.removeAttribute('aria-hidden');
-                });
-                return removed;
-            }""")
-            if removed:
-                logger.info("Target overlay: removed %d blocking element(s) via JS", removed)
-                await page.wait_for_timeout(500)
-            else:
-                logger.debug("Target overlay: no overlay detected")
-        except Exception as exc:
-            logger.debug("Target overlay dismiss failed (non-fatal): %s", exc)
+        await sweep_popups(page)
 
     async def _target_select_delivery(self, page):
         """Select shipping/delivery method on Target cart page.
@@ -1011,9 +976,13 @@ class CheckoutEngine:
             'button:has-text("Continue"), '
             'button:has-text("Save & continue")'
         )
+        continue_css = 'button[data-test="save-and-continue-button"]'
 
         # Click "Continue" / "Save and continue" up to 5 times to progress through steps
         for step in range(5):
+            # Sweep popups before each step (address suggestions, promos, etc.)
+            await sweep_popups(page)
+
             # Check if "Place your order" is already visible — we're done
             try:
                 place_btn = page.locator('button:has-text("Place your order"), button:has-text("Place order")')
@@ -1043,12 +1012,12 @@ class CheckoutEngine:
                         cvv_input = page.locator(cvv_sel).first
                         if await cvv_input.is_visible(timeout=500):
                             if creds and creds.card_cvv:
-                                await cvv_input.click(force=True)
-                                await page.wait_for_timeout(200)
-                                await cvv_input.fill(creds.card_cvv)
+                                await human_click_element(page, cvv_input)
+                                await random_delay(page, 150, 300)
+                                await human_type(page, creds.card_cvv)
                                 logger.info("Target checkout: entered CVV via %s", cvv_sel)
                                 cvv_filled = True
-                                await page.wait_for_timeout(500)
+                                await random_delay(page, 300, 600)
                             else:
                                 logger.warning("Target checkout: CVV field found but no CVV configured! "
                                              "Add CVV via Dashboard > Settings > Accounts > Target > Edit")
@@ -1057,18 +1026,22 @@ class CheckoutEngine:
                         continue
 
                 if cvv_filled:
-                    # After filling CVV, click save/continue
-                    await page.wait_for_timeout(500)
+                    # After filling CVV, wait for continue button to enable
+                    await random_delay(page, 300, 600)
             except Exception as exc:
                 logger.debug("Target checkout: CVV check error (non-fatal): %s", exc)
+
+            # Wait for the continue button to be enabled before clicking
+            await wait_for_button_enabled(page, continue_css, timeout=10000)
+            await random_delay(page, 100, 300)
 
             # Try clicking continue/save
             try:
                 continue_btn = page.locator(continue_sel).first
                 if await continue_btn.is_visible(timeout=3000):
-                    await continue_btn.click()
+                    await human_click_element(page, continue_btn)
                     logger.info("Target checkout: clicked continue (step %d)", step + 1)
-                    await page.wait_for_timeout(3000)
+                    await wait_for_page_ready(page, timeout=10000)
                 else:
                     # No continue button and no place order button — try vision
                     clicked = await self._smart_click(
@@ -1079,7 +1052,7 @@ class CheckoutEngine:
                     if not clicked:
                         logger.info("Target checkout: no more continue buttons found (step %d)", step)
                         break
-                    await page.wait_for_timeout(3000)
+                    await wait_for_page_ready(page, timeout=10000)
             except Exception:
                 break
 
@@ -1088,6 +1061,11 @@ class CheckoutEngine:
 
         email_sel = '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]'
         pass_sel = '#password, input[name="password"], input[type="password"], input[id*="password" i]'
+        submit_sel = 'button[type="submit"]'
+
+        # --- Start network monitor to observe OAuth flow ---
+        net_monitor = NetworkMonitor(page)
+        await net_monitor.start()
 
         # Target's login is a React SPA — domcontentloaded fires before React
         # renders the form.  Use "load" and then poll for the email field,
@@ -1100,7 +1078,14 @@ class CheckoutEngine:
                 logger.warning("Target login: form not rendered (attempt %d/3) — reloading", attempt)
                 await page.reload(wait_until="load")
 
-            await self._dismiss_target_overlay(page)
+            # Wait for the page to be truly ready (not just DOM loaded)
+            await wait_for_page_ready(page, timeout=15000)
+
+            # Sweep for any popups/overlays blocking the form
+            await sweep_popups(page)
+
+            # Human-like: move mouse around while waiting for form
+            await random_mouse_jitter(page)
 
             # Poll for the email field to appear (React hydration)
             try:
@@ -1111,30 +1096,32 @@ class CheckoutEngine:
                 email_input = None
 
         if email_input is None:
+            await net_monitor.stop()
             raise RuntimeError("Target login page did not render — email field not found after 3 attempts")
 
-        # Step 1: Enter email/phone
+        # Step 1: Enter email/phone — human-like
 
-        # Try keyboard.type() first (human-like), verify it worked, fall back to fill()
-        await email_input.click(force=True)
-        await page.wait_for_timeout(300)
+        # Move mouse to the field, dwell, then click
+        await human_click_element(page, page.locator(email_sel))
+        await random_delay(page, 200, 400)
         await email_input.press("Control+a")
-        await page.keyboard.type(creds.email, delay=40)
-        await page.wait_for_timeout(500)
+        # Type with variable speed (not fixed delay)
+        await human_type(page, creds.email)
+        await random_delay(page, 300, 600)
 
         # Verify the value actually got entered — Target's JS can clear it
         try:
             actual_value = await email_input.input_value(timeout=1000)
             if actual_value != creds.email:
-                logger.warning("Target sign-in: keyboard.type() produced '%s', expected '%s' — using fill()",
+                logger.warning("Target sign-in: human_type() produced '%s', expected '%s' — using fill()",
                               actual_value[:20], creds.email[:20])
                 await email_input.fill(creds.email)
-                await page.wait_for_timeout(300)
+                await random_delay(page, 200, 400)
         except Exception:
             # If we can't read the value, try fill() as backup
             logger.warning("Target sign-in: could not verify email input — using fill() as backup")
             await email_input.fill(creds.email)
-            await page.wait_for_timeout(300)
+            await random_delay(page, 200, 400)
 
         # Check if password is already visible (single-step) or multi-step
         pass_visible = False
@@ -1145,17 +1132,39 @@ class CheckoutEngine:
 
         if pass_visible:
             # Single-step: fill password and submit
-            await page.locator(pass_sel).first.click()
-            await page.keyboard.type(creds.password, delay=40)
+            await human_click_element(page, page.locator(pass_sel))
+            await random_delay(page, 150, 300)
+            await human_type(page, creds.password)
+            await random_delay(page, 200, 500)
+
+            # Wait for submit button to be enabled (grayed-out fix)
+            await wait_for_button_enabled(page, submit_sel, timeout=15000)
+            await random_delay(page, 100, 300)
+
+            pre_url = page.url
             await self._multi_strategy_click(page, "Sign in", [
                 "Sign in", "Continue", "Log in",
             ], 'button[type="submit"], button:has-text("Sign in")')
+
+            # Wait for login to complete via network monitoring
+            login_done = await net_monitor.wait_for_login_complete(timeout=15000)
+            if not login_done:
+                # Fallback: check if URL changed away from login
+                await wait_for_url_change(page, pre_url, timeout=10000)
         else:
-            # Step 2: Submit email — multi-strategy click for "Continue with email"
+            # Step 2: Submit email — wait for button enabled first
+            await wait_for_button_enabled(page, submit_sel, timeout=15000)
+            await random_delay(page, 100, 300)
+
             await self._multi_strategy_click(page, "Continue with email", [
                 "Continue with email", "Continue", "Sign in", "Next",
             ], 'button[type="submit"], button:has-text("Continue")')
-            await page.wait_for_timeout(3000)
+
+            # Wait for the page to respond (not a fixed 3s wait)
+            await wait_for_page_ready(page, timeout=10000)
+
+            # Sweep for any popups that appeared after email submit
+            await sweep_popups(page)
 
             # Check if we navigated away from login after email submit
             # (e.g. Target may redirect to homepage if already authenticated)
@@ -1163,6 +1172,7 @@ class CheckoutEngine:
             login_indicators = ["/login", "/signin", "/sign-in", "/identity"]
             if not any(ind in post_email_url.lower() for ind in login_indicators):
                 logger.info("Target sign-in: navigated away from login after email submit (%s) — may already be signed in", post_email_url)
+                await net_monitor.stop()
                 return  # Let the caller check success via URL/cookies
 
             # Step 3: Auth method picker — Target shows "Enter your password"
@@ -1173,7 +1183,7 @@ class CheckoutEngine:
                 try:
                     opt = page.get_by_role("button", name=option_text, exact=False)
                     if await opt.first.is_visible(timeout=500):
-                        await opt.first.click()
+                        await human_click_element(page, opt)
                         pw_option_clicked = True
                         break
                 except Exception:
@@ -1184,7 +1194,7 @@ class CheckoutEngine:
                 try:
                     opt = page.get_by_role("radio", name="Password", exact=False)
                     if await opt.first.is_visible(timeout=500):
-                        await opt.first.click()
+                        await human_click_element(page, opt)
                         pw_option_clicked = True
                 except Exception:
                     pass
@@ -1195,7 +1205,7 @@ class CheckoutEngine:
                     try:
                         opt = page.get_by_text(option_text, exact=True)
                         if await opt.first.is_visible(timeout=500):
-                            await opt.first.click()
+                            await human_click_element(page, opt)
                             pw_option_clicked = True
                             break
                     except Exception:
@@ -1206,7 +1216,7 @@ class CheckoutEngine:
                 password_option = page.locator('button:has-text("password"), a:has-text("password"), [data-test*="password" i], div:has-text("Enter your password"), label:has-text("Password"), input[type="radio"][value*="password" i]')
                 try:
                     if await password_option.first.is_visible(timeout=1000):
-                        await password_option.first.click()
+                        await human_click_element(page, password_option)
                         pw_option_clicked = True
                 except Exception:
                     pass
@@ -1217,17 +1227,39 @@ class CheckoutEngine:
                 pw_option_clicked = await self._smart_click(page, "Password option (radio button or link)", "", timeout=1000)
 
             if pw_option_clicked:
-                await page.wait_for_timeout(2000)
+                await wait_for_page_ready(page, timeout=8000)
 
-            # Step 4: Enter password
+            # Step 4: Enter password — human-like
             await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
-            await page.locator(pass_sel).first.click()
-            await page.keyboard.type(creds.password, delay=40)
+            await human_click_element(page, page.locator(pass_sel))
+            await random_delay(page, 150, 300)
+            await human_type(page, creds.password)
+            await random_delay(page, 200, 500)
+
+            # Wait for Sign In button to be enabled (grayed-out fix)
+            await wait_for_button_enabled(page, submit_sel, timeout=15000)
+            await random_delay(page, 100, 300)
+
+            pre_url = page.url
             await self._multi_strategy_click(page, "Sign in", [
                 "Sign in", "Continue", "Log in",
             ], 'button[type="submit"], button:has-text("Sign in")')
 
-        await page.wait_for_timeout(3000)
+            # Wait for login to complete via network monitoring instead of fixed wait
+            login_done = await net_monitor.wait_for_login_complete(timeout=20000)
+            if not login_done:
+                # Fallback: check if URL changed
+                await wait_for_url_change(page, pre_url, timeout=10000)
+
+        # Check if PerimeterX blocked us during login
+        if net_monitor.was_blocked():
+            blocked = net_monitor.get_blocked_details()
+            logger.warning("Target sign-in: PerimeterX blocked %d request(s) during login", len(blocked))
+
+        await net_monitor.stop()
+
+        # Sweep any post-login popups (Target sometimes shows "welcome back" modals)
+        await sweep_popups(page)
 
         # Verify we navigated away from login page (success heuristic)
         final_url = page.url
