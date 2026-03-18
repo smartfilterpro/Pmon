@@ -2847,6 +2847,28 @@ class CheckoutEngine:
                     await random_delay(page, 300, 700)
                 else:
                     logger.warning("Best Buy sign-in: could not select password sign-in method")
+                    # Dump page diagnostics for debugging
+                    try:
+                        diag = await page.evaluate("""() => {
+                            const info = {url: location.href, title: document.title};
+                            const els = document.querySelectorAll('label, a, button, [role="radio"], [role="tab"], [role="option"], [role="button"], input[type="radio"], [tabindex]');
+                            info.interactive = [];
+                            for (const el of els) {
+                                const text = (el.textContent || '').trim().substring(0, 80);
+                                if (!text) continue;
+                                info.interactive.push({
+                                    tag: el.tagName, role: el.getAttribute('role'),
+                                    type: el.type || null, id: el.id || null,
+                                    text: text, visible: el.offsetParent !== null,
+                                });
+                            }
+                            const headings = document.querySelectorAll('h1, h2, h3');
+                            info.headings = Array.from(headings).map(h => h.textContent.trim().substring(0, 100));
+                            return info;
+                        }""")
+                        logger.info("Best Buy sign-in: auth picker page diagnostics: %s", diag)
+                    except Exception:
+                        pass
 
                 # Now look for the password field
                 pass_filled = await self._smart_fill(

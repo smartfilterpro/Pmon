@@ -1448,7 +1448,34 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     if pw_option_clicked:
                         await wait_for_page_ready(page, timeout=8000)
                     else:
+                        # Dump page diagnostics so we can see what Best Buy is actually showing
                         logger.warning("Test login %s: could not find password auth method option", retailer_name)
+                        try:
+                            diag = await page.evaluate("""() => {
+                                const info = {url: location.href, title: document.title};
+                                // Collect all interactive elements with their text
+                                const els = document.querySelectorAll('label, a, button, [role="radio"], [role="tab"], [role="option"], [role="button"], input[type="radio"], [tabindex]');
+                                info.interactive = [];
+                                for (const el of els) {
+                                    const text = (el.textContent || '').trim().substring(0, 80);
+                                    if (!text) continue;
+                                    info.interactive.push({
+                                        tag: el.tagName,
+                                        role: el.getAttribute('role'),
+                                        type: el.type || null,
+                                        id: el.id || null,
+                                        text: text,
+                                        visible: el.offsetParent !== null,
+                                    });
+                                }
+                                // Collect headings
+                                const headings = document.querySelectorAll('h1, h2, h3');
+                                info.headings = Array.from(headings).map(h => h.textContent.trim().substring(0, 100));
+                                return info;
+                            }""")
+                            logger.info("Test login %s: auth picker page diagnostics: %s", retailer_name, diag)
+                        except Exception as diag_err:
+                            logger.debug("Test login %s: diagnostics failed: %s", retailer_name, diag_err)
 
                     # --- Pre-password OTP detection (Best Buy) ---
                     # If we're on the OTP page and none of the strategies clicked "Use password",
