@@ -1283,9 +1283,74 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # Password auth option text variants
                     pw_texts = [
                         "Enter your password", "Enter password",
-                        "Password", "Use password", "Sign in with password",
+                        "Password", "Use password", "Use a password",
+                        "Use your password", "Sign in with password",
                         "password",  # lowercase fallback
                     ]
+
+                    # Strategy 0 (Best Buy specific): JS click for styled radio buttons
+                    # Best Buy uses hidden radio inputs + visible labels — standard Playwright
+                    # locators often miss them. Also handles divs, tabs, and other custom elements.
+                    if not pw_option_clicked and retailer == "bestbuy":
+                        try:
+                            clicked_js = await page.evaluate("""() => {
+                                // Labels with password text (Best Buy's primary pattern)
+                                const labels = document.querySelectorAll('label');
+                                for (const label of labels) {
+                                    const text = (label.textContent || '').trim().toLowerCase();
+                                    if (text === 'use password' || text === 'password'
+                                        || text.includes('sign in with password')
+                                        || text.includes('use a password')
+                                        || text.includes('use your password')) {
+                                        label.click();
+                                        return 'LABEL: ' + label.textContent.trim().substring(0, 60);
+                                    }
+                                }
+                                // Radio inputs with password value/id
+                                const radios = document.querySelectorAll('input[type="radio"]');
+                                for (const radio of radios) {
+                                    const val = (radio.value || '').toLowerCase();
+                                    const id = radio.id || '';
+                                    if (val.includes('password') || id.toLowerCase().includes('password')) {
+                                        const label = id ? document.querySelector('label[for="' + id + '"]') : null;
+                                        if (label) { label.click(); return 'LABEL[for]: ' + label.textContent.trim().substring(0, 40); }
+                                        radio.click();
+                                        radio.dispatchEvent(new Event('change', {bubbles: true}));
+                                        return 'RADIO: value=' + val;
+                                    }
+                                }
+                                // Any clickable element with password text (not "forgot")
+                                const allEls = document.querySelectorAll('label, span, div, a, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]');
+                                const phrases = ['use password', 'use a password', 'use your password',
+                                    'sign in with password', 'password'];
+                                for (const el of allEls) {
+                                    const text = (el.textContent || '').trim().toLowerCase();
+                                    if (el.offsetParent === null) continue;
+                                    if (text.includes('forgot')) continue;
+                                    for (const phrase of phrases) {
+                                        if (text === phrase || text.startsWith(phrase)) {
+                                            el.click();
+                                            return el.tagName + ': ' + (el.textContent || '').trim().substring(0, 60);
+                                        }
+                                    }
+                                }
+                                // Data attributes with password
+                                const dataEls = document.querySelectorAll('[data-track*="password" i], [data-value*="password" i], [data-method*="password" i], [value*="password" i]');
+                                for (const el of dataEls) {
+                                    if (el.offsetParent !== null || el.type === 'radio') {
+                                        const label = el.id ? document.querySelector('label[for="' + el.id + '"]') : null;
+                                        if (label) { label.click(); return 'DATA-LABEL: ' + label.textContent.trim().substring(0, 40); }
+                                        el.click();
+                                        return 'DATA-ATTR: ' + el.tagName;
+                                    }
+                                }
+                                return null;
+                            }""")
+                            if clicked_js:
+                                pw_option_clicked = True
+                                logger.info("Test login %s: clicked password option via BB JS: %s", retailer_name, clicked_js)
+                        except Exception as e:
+                            logger.debug("Test login %s: BB JS click failed: %s", retailer_name, e)
 
                     # Strategy 1: get_by_role("button") for button-style pickers
                     if not pw_option_clicked:
@@ -1386,8 +1451,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         logger.warning("Test login %s: could not find password auth method option", retailer_name)
 
                     # --- Pre-password OTP detection (Best Buy) ---
-                    # If we're stuck on a one-time code page and couldn't switch to password,
-                    # fail immediately with a clear message.
+                    # If we're on the OTP page and none of the strategies clicked "Use password",
+                    # try one more time with vision specifically for the OTP → password switch
                     if retailer == "bestbuy" and not pw_option_clicked:
                         otp_page = False
                         try:
@@ -1398,16 +1463,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         except Exception:
                             pass
                         if otp_page:
-                            return {
-                                "ok": False,
-                                "message": (
-                                    f"{retailer_name} login requires a one-time verification code (2FA) "
-                                    "and no option to switch to password sign-in was found. "
-                                    "Disable two-factor authentication on this Best Buy account, "
-                                    "or import session cookies from a manual browser login "
-                                    "(Settings > Session Cookies)."
-                                ),
-                            }
+                            logger.warning("Test login %s: on OTP page — trying vision to find password option", retailer_name)
+                            pw_option_clicked = await vision_click(
+                                page,
+                                "The 'Use password' or 'Password' option/radio/tab to switch from one-time code to password sign-in. Do NOT click any input fields — click the option to SELECT password as the method."
+                            )
+                            if pw_option_clicked:
+                                await wait_for_page_ready(page, timeout=5000)
 
                     # Wait for password field — selectors first, then vision
                     pass_found = False
@@ -1496,14 +1558,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     except Exception:
                         pass
                     if post_login_otp:
-                        logger.warning("Test login %s: post-login OTP/2FA code requested", retailer_name)
+                        logger.warning("Test login %s: post-login OTP code requested after password accepted", retailer_name)
                         return {
                             "ok": False,
                             "message": (
-                                f"{retailer_name} login requires a one-time verification code (2FA) "
-                                "after password entry. Disable two-factor authentication on this "
-                                "Best Buy account, or import session cookies from a manual browser "
-                                "login (Settings > Session Cookies)."
+                                f"{retailer_name} accepted the password but is requesting a "
+                                "verification code. Log in manually in your browser first to "
+                                "establish a trusted device, then import session cookies "
+                                "(Settings > Session Cookies)."
                             ),
                         }
 
