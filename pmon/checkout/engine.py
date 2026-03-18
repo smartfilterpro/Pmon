@@ -2699,6 +2699,32 @@ class CheckoutEngine:
                         except Exception as e:
                             logger.debug("Best Buy sign-in: OTP switch link search failed: %s", e)
 
+                        # If we're still stuck on OTP page after all switch attempts, fail clearly
+                        still_on_otp = False
+                        try:
+                            still_on_otp = await page.locator(
+                                'text=/one-time code/i, text=/enter your code/i, '
+                                'text=/enter the code/i, text=/verification code/i'
+                            ).first.is_visible(timeout=1500)
+                        except Exception:
+                            pass
+                        if still_on_otp:
+                            logger.error(
+                                "Best Buy sign-in: stuck on OTP page — could not switch to password sign-in"
+                            )
+                            return CheckoutResult(
+                                url=url,
+                                retailer="bestbuy",
+                                product_name=product_name,
+                                status=CheckoutStatus.FAILED,
+                                error_message=(
+                                    "Best Buy login requires a one-time verification code and "
+                                    "no option to switch to password sign-in was found. "
+                                    "Disable two-factor authentication on this Best Buy account, "
+                                    "or log in manually first to establish a trusted device cookie."
+                                ),
+                            )
+
                 # Now try to click "Use password" option (auth method picker page)
                 if not pw_option_clicked:
                     # Strategy 1: JS click — most reliable for styled/hidden radio buttons.
@@ -2834,6 +2860,37 @@ class CheckoutEngine:
                     logger.warning("Best Buy sign-in: blocked %d request(s) during login", len(blocked))
 
                 await net_monitor.stop()
+
+                # --- Post-login OTP detection ---
+                # Best Buy may require a one-time code AFTER password submission
+                # (2FA / step-up authentication). Detect this and fail clearly
+                # instead of silently proceeding with an unauthenticated session.
+                try:
+                    post_login_otp = await page.locator(
+                        'text=/one-time code/i, text=/enter your code/i, '
+                        'text=/enter the code/i, text=/verification code/i, '
+                        'text=/enter your one-time/i'
+                    ).first.is_visible(timeout=2000)
+                except Exception:
+                    post_login_otp = False
+
+                if post_login_otp:
+                    logger.error(
+                        "Best Buy sign-in: post-login OTP/2FA code requested — "
+                        "account has two-factor authentication enabled"
+                    )
+                    return CheckoutResult(
+                        url=url,
+                        retailer="bestbuy",
+                        product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=(
+                            "Best Buy login requires a one-time verification code (2FA). "
+                            "Disable two-factor authentication on this Best Buy account, "
+                            "or log in manually in the browser session first to establish "
+                            "a trusted device cookie."
+                        ),
+                    )
 
                 # Sweep post-login popups
                 await sweep_popups(page)
