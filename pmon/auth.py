@@ -48,6 +48,18 @@ def decode_token(token: str) -> dict | None:
         return None
 
 
+def create_otp_token(otp_id: int, user_id: int, ttl_minutes: int = 10) -> str:
+    """Create a short-lived JWT for submitting an OTP code (used by phone shortcuts)."""
+    payload = {
+        "otp_id": otp_id,
+        "user_id": user_id,
+        "purpose": "otp_relay",
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes),
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
 def register_user(username: str, password: str) -> dict:
     """Register a new user. First user auto-becomes approved admin."""
     existing = db.get_user(username)

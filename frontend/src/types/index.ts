@@ -20,11 +20,20 @@ export interface CheckoutEntry {
   created_at: string;
 }
 
+export interface OtpRequest {
+  id: number;
+  retailer: string;
+  context: string;
+  status: string;
+  created_at: string;
+}
+
 export interface StatusResponse {
   is_running: boolean;
   started_at: string | null;
   products: Product[];
   checkouts: CheckoutEntry[];
+  pending_otp: OtpRequest | null;
 }
 
 export interface User {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import qrcode
@@ -17,7 +18,7 @@ from pathlib import Path
 from pmon import database as db
 from pmon.auth import (
     register_user, login_user, setup_totp, confirm_totp,
-    disable_totp, decode_token, create_initial_admin,
+    disable_totp, decode_token, create_initial_admin, create_otp_token,
 )
 from pmon.config import detect_retailer
 
@@ -171,11 +172,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         for c in checkouts:
             _fix_utc_timestamps(c, "created_at")
 
+        # Check for pending OTP request
+        pending_otp = db.get_pending_otp(user_id)
+        if pending_otp:
+            _fix_utc_timestamps(pending_otp, "created_at")
+
         return {
             "is_running": engine.state.is_running,
             "started_at": engine.state.started_at.isoformat() if engine.state.started_at else None,
             "products": product_list,
             "checkouts": checkouts,
+            "pending_otp": pending_otp,
         }
 
     @app.post("/api/products")
@@ -1497,6 +1504,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             )
                             if pw_option_clicked:
                                 await wait_for_page_ready(page, timeout=5000)
+                            else:
+                                # Can't switch to password — create OTP request for user
+                                otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
+                                otp_token = create_otp_token(otp_id, user["id"], ttl_minutes=10)
+                                server_url = os.environ.get("PMON_SERVER_URL", "")
+                                return {
+                                    "ok": False,
+                                    "otp_required": True,
+                                    "otp_id": otp_id,
+                                    "otp_token": otp_token,
+                                    "submit_url": f"{server_url}/api/otp/submit?token={otp_token}&code=" if server_url else "",
+                                    "message": (
+                                        f"{retailer_name} is showing a verification code page. "
+                                        "Enter the code you receive via text in the dashboard or use your phone shortcut."
+                                    ),
+                                }
 
                     # Wait for password field — selectors first, then vision
                     pass_found = False
@@ -1586,13 +1609,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pass
                     if post_login_otp:
                         logger.warning("Test login %s: post-login OTP code requested after password accepted", retailer_name)
+                        otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
+                        otp_token = create_otp_token(otp_id, user["id"], ttl_minutes=10)
+                        server_url = os.environ.get("PMON_SERVER_URL", "")
                         return {
                             "ok": False,
+                            "otp_required": True,
+                            "otp_id": otp_id,
+                            "otp_token": otp_token,
+                            "submit_url": f"{server_url}/api/otp/submit?token={otp_token}&code=" if server_url else "",
                             "message": (
-                                f"{retailer_name} accepted the password but is requesting a "
-                                "verification code. Log in manually in your browser first to "
-                                "establish a trusted device, then import session cookies "
-                                "(Settings > Session Cookies)."
+                                f"{retailer_name} accepted the password but needs a verification "
+                                "code. Enter the code you receive via text in the dashboard or "
+                                "use your phone shortcut."
                             ),
                         }
 
@@ -1724,6 +1753,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             discord_webhook=data.get("discord_webhook"),
         )
         return {"ok": True}
+
+    @app.post("/api/settings/generate_api_key")
+    async def api_generate_key(user: dict = Depends(get_current_user)):
+        """Generate a new API key for the current user (replaces any existing key)."""
+        key = db.generate_api_key(user["id"])
+        return {"ok": True, "api_key": key}
 
     # --- Error log ---
 
@@ -1864,6 +1899,67 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.delete_retailer_session(user["id"], retailer)
         return {"ok": True}
+
+    # --- OTP relay ---
+
+    @app.get("/api/otp")
+    async def api_get_otp(user: dict = Depends(get_current_user)):
+        """Get the current pending OTP request (if any) for this user."""
+        pending = db.get_pending_otp(user["id"])
+        if pending:
+            _fix_utc_timestamps(pending, "created_at")
+        return {"otp": pending}
+
+    @app.post("/api/otp/submit")
+    async def api_submit_otp(request: Request):
+        """Submit an OTP code. Supports two modes:
+        1. API key (phone shortcut) — POST /api/otp/submit?key=API_KEY&code=123456
+        2. JWT (dashboard UI)      — POST /api/otp/submit  body: {code: "123456"}
+        """
+        code = request.query_params.get("code", "").strip()
+        api_key = request.query_params.get("key", "").strip()
+        otp_id = None
+
+        if api_key:
+            # Mode 1: API key from phone shortcut
+            user = db.get_user_by_api_key(api_key)
+            if not user:
+                return JSONResponse({"error": "Invalid API key"}, 401)
+            pending = db.get_pending_otp(user["id"])
+            if pending:
+                otp_id = pending["id"]
+        else:
+            # Mode 2: JWT auth from header
+            try:
+                user = get_current_user(request)
+            except HTTPException:
+                return JSONResponse({"error": "Authentication required (API key or JWT)"}, 401)
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            code = code or body.get("code", "").strip()
+            otp_id = body.get("otp_id")
+            # Auto-find pending OTP if otp_id not provided
+            if not otp_id:
+                pending = db.get_pending_otp(user["id"])
+                if pending:
+                    otp_id = pending["id"]
+
+        if not code:
+            return JSONResponse({"error": "code is required"}, 400)
+        if not otp_id:
+            return JSONResponse({"error": "No pending OTP request found"}, 404)
+
+        # Strip spaces/dashes from code
+        code = code.replace(" ", "").replace("-", "")
+
+        ok = db.submit_otp_code(int(otp_id), code)
+        if not ok:
+            return JSONResponse({"error": "OTP request not found or already resolved"}, 404)
+
+        logger.info("OTP code submitted for request %s", otp_id)
+        return {"ok": True, "message": "Code received, entering it now..."}
 
     # --- Monitor control ---
 

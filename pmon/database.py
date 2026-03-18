@@ -127,6 +127,18 @@ def _init_tables(conn: sqlite3.Connection):
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             UNIQUE(user_id, retailer)
         );
+
+        CREATE TABLE IF NOT EXISTS otp_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            retailer TEXT NOT NULL,
+            context TEXT DEFAULT '',
+            code TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            resolved_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
     """)
     conn.commit()
 
@@ -141,6 +153,11 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0")
     if "approved" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
+
+    # Add api_key to user_settings
+    settings_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
+    if "api_key" not in settings_cols:
+        conn.execute("ALTER TABLE user_settings ADD COLUMN api_key TEXT DEFAULT ''")
 
     # Add card fields to retailer_accounts
     acct_cols = {row[1] for row in conn.execute("PRAGMA table_info(retailer_accounts)").fetchall()}
@@ -458,6 +475,105 @@ def delete_retailer_session(user_id: int, retailer: str):
     db.execute(
         "DELETE FROM retailer_sessions WHERE user_id = ? AND retailer = ?",
         (user_id, retailer),
+    )
+    db.commit()
+
+
+# --- API key operations ---
+
+def generate_api_key(user_id: int) -> str:
+    """Generate and store a new API key for the user."""
+    import secrets
+    key = secrets.token_urlsafe(32)
+    db = get_db()
+    db.execute(
+        "UPDATE user_settings SET api_key = ? WHERE user_id = ?",
+        (key, user_id),
+    )
+    db.commit()
+    return key
+
+
+def get_user_by_api_key(api_key: str) -> dict | None:
+    """Look up a user by their API key. Returns user dict or None."""
+    if not api_key:
+        return None
+    db = get_db()
+    row = db.execute(
+        "SELECT u.* FROM users u JOIN user_settings s ON u.id = s.user_id "
+        "WHERE s.api_key = ? AND s.api_key != ''",
+        (api_key,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# --- OTP relay operations ---
+
+def create_otp_request(user_id: int, retailer: str, context: str = "") -> int:
+    """Create a pending OTP request. Returns the request id."""
+    db = get_db()
+    # Expire any stale pending requests for this user+retailer
+    db.execute(
+        "UPDATE otp_requests SET status = 'expired' "
+        "WHERE user_id = ? AND retailer = ? AND status = 'pending'",
+        (user_id, retailer),
+    )
+    cursor = db.execute(
+        "INSERT INTO otp_requests (user_id, retailer, context) VALUES (?, ?, ?)",
+        (user_id, retailer, context),
+    )
+    db.commit()
+    return cursor.lastrowid
+
+
+def get_pending_otp(user_id: int, retailer: str | None = None) -> dict | None:
+    """Get the most recent pending OTP request for a user (optionally filtered by retailer)."""
+    db = get_db()
+    if retailer:
+        row = db.execute(
+            "SELECT * FROM otp_requests WHERE user_id = ? AND retailer = ? AND status = 'pending' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id, retailer),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT * FROM otp_requests WHERE user_id = ? AND status = 'pending' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def submit_otp_code(otp_id: int, code: str) -> bool:
+    """Submit a code for a pending OTP request. Returns True if updated."""
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE otp_requests SET code = ?, status = 'submitted', resolved_at = datetime('now') "
+        "WHERE id = ? AND status = 'pending'",
+        (code, otp_id),
+    )
+    db.commit()
+    return cursor.rowcount > 0
+
+
+def get_otp_code(otp_id: int) -> str | None:
+    """Check if an OTP code has been submitted. Returns the code or None."""
+    db = get_db()
+    row = db.execute(
+        "SELECT code, status FROM otp_requests WHERE id = ?",
+        (otp_id,),
+    ).fetchone()
+    if row and row["status"] == "submitted" and row["code"]:
+        return row["code"]
+    return None
+
+
+def expire_otp_request(otp_id: int):
+    """Mark an OTP request as expired."""
+    db = get_db()
+    db.execute(
+        "UPDATE otp_requests SET status = 'expired', resolved_at = datetime('now') WHERE id = ?",
+        (otp_id,),
     )
     db.commit()
 
