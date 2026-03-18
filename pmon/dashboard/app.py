@@ -1385,6 +1385,30 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     else:
                         logger.warning("Test login %s: could not find password auth method option", retailer_name)
 
+                    # --- Pre-password OTP detection (Best Buy) ---
+                    # If we're stuck on a one-time code page and couldn't switch to password,
+                    # fail immediately with a clear message.
+                    if retailer == "bestbuy" and not pw_option_clicked:
+                        otp_page = False
+                        try:
+                            otp_page = await page.locator(
+                                'text=/one-time code/i, text=/enter your code/i, '
+                                'text=/enter the code/i, text=/verification code/i'
+                            ).first.is_visible(timeout=1500)
+                        except Exception:
+                            pass
+                        if otp_page:
+                            return {
+                                "ok": False,
+                                "message": (
+                                    f"{retailer_name} login requires a one-time verification code (2FA) "
+                                    "and no option to switch to password sign-in was found. "
+                                    "Disable two-factor authentication on this Best Buy account, "
+                                    "or import session cookies from a manual browser login "
+                                    "(Settings > Session Cookies)."
+                                ),
+                            }
+
                     # Wait for password field — selectors first, then vision
                     pass_found = False
                     try:
@@ -1457,6 +1481,31 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     logger.warning("Test login %s: PerimeterX blocked %d request(s)", retailer_name, len(net_monitor.get_blocked_details()))
 
                 await net_monitor.stop()
+
+                # --- Post-login OTP detection (Best Buy) ---
+                # Best Buy may require a one-time code AFTER password submission (2FA).
+                # Detect this and return a clear error instead of misreporting success/failure.
+                if retailer == "bestbuy":
+                    post_login_otp = False
+                    try:
+                        post_login_otp = await page.locator(
+                            'text=/one-time code/i, text=/enter your code/i, '
+                            'text=/enter the code/i, text=/verification code/i, '
+                            'text=/enter your one-time/i'
+                        ).first.is_visible(timeout=2000)
+                    except Exception:
+                        pass
+                    if post_login_otp:
+                        logger.warning("Test login %s: post-login OTP/2FA code requested", retailer_name)
+                        return {
+                            "ok": False,
+                            "message": (
+                                f"{retailer_name} login requires a one-time verification code (2FA) "
+                                "after password entry. Disable two-factor authentication on this "
+                                "Best Buy account, or import session cookies from a manual browser "
+                                "login (Settings > Session Cookies)."
+                            ),
+                        }
 
                 # Sweep any post-login popups
                 await sweep_popups(page)
