@@ -590,7 +590,7 @@ class CheckoutEngine:
             error_message=f"Checkout failed for {retailer} — no browser fallback available",
         )
 
-    async def _get_context(self, retailer: str):
+    async def _get_context(self, retailer: str, *, load_cookies: bool = True):
         """Get or create a browser context with persistent cookies and stealth."""
         from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
 
@@ -612,7 +612,7 @@ class CheckoutEngine:
                 "Sec-Ch-Ua-Platform": '"Windows"',
             },
         )
-        if storage_path.exists():
+        if load_cookies and storage_path.exists():
             ctx_kwargs["storage_state"] = str(storage_path)
         context = await self._browser.new_context(**ctx_kwargs)
         await context.add_init_script(STEALTH_JS)
@@ -1434,7 +1434,10 @@ class CheckoutEngine:
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
         """Walmart checkout flow."""
-        context = await self._get_context("walmart")
+        # Try without cookies first — fresh session is less likely to hit stale
+        # auth state or anti-bot flags from old sessions.  Fall back to saved
+        # cookies only if the fresh attempt fails at sign-in.
+        context = await self._get_context("walmart", load_cookies=False)
         page = await context.new_page()
 
         try:
@@ -1572,11 +1575,23 @@ class CheckoutEngine:
                     await self._smart_sign_in(page, creds, "walmart")
 
                 # Check if blocked during login
-                if net_monitor.was_blocked():
+                login_blocked = net_monitor.was_blocked()
+                if login_blocked:
                     blocked = net_monitor.get_blocked_details()
                     logger.warning("Walmart sign-in: blocked %d request(s) during login", len(blocked))
 
                 await net_monitor.stop()
+
+                # If sign-in failed/blocked on fresh session, retry with saved cookies
+                storage_path = SESSION_DIR / f"walmart.json"
+                if login_blocked and storage_path.exists():
+                    logger.info("Walmart: fresh session sign-in blocked — retrying with saved cookies")
+                    await page.close()
+                    await context.close()
+                    context = await self._get_context("walmart", load_cookies=True)
+                    page = await context.new_page()
+                    await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
+                    await wait_for_page_ready(page, timeout=10000)
 
                 # Sweep post-login popups
                 await sweep_popups(page)
