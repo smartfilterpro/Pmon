@@ -2864,14 +2864,71 @@ class CheckoutEngine:
                 'button:has-text("Place Your Order"), button:has-text("Place Order")',
                 timeout=15000,
             ):
-                await wait_for_page_ready(page, timeout=10000)
+                # Best Buy uses a queue/waiting room system ("fast-track")
+                # after clicking "Place Your Order". The flow is:
+                #   1. Click "Place Your Order"
+                #   2. Redirect to /checkout/c/fast-track (queue)
+                #   3. Wait in queue (seconds to minutes)
+                #   4. Redirect to /checkout/thank-you?orderId=... (confirmation)
+                # We must wait for the thank-you page, not just page ready.
+                order_number = ""
+                order_confirmed = False
+                queue_timeout_ms = 300000  # 5 minutes max for queue
+
+                try:
+                    # Wait for either thank-you page or an error
+                    # The queue page auto-refreshes/redirects when your turn comes
+                    logger.info("Best Buy checkout: waiting for order confirmation (queue may take up to 5 minutes)")
+                    await page.wait_for_url(
+                        "**/checkout/thank-you**",
+                        timeout=queue_timeout_ms,
+                        wait_until="domcontentloaded",
+                    )
+                    order_confirmed = True
+
+                    # Extract order ID from URL
+                    current_url = page.url
+                    import re as _re
+                    order_match = _re.search(r'orderId=([a-f0-9-]+)', current_url)
+                    if order_match:
+                        order_number = order_match.group(1)
+                        logger.info("Best Buy checkout: order confirmed! Order ID: %s", order_number)
+                    else:
+                        logger.info("Best Buy checkout: thank-you page reached but no orderId in URL")
+
+                except Exception as e:
+                    # Check if we're still on queue page or got an error
+                    current_url = page.url
+                    if "thank-you" in current_url:
+                        order_confirmed = True
+                        order_match = _re.search(r'orderId=([a-f0-9-]+)', current_url)
+                        if order_match:
+                            order_number = order_match.group(1)
+                    elif "fast-track" in current_url:
+                        logger.warning("Best Buy checkout: queue timed out after %ds", queue_timeout_ms // 1000)
+                    else:
+                        logger.warning("Best Buy checkout: unexpected page after placing order: %s (%s)", current_url, e)
+
                 await self._save_context(context, "bestbuy")
-                return CheckoutResult(
-                    url=url,
-                    retailer="bestbuy",
-                    product_name=product_name,
-                    status=CheckoutStatus.SUCCESS,
-                )
+
+                if order_confirmed:
+                    return CheckoutResult(
+                        url=url,
+                        retailer="bestbuy",
+                        product_name=product_name,
+                        status=CheckoutStatus.SUCCESS,
+                        order_number=order_number,
+                    )
+                else:
+                    # Queue timed out or unexpected state — still might have gone through
+                    error = await self._smart_read_error(page)
+                    return CheckoutResult(
+                        url=url,
+                        retailer="bestbuy",
+                        product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=error or f"Queue wait timed out — check order status manually (last URL: {page.url})",
+                    )
 
             error = await self._smart_read_error(page)
             await self._save_context(context, "bestbuy")
