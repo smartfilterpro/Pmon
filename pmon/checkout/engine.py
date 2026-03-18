@@ -2699,48 +2699,30 @@ class CheckoutEngine:
                         except Exception as e:
                             logger.debug("Best Buy sign-in: OTP switch link search failed: %s", e)
 
-                        # If we're still stuck on OTP page after all switch attempts, fail clearly
-                        still_on_otp = False
-                        try:
-                            still_on_otp = await page.locator(
-                                'text=/one-time code/i, text=/enter your code/i, '
-                                'text=/enter the code/i, text=/verification code/i'
-                            ).first.is_visible(timeout=1500)
-                        except Exception:
-                            pass
-                        if still_on_otp:
-                            logger.error(
-                                "Best Buy sign-in: stuck on OTP page — could not switch to password sign-in"
-                            )
-                            return CheckoutResult(
-                                url=url,
-                                retailer="bestbuy",
-                                product_name=product_name,
-                                status=CheckoutStatus.FAILED,
-                                error_message=(
-                                    "Best Buy login requires a one-time verification code and "
-                                    "no option to switch to password sign-in was found. "
-                                    "Disable two-factor authentication on this Best Buy account, "
-                                    "or log in manually first to establish a trusted device cookie."
-                                ),
-                            )
+                        # OTP switch didn't work — fall through to "Use password" strategies below
+                        logger.info("Best Buy sign-in: OTP switch links not found, will try 'Use password' strategies")
 
                 # Now try to click "Use password" option (auth method picker page)
                 if not pw_option_clicked:
-                    # Strategy 1: JS click — most reliable for styled/hidden radio buttons.
-                    # Finds labels, radio inputs, or text elements with "Use password"
+                    # Strategy 1: JS click — comprehensive search for password option.
+                    # Best Buy uses styled radio buttons where <input type="radio"> is
+                    # visually hidden and the <label> is what the user sees/clicks.
+                    # Also handles cases where the option is a div, span, or other element.
                     try:
                         clicked_js = await page.evaluate("""() => {
-                            // First try: find label elements with "Use password" text
+                            // Try 1: labels with password-related text (Best Buy's primary pattern)
                             const labels = document.querySelectorAll('label');
                             for (const label of labels) {
-                                const text = (label.textContent || '').trim();
-                                if (text === 'Use password' || text.toLowerCase() === 'use password') {
+                                const text = (label.textContent || '').trim().toLowerCase();
+                                if (text === 'use password' || text === 'password'
+                                    || text.includes('sign in with password')
+                                    || text.includes('use a password')
+                                    || text.includes('use your password')) {
                                     label.click();
-                                    return 'LABEL: ' + text;
+                                    return 'LABEL: ' + label.textContent.trim().substring(0, 60);
                                 }
                             }
-                            // Second try: find the radio input with password value and click its label
+                            // Try 2: radio inputs with password-related value/name/id
                             const radios = document.querySelectorAll('input[type="radio"]');
                             for (const radio of radios) {
                                 const val = (radio.value || '').toLowerCase();
@@ -2750,21 +2732,35 @@ class CheckoutEngine:
                                     const label = document.querySelector('label[for="' + id + '"]');
                                     if (label) { label.click(); return 'LABEL[for]: ' + label.textContent.trim().substring(0, 40); }
                                     radio.click();
+                                    radio.dispatchEvent(new Event('change', {bubbles: true}));
                                     return 'RADIO: value=' + val + ' id=' + id;
                                 }
                             }
-                            // Third try: any element whose own text is "Use password"
-                            const allEls = document.querySelectorAll('label, span, div, a, button, li, p');
+                            // Try 3: any clickable element with password-related text (not "forgot password")
+                            const allEls = document.querySelectorAll('label, span, div, a, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]');
+                            const pwPhrases = ['use password', 'use a password', 'use your password',
+                                'sign in with password', 'sign in with a password', 'password'];
                             for (const el of allEls) {
-                                const directText = Array.from(el.childNodes)
-                                    .filter(n => n.nodeType === 3)
-                                    .map(n => n.textContent.trim())
-                                    .join('');
-                                const fullText = (el.textContent || '').trim();
-                                if ((directText.toLowerCase() === 'use password' || fullText.toLowerCase() === 'use password')
-                                    && el.offsetParent !== null) {
+                                const text = (el.textContent || '').trim().toLowerCase();
+                                if (el.offsetParent === null) continue;
+                                if (text.includes('forgot')) continue;
+                                // Exact match or known phrase match
+                                for (const phrase of pwPhrases) {
+                                    if (text === phrase || text.startsWith(phrase)) {
+                                        el.click();
+                                        return el.tagName + ': ' + (el.textContent || '').trim().substring(0, 60);
+                                    }
+                                }
+                            }
+                            // Try 4: data attributes containing "password" on interactive elements
+                            const dataEls = document.querySelectorAll('[data-track*="password" i], [data-value*="password" i], [data-method*="password" i], [data-option*="password" i], [value*="password" i]');
+                            for (const el of dataEls) {
+                                if (el.offsetParent !== null || el.type === 'radio') {
+                                    const label = el.id ? document.querySelector('label[for="' + el.id + '"]') : null;
+                                    if (label) { label.click(); return 'DATA-LABEL: ' + label.textContent.trim().substring(0, 40); }
                                     el.click();
-                                    return el.tagName + ': ' + fullText.substring(0, 40);
+                                    if (el.type === 'radio') el.dispatchEvent(new Event('change', {bubbles: true}));
+                                    return 'DATA-ATTR: ' + el.tagName + ' ' + (el.textContent || el.value || '').substring(0, 40);
                                 }
                             }
                             return null;
@@ -2775,43 +2771,68 @@ class CheckoutEngine:
                     except Exception as e:
                         logger.debug("Best Buy sign-in: JS click failed: %s", e)
 
-                    # Strategy 2: Playwright label locator
+                    # Strategy 2: Playwright label locator with multiple text variants
                     if not pw_option_clicked:
-                        try:
-                            label = page.locator('label:has-text("Use password")')
-                            if await label.first.is_visible(timeout=1000):
-                                await human_click_element(page, label)
-                                pw_option_clicked = True
-                                logger.info("Best Buy sign-in: clicked 'Use password' via label locator")
-                        except Exception:
-                            pass
+                        for label_text in ["Use password", "Password", "Use a password", "Use your password"]:
+                            try:
+                                label = page.locator(f'label:has-text("{label_text}")')
+                                if await label.first.is_visible(timeout=800):
+                                    await human_click_element(page, label)
+                                    pw_option_clicked = True
+                                    logger.info("Best Buy sign-in: clicked '%s' via label locator", label_text)
+                                    break
+                            except Exception:
+                                continue
 
                     # Strategy 3: get_by_label with force check (for hidden radios)
                     if not pw_option_clicked:
-                        try:
-                            opt = page.get_by_label("Use password", exact=False)
-                            await opt.first.check(timeout=2000, force=True)
-                            pw_option_clicked = True
-                            logger.info("Best Buy sign-in: checked 'Use password' via get_by_label")
-                        except Exception:
-                            pass
-
-                    # Strategy 4: get_by_text exact match
-                    if not pw_option_clicked:
-                        try:
-                            opt = page.get_by_text("Use password", exact=True)
-                            if await opt.first.is_visible(timeout=500):
-                                await human_click_element(page, opt)
+                        for label_text in ["Use password", "Password"]:
+                            try:
+                                opt = page.get_by_label(label_text, exact=False)
+                                await opt.first.check(timeout=1500, force=True)
                                 pw_option_clicked = True
-                                logger.info("Best Buy sign-in: clicked 'Use password' via get_by_text")
-                        except Exception:
-                            pass
+                                logger.info("Best Buy sign-in: checked '%s' via get_by_label", label_text)
+                                break
+                            except Exception:
+                                continue
 
-                    # Strategy 5: Vision fallback — screenshot the page and ask for "Use password"
+                    # Strategy 4: get_by_text with multiple variants
+                    if not pw_option_clicked:
+                        for pw_text in ["Use password", "Password", "Use a password", "Sign in with password"]:
+                            try:
+                                opt = page.get_by_text(pw_text, exact=True)
+                                if await opt.first.is_visible(timeout=500):
+                                    await human_click_element(page, opt)
+                                    pw_option_clicked = True
+                                    logger.info("Best Buy sign-in: clicked '%s' via get_by_text", pw_text)
+                                    break
+                            except Exception:
+                                continue
+
+                    # Strategy 5: get_by_role for radio/tab/option with password text
+                    if not pw_option_clicked:
+                        for role in ["radio", "tab", "option", "button", "link"]:
+                            for pw_text in ["Use password", "Password"]:
+                                try:
+                                    opt = page.get_by_role(role, name=pw_text, exact=False)
+                                    if await opt.first.is_visible(timeout=500):
+                                        await opt.first.click(force=True)
+                                        pw_option_clicked = True
+                                        logger.info("Best Buy sign-in: clicked '%s' via get_by_role('%s')", pw_text, role)
+                                        break
+                                except Exception:
+                                    continue
+                            if pw_option_clicked:
+                                break
+
+                    # Strategy 6: Vision fallback — screenshot the page and ask for "Use password"
                     if not pw_option_clicked:
                         logger.info("Best Buy sign-in: trying vision for 'Use password' option")
                         pw_option_clicked = await self._smart_click(
-                            page, "'Use password' radio button or option to select password-based sign-in", "", timeout=3000
+                            page,
+                            "The 'Use password' or 'Password' option/radio button/tab to select password-based sign-in instead of one-time code. Click the password option, NOT the password input field.",
+                            'label:has-text("password"), [role="radio"]:has-text("password"), [role="tab"]:has-text("password")',
+                            timeout=5000,
                         )
 
                 if pw_option_clicked:
@@ -2826,6 +2847,28 @@ class CheckoutEngine:
                     await random_delay(page, 300, 700)
                 else:
                     logger.warning("Best Buy sign-in: could not select password sign-in method")
+                    # Dump page diagnostics for debugging
+                    try:
+                        diag = await page.evaluate("""() => {
+                            const info = {url: location.href, title: document.title};
+                            const els = document.querySelectorAll('label, a, button, [role="radio"], [role="tab"], [role="option"], [role="button"], input[type="radio"], [tabindex]');
+                            info.interactive = [];
+                            for (const el of els) {
+                                const text = (el.textContent || '').trim().substring(0, 80);
+                                if (!text) continue;
+                                info.interactive.push({
+                                    tag: el.tagName, role: el.getAttribute('role'),
+                                    type: el.type || null, id: el.id || null,
+                                    text: text, visible: el.offsetParent !== null,
+                                });
+                            }
+                            const headings = document.querySelectorAll('h1, h2, h3');
+                            info.headings = Array.from(headings).map(h => h.textContent.trim().substring(0, 100));
+                            return info;
+                        }""")
+                        logger.info("Best Buy sign-in: auth picker page diagnostics: %s", diag)
+                    except Exception:
+                        pass
 
                 # Now look for the password field
                 pass_filled = await self._smart_fill(
@@ -2876,8 +2919,8 @@ class CheckoutEngine:
 
                 if post_login_otp:
                     logger.error(
-                        "Best Buy sign-in: post-login OTP/2FA code requested — "
-                        "account has two-factor authentication enabled"
+                        "Best Buy sign-in: post-login OTP code requested — "
+                        "password was accepted but Best Buy wants a verification code"
                     )
                     return CheckoutResult(
                         url=url,
@@ -2885,10 +2928,10 @@ class CheckoutEngine:
                         product_name=product_name,
                         status=CheckoutStatus.FAILED,
                         error_message=(
-                            "Best Buy login requires a one-time verification code (2FA). "
-                            "Disable two-factor authentication on this Best Buy account, "
-                            "or log in manually in the browser session first to establish "
-                            "a trusted device cookie."
+                            "Best Buy accepted the password but is requesting a one-time "
+                            "verification code. Log in manually in a browser first to "
+                            "establish a trusted device, then import session cookies "
+                            "(Settings > Session Cookies)."
                         ),
                     )
 
