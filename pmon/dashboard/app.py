@@ -357,6 +357,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return {"ok": False, "message": "No session cookies found — import them via Settings > Session Cookies"}
 
         # Validate session by hitting a lightweight API endpoint
+        # Retry on 429 (rate limiting) with exponential backoff
+        import asyncio as _asyncio
+
         try:
             async with httpx.AsyncClient(
                 headers=DEFAULT_HEADERS,
@@ -367,19 +370,27 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 for name, value in cookies.items():
                     client.cookies.set(name, str(value), domain=".walmart.com")
 
-                # Try the account API to see if we're authenticated
-                resp = await client.get(
-                    "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
-                    "?configNames=identity",
-                    headers={
-                        **DEFAULT_HEADERS,
-                        "Accept": "application/json",
-                        "Sec-Fetch-Dest": "empty",
-                        "Sec-Fetch-Mode": "cors",
-                        "Sec-Fetch-Site": "same-origin",
-                        "Referer": "https://www.walmart.com/",
-                    },
-                )
+                req_headers = {
+                    **DEFAULT_HEADERS,
+                    "Accept": "application/json",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Referer": "https://www.walmart.com/",
+                }
+
+                resp = None
+                for attempt in range(4):
+                    resp = await client.get(
+                        "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                        "?configNames=identity",
+                        headers=req_headers,
+                    )
+                    if resp.status_code != 429:
+                        break
+                    delay = 2 ** (attempt + 1)  # 2, 4, 8, 16
+                    logger.info("Walmart session check: HTTP 429 (rate limited), retrying in %ds (attempt %d/4)", delay, attempt + 1)
+                    await _asyncio.sleep(delay)
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -398,6 +409,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     return {
                         "ok": False,
                         "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
+                    }
+                elif resp.status_code == 429:
+                    return {
+                        "ok": False,
+                        "message": "Walmart rate limited session check (429) after 4 retries. Wait a few minutes and try again.",
                     }
                 else:
                     return {
