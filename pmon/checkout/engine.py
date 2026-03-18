@@ -1692,12 +1692,15 @@ class CheckoutEngine:
         )
 
         # Header sign-in link/icon (multiple selector strategies)
+        # PKC uses a span with class like "header-sign-in-mobile--YnxZz" inside the header.
+        # The login is a modal on the homepage — there is NO /account/login page.
         sign_in_header_sel = (
+            'span[class*="header-sign-in" i], '
+            '[class*="header-sign-in" i], '
             'a:has-text("Sign In"), '
             'button:has-text("Sign In"), '
             'a[href*="/account/login"], '
             '[class*="sign-in" i], '
-            '[class*="header-sign-in" i], '
             '[data-testid*="sign-in" i], '
             '[data-testid*="signin" i], '
             'a:has-text("Log In"), '
@@ -1774,10 +1777,28 @@ class CheckoutEngine:
                 )
 
             if not sign_in_clicked:
-                # Last resort: navigate directly to login page
-                logger.warning("PKC login: header sign-in not found — navigating to /account/login")
-                await page.goto("https://www.pokemoncenter.com/account/login", wait_until="domcontentloaded")
-                await wait_for_page_ready(page, timeout=15000)
+                # PKC login is modal-only on the homepage — no dedicated login page.
+                # Try JS click on any element with "sign-in" in its class name.
+                logger.warning("PKC login: header sign-in not found — trying JS click on sign-in class")
+                try:
+                    clicked_js = await page.evaluate("""() => {
+                        const els = document.querySelectorAll('span, a, button, div');
+                        for (const el of els) {
+                            const cls = (el.className || '').toString().toLowerCase();
+                            const text = (el.textContent || '').trim().toLowerCase();
+                            if ((cls.includes('sign-in') || cls.includes('signin') || cls.includes('header-sign-in'))
+                                && el.offsetParent !== null) {
+                                el.click();
+                                return el.tagName + '.' + el.className.substring(0, 60);
+                            }
+                        }
+                        return null;
+                    }""")
+                    if clicked_js:
+                        sign_in_clicked = True
+                        logger.info("PKC login: clicked sign-in via JS class match: %s", clicked_js)
+                except Exception:
+                    pass
 
             await random_delay(page, 1000, 2500)
             await sweep_popups(page)
@@ -1908,36 +1929,53 @@ class CheckoutEngine:
         # ──────────────────────────────────────────────────────────
         # Step 7: Verify login success
         # ──────────────────────────────────────────────────────────
+        # PKC login is a modal on the homepage — the URL stays on pokemoncenter.com
+        # and does NOT redirect to /account. The best success signal is the network
+        # monitor: if SSAccountSignInCustomEvent or profile API fired, login succeeded.
+
+        # Best signal: network monitor saw the auth/login API respond successfully
+        if auth_ok:
+            logger.info("PKC login: success — auth API responded (network monitor confirmed)")
+            return
+
         final_url = page.url
 
-        # Check if we landed on /account (success) or still on login
+        # Secondary: check if we landed on /account (rare, but possible)
         if "/account" in final_url and "/login" not in final_url:
             logger.info("PKC login: success — redirected to %s", final_url)
             return
 
-        # Check if we're back on homepage (modal closed = success)
-        if final_url.rstrip("/") == "https://www.pokemoncenter.com":
-            # Verify by checking if sign-in link is gone / My Account is visible
-            try:
-                my_acct = page.locator('a:has-text("My Account"), a[href="/account"]')
-                if await my_acct.first.is_visible(timeout=3000):
-                    logger.info("PKC login: success — 'My Account' link visible on homepage")
-                    return
-            except Exception:
-                pass
-            # Check header changed from "Sign In" to account indicator
-            try:
-                still_sign_in = page.locator(sign_in_header_sel)
-                if await still_sign_in.first.is_visible(timeout=2000):
-                    logger.warning("PKC login: may have failed — 'Sign In' still visible in header")
-                else:
-                    logger.info("PKC login: success — sign-in link no longer visible")
-                    return
-            except Exception:
-                logger.info("PKC login: assuming success (sign-in check inconclusive)")
+        # Tertiary: we're on the homepage — check if the sign-in header element
+        # has been replaced by an account indicator (modal closed = success)
+        # Look for account-related elements that appear after login
+        try:
+            acct_indicators = page.locator(
+                'a:has-text("My Account"), a[href="/account"], '
+                '[class*="account-icon" i], [class*="account-menu" i], '
+                'span[class*="header-sign-in" i]:has-text("Hi")'
+            )
+            if await acct_indicators.first.is_visible(timeout=3000):
+                logger.info("PKC login: success — account indicator visible in header")
                 return
+        except Exception:
+            pass
 
-        # If we got here with no clear failure signal, check for error messages
+        # Check if sign-in link is still visible (failure indicator)
+        try:
+            still_sign_in = page.locator(
+                'span[class*="header-sign-in" i]:has-text("Sign In"), '
+                'a:has-text("Sign In")'
+            )
+            if await still_sign_in.first.is_visible(timeout=2000):
+                logger.warning("PKC login: may have failed — 'Sign In' still visible in header")
+            else:
+                logger.info("PKC login: success — sign-in link no longer visible")
+                return
+        except Exception:
+            logger.info("PKC login: assuming success (sign-in check inconclusive)")
+            return
+
+        # If we got here with no clear success signal, check for error messages
         error_msg = await self._smart_read_error(page)
         if error_msg:
             logger.warning("PKC login: error detected — %s", error_msg)
@@ -2576,114 +2614,146 @@ class CheckoutEngine:
                 # Sweep popups after email submit
                 await sweep_popups(page)
 
-                # Handle Best Buy identity verification step (phone last 4 + last name)
-                await self._bestbuy_handle_verification(page, creds, profile)
-
                 # --- Auth method picker: Best Buy shows "Choose a sign-in method" ---
                 # Must select "Use password" radio before the password field appears.
-                # Mirrors Target's multi-strategy auth method picker approach.
+                # This MUST run before verification handler since it's far more common.
+                # Best Buy uses styled radio buttons where the <input type="radio">
+                # is visually hidden and the <label> is what the user sees/clicks.
                 pw_option_clicked = False
 
-                # Check if password field is already visible (no picker needed)
+                # First: detect if we're on the auth method picker page
+                auth_picker_page = False
                 try:
-                    if await page.locator('input#fld-p1, input[type="password"]').first.is_visible(timeout=2000):
-                        pw_option_clicked = True
-                        logger.info("Best Buy sign-in: password field already visible (no auth picker)")
+                    auth_picker_page = await page.locator(
+                        'text=/choose a sign-in method/i, text=/sign-in method/i, '
+                        'h1:has-text("sign-in method"), h2:has-text("sign-in method")'
+                    ).first.is_visible(timeout=3000)
                 except Exception:
                     pass
 
-                pw_texts = [
-                    "Use password", "Password", "Enter your password",
-                    "Sign in with password", "Enter password",
-                ]
-
-                # Strategy 1: get_by_role("radio") — Best Buy uses radio buttons
-                if not pw_option_clicked:
-                    for option_text in pw_texts:
-                        try:
-                            opt = page.get_by_role("radio", name=option_text, exact=False)
-                            if await opt.first.is_visible(timeout=500):
-                                await human_click_element(page, opt)
-                                pw_option_clicked = True
-                                logger.info("Best Buy sign-in: clicked auth method via get_by_role('radio', '%s')", option_text)
-                                break
-                        except Exception:
-                            continue
-
-                # Strategy 2: get_by_role("button") for button-style pickers
-                if not pw_option_clicked:
-                    for option_text in pw_texts:
-                        try:
-                            opt = page.get_by_role("button", name=option_text, exact=False)
-                            if await opt.first.is_visible(timeout=500):
-                                await human_click_element(page, opt)
-                                pw_option_clicked = True
-                                logger.info("Best Buy sign-in: clicked auth method via get_by_role('button', '%s')", option_text)
-                                break
-                        except Exception:
-                            continue
-
-                # Strategy 3: get_by_text (catches labels/spans acting as clickable elements)
-                if not pw_option_clicked:
-                    for option_text in pw_texts:
-                        try:
-                            opt = page.get_by_text(option_text, exact=False)
-                            if await opt.first.is_visible(timeout=500):
-                                await human_click_element(page, opt)
-                                pw_option_clicked = True
-                                logger.info("Best Buy sign-in: clicked auth method via get_by_text('%s')", option_text)
-                                break
-                        except Exception:
-                            continue
-
-                # Strategy 4: CSS selectors (labels for radio, inputs, list items)
-                if not pw_option_clicked:
-                    password_option = page.locator(
-                        'input[type="radio"][value*="password" i], '
-                        'label:has-text("Use password"), label:has-text("Password"), '
-                        'div:has-text("Use password"):not(:has(div)), '
-                        'li:has-text("Use password"), span:has-text("Use password")'
-                    )
+                if not auth_picker_page:
+                    # Also check if password field is already visible (no picker needed)
                     try:
-                        if await password_option.first.is_visible(timeout=1000):
-                            await human_click_element(page, password_option)
+                        if await page.locator('input#fld-p1, input[type="password"]').first.is_visible(timeout=1000):
                             pw_option_clicked = True
-                            logger.info("Best Buy sign-in: clicked auth method via CSS selector")
+                            logger.info("Best Buy sign-in: password field already visible (no auth picker)")
                     except Exception:
                         pass
 
-                # Strategy 5: JS click — find any clickable element containing "password" text
-                if not pw_option_clicked:
+                if auth_picker_page and not pw_option_clicked:
+                    logger.info("Best Buy sign-in: 'Choose a sign-in method' page detected — selecting 'Use password'")
+
+                    # Strategy 1: JS click — most reliable for styled/hidden radio buttons.
+                    # Finds the label or parent element containing exactly "Use password"
+                    # text and clicks it, which selects the associated radio input.
                     try:
                         clicked_js = await page.evaluate("""() => {
-                            const els = document.querySelectorAll('input[type="radio"], label, a, button, [role="button"], [role="radio"], li, div[tabindex], span[tabindex]');
-                            for (const el of els) {
-                                const text = (el.textContent || '').toLowerCase().trim();
-                                if ((text.includes('use password') || text === 'password') && !text.includes('forgot') && el.offsetParent !== null) {
+                            // First try: find label elements with "Use password" text
+                            const labels = document.querySelectorAll('label');
+                            for (const label of labels) {
+                                const text = (label.textContent || '').trim();
+                                if (text === 'Use password' || text.toLowerCase() === 'use password') {
+                                    label.click();
+                                    return 'LABEL: ' + text;
+                                }
+                            }
+                            // Second try: find the radio input with password value and click its label
+                            const radios = document.querySelectorAll('input[type="radio"]');
+                            for (const radio of radios) {
+                                const val = (radio.value || '').toLowerCase();
+                                const name = (radio.name || '').toLowerCase();
+                                const id = radio.id || '';
+                                if (val.includes('password') || name.includes('password') || id.toLowerCase().includes('password')) {
+                                    // Click the label if it exists
+                                    const label = document.querySelector('label[for="' + id + '"]');
+                                    if (label) { label.click(); return 'LABEL[for]: ' + label.textContent.trim().substring(0, 40); }
+                                    // Or click the radio directly
+                                    radio.click();
+                                    return 'RADIO: value=' + val + ' id=' + id;
+                                }
+                            }
+                            // Third try: find any element with "Use password" text and click it
+                            const allEls = document.querySelectorAll('label, span, div, a, button, li, p');
+                            for (const el of allEls) {
+                                // Only match elements whose DIRECT text is "Use password"
+                                // (not parent containers that contain it among other text)
+                                const directText = Array.from(el.childNodes)
+                                    .filter(n => n.nodeType === 3)
+                                    .map(n => n.textContent.trim())
+                                    .join('');
+                                const fullText = (el.textContent || '').trim();
+                                if ((directText.toLowerCase() === 'use password' || fullText.toLowerCase() === 'use password')
+                                    && el.offsetParent !== null) {
                                     el.click();
-                                    return el.tagName + ': ' + text.substring(0, 60);
+                                    return el.tagName + ': ' + fullText.substring(0, 40);
                                 }
                             }
                             return null;
                         }""")
                         if clicked_js:
                             pw_option_clicked = True
-                            logger.info("Best Buy sign-in: clicked auth method via JS: %s", clicked_js)
-                    except Exception:
-                        pass
+                            logger.info("Best Buy sign-in: clicked 'Use password' via JS: %s", clicked_js)
+                    except Exception as e:
+                        logger.debug("Best Buy sign-in: JS click failed: %s", e)
 
-                # Strategy 6: Vision fallback
-                if not pw_option_clicked:
-                    logger.info("Best Buy sign-in: trying vision for auth method picker")
-                    pw_option_clicked = await self._smart_click(
-                        page, "Use password radio button or link to select password sign-in method", "", timeout=3000
-                    )
+                    # Strategy 2: Playwright label locator — click the visible label
+                    if not pw_option_clicked:
+                        try:
+                            label = page.locator('label:has-text("Use password")')
+                            if await label.first.is_visible(timeout=1000):
+                                await human_click_element(page, label)
+                                pw_option_clicked = True
+                                logger.info("Best Buy sign-in: clicked 'Use password' via label locator")
+                        except Exception:
+                            pass
 
-                if pw_option_clicked:
-                    await wait_for_page_ready(page, timeout=8000)
-                    await random_delay(page, 300, 700)
-                else:
-                    logger.warning("Best Buy sign-in: could not find password auth method option")
+                    # Strategy 3: get_by_label (Playwright's label-aware locator)
+                    if not pw_option_clicked:
+                        try:
+                            opt = page.get_by_label("Use password", exact=False)
+                            # This finds the input associated with the label — force click
+                            # even if hidden (the label click above should have worked)
+                            await opt.first.check(timeout=2000, force=True)
+                            pw_option_clicked = True
+                            logger.info("Best Buy sign-in: checked 'Use password' via get_by_label")
+                        except Exception:
+                            pass
+
+                    # Strategy 4: get_by_text with exact match to avoid "Forgot your password?"
+                    if not pw_option_clicked:
+                        try:
+                            opt = page.get_by_text("Use password", exact=True)
+                            if await opt.first.is_visible(timeout=500):
+                                await human_click_element(page, opt)
+                                pw_option_clicked = True
+                                logger.info("Best Buy sign-in: clicked 'Use password' via get_by_text (exact)")
+                        except Exception:
+                            pass
+
+                    # Strategy 5: Vision fallback
+                    if not pw_option_clicked:
+                        logger.info("Best Buy sign-in: trying vision for 'Use password' option")
+                        pw_option_clicked = await self._smart_click(
+                            page, "'Use password' radio button or option on the 'Choose a sign-in method' page", "", timeout=3000
+                        )
+
+                    if pw_option_clicked:
+                        # Wait for password field to appear after selecting "Use password"
+                        try:
+                            await page.locator('input#fld-p1, input[type="password"]').first.wait_for(
+                                state="visible", timeout=5000
+                            )
+                            logger.info("Best Buy sign-in: password field appeared after selecting 'Use password'")
+                        except Exception:
+                            logger.warning("Best Buy sign-in: password field did not appear after selecting 'Use password'")
+                        await random_delay(page, 300, 700)
+                    else:
+                        logger.warning("Best Buy sign-in: could not find 'Use password' option")
+
+                # Handle Best Buy identity verification step (phone last 4 + last name)
+                # This runs AFTER the auth method picker since verification is less common
+                if not auth_picker_page:
+                    await self._bestbuy_handle_verification(page, creds, profile)
 
                 # Now look for the password field
                 pass_filled = await self._smart_fill(
