@@ -8,6 +8,7 @@ import AddProduct from './components/AddProduct';
 import CheckoutLog from './components/CheckoutLog';
 import Settings from './components/Settings';
 import ErrorLog from './components/ErrorLog';
+import OtpBanner from './components/OtpBanner';
 import './App.css';
 
 type Tab = 'monitor' | 'log' | 'errors' | 'settings';
@@ -56,6 +57,9 @@ function AuthenticatedApp({ user, tab, setTab }: { user: User; tab: Tab; setTab:
       </nav>
 
       <main className="content">
+        {data?.pending_otp && (
+          <OtpBanner otp={data.pending_otp} onSubmitted={refresh} />
+        )}
         {error && (
           <div className="error-banner">Connection error: {error}. Is the backend running?</div>
         )}

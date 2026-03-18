@@ -66,6 +66,7 @@ from pathlib import Path
 
 from pmon.config import Config, AccountCredentials, Profile
 from pmon.models import CheckoutResult, CheckoutStatus
+from pmon import database as db
 from pmon.checkout.api_checkout import ApiCheckout
 from pmon.checkout.human_behavior import (
     human_click,
@@ -570,7 +571,7 @@ class CheckoutEngine:
             try:
                 handler = getattr(self, f"_checkout_{retailer}", None)
                 if handler:
-                    return await handler(url, product_name, profile, creds, dry_run=dry_run)
+                    return await handler(url, product_name, profile, creds, dry_run=dry_run, user_id=user_id)
             except Exception as e:
                 logger.error(f"Browser checkout also failed: {e}")
                 return CheckoutResult(
@@ -624,7 +625,8 @@ class CheckoutEngine:
         await context.storage_state(path=str(storage_path))
 
     async def _checkout_target(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
+        dry_run: bool = False, **kwargs,
     ) -> CheckoutResult:
         """Target checkout flow.
 
@@ -1431,7 +1433,8 @@ class CheckoutEngine:
             logger.warning("Target sign-in may have failed — still on login page: %s", final_url)
 
     async def _checkout_walmart(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
+        dry_run: bool = False, **kwargs,
     ) -> CheckoutResult:
         """Walmart checkout flow."""
         # Try without cookies first — fresh session is less likely to hit stale
@@ -1998,7 +2001,8 @@ class CheckoutEngine:
             logger.info("PKC login: completed (final URL: %s)", final_url)
 
     async def _checkout_pokemoncenter(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
+        dry_run: bool = False, **kwargs,
     ) -> CheckoutResult:
         """Pokemon Center checkout flow.
 
@@ -2518,8 +2522,119 @@ class CheckoutEngine:
         ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Verify")')
         await wait_for_page_ready(page, timeout=10000)
 
+    async def _wait_for_otp_code(
+        self, page, user_id: int | None, retailer: str,
+        product_name: str, url: str,
+        timeout_seconds: int = 300,
+    ) -> CheckoutResult | None:
+        """Wait for user to submit an OTP code via the dashboard or phone shortcut.
+
+        Creates a DB OTP request, sends a Discord notification, then polls the DB
+        for the submitted code. When received, enters it into the page.
+
+        Returns None on success (code entered, continue checkout).
+        Returns a CheckoutResult on failure (timeout, no user_id, etc.).
+        """
+        if user_id is None:
+            logger.error("%s: OTP required but no user_id available — cannot create OTP request", retailer)
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message=(
+                    f"{retailer.title()} is requesting a verification code but no user "
+                    "context is available. Try checkout from the dashboard."
+                ),
+            )
+
+        logger.info("%s: OTP code requested — creating OTP relay request for user %d", retailer, user_id)
+        otp_id = db.create_otp_request(user_id, retailer, context=f"checkout:{product_name}")
+
+        # Build the OTP submit URL for phone shortcuts
+        from pmon.auth import create_otp_token
+        otp_token = create_otp_token(otp_id, user_id, ttl_minutes=10)
+
+        # Send Discord notification if configured
+        try:
+            settings = db.get_user_settings(user_id)
+            webhook_url = settings.get("discord_webhook", "")
+            if webhook_url:
+                import httpx
+                server_url = os.environ.get("PMON_SERVER_URL", "")
+                submit_url = f"{server_url}/api/otp/submit?token={otp_token}&code=" if server_url else ""
+                embed = {
+                    "title": f"🔐 Verification Code Needed: {retailer.title()}",
+                    "description": (
+                        f"**{product_name}** checkout needs a verification code.\n\n"
+                        f"Enter it in the dashboard or reply with your phone shortcut."
+                    ),
+                    "color": 0xFFA500,
+                    "fields": [],
+                }
+                if submit_url:
+                    embed["fields"].append({
+                        "name": "Phone Shortcut URL",
+                        "value": f"`{submit_url}YOUR_CODE`",
+                    })
+                embed["fields"].append({
+                    "name": "Expires",
+                    "value": "10 minutes",
+                    "inline": True,
+                })
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(webhook_url, json={"embeds": [embed]})
+        except Exception as e:
+            logger.warning("Failed to send OTP Discord notification: %s", e)
+
+        # Poll for the code
+        import time
+        deadline = time.time() + timeout_seconds
+        poll_interval = 3  # seconds
+        while time.time() < deadline:
+            code = db.get_otp_code(otp_id)
+            if code:
+                logger.info("%s: OTP code received for request %d, entering it now", retailer, otp_id)
+                # Find the OTP input field and enter the code
+                try:
+                    otp_input = page.locator(
+                        'input[type="text"], input[type="tel"], input[type="number"], '
+                        'input[inputmode="numeric"], input[autocomplete="one-time-code"]'
+                    ).first
+                    await otp_input.click()
+                    await otp_input.fill(code)
+                    await asyncio.sleep(0.5)
+                    # Try clicking submit/verify/continue
+                    await self._multi_strategy_click(page, "Verify Code", [
+                        "Continue", "Verify", "Submit", "Sign In",
+                    ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Verify")')
+                    await wait_for_page_ready(page, timeout=10000)
+                    logger.info("%s: OTP code entered and submitted successfully", retailer)
+                    return None  # Success — continue checkout
+                except Exception as e:
+                    logger.error("%s: failed to enter OTP code: %s", retailer, e)
+                    db.expire_otp_request(otp_id)
+                    return CheckoutResult(
+                        url=url, retailer=retailer, product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=f"Received OTP code but failed to enter it: {e}",
+                    )
+            await asyncio.sleep(poll_interval)
+
+        # Timed out
+        logger.warning("%s: OTP code not received within %d seconds", retailer, timeout_seconds)
+        db.expire_otp_request(otp_id)
+        return CheckoutResult(
+            url=url, retailer=retailer, product_name=product_name,
+            status=CheckoutStatus.FAILED,
+            error_message=(
+                f"{retailer.title()} is requesting a verification code. "
+                f"No code was submitted within {timeout_seconds // 60} minutes. "
+                "Check your texts and submit the code via the dashboard or phone shortcut."
+            ),
+        )
+
     async def _checkout_bestbuy(
-        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
+        dry_run: bool = False, user_id: int | None = None,
     ) -> CheckoutResult:
         """Best Buy checkout flow (limited due to invitation system)."""
         context = await self._get_context("bestbuy")
@@ -2703,6 +2818,7 @@ class CheckoutEngine:
                         logger.info("Best Buy sign-in: OTP switch links not found, will try 'Use password' strategies")
 
                 # Now try to click "Use password" option (auth method picker page)
+                otp_relay_handled = False
                 if not pw_option_clicked:
                     # Strategy 1: JS click — comprehensive search for password option.
                     # Best Buy uses styled radio buttons where <input type="radio"> is
@@ -2870,10 +2986,33 @@ class CheckoutEngine:
                     except Exception:
                         pass
 
-                # Now look for the password field
-                pass_filled = await self._smart_fill(
-                    page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password, timeout=5000,
-                )
+                    # If we're stuck on the OTP page and can't switch to password,
+                    # try the OTP relay as a last resort
+                    still_on_otp = False
+                    try:
+                        still_on_otp = await page.locator(
+                            'text=/one-time code/i, text=/enter your code/i, '
+                            'text=/enter the code/i, text=/verification code/i'
+                        ).first.is_visible(timeout=1000)
+                    except Exception:
+                        pass
+
+                    if still_on_otp:
+                        logger.info("Best Buy sign-in: still on OTP page after all strategies — trying OTP relay")
+                        otp_result = await self._wait_for_otp_code(
+                            page, user_id, "bestbuy", product_name, url,
+                        )
+                        if otp_result is not None:
+                            return otp_result
+                        # OTP entered successfully — skip password entry, go to post-login flow
+                        otp_relay_handled = True
+
+                # Now look for the password field (skip if OTP relay already handled auth)
+                pass_filled = False
+                if not otp_relay_handled:
+                    pass_filled = await self._smart_fill(
+                        page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password, timeout=5000,
+                    )
                 if pass_filled:
                     # Verify password was entered
                     try:
@@ -2904,36 +3043,25 @@ class CheckoutEngine:
 
                 await net_monitor.stop()
 
-                # --- Post-login OTP detection ---
-                # Best Buy may require a one-time code AFTER password submission
-                # (2FA / step-up authentication). Detect this and fail clearly
-                # instead of silently proceeding with an unauthenticated session.
-                try:
-                    post_login_otp = await page.locator(
-                        'text=/one-time code/i, text=/enter your code/i, '
-                        'text=/enter the code/i, text=/verification code/i, '
-                        'text=/enter your one-time/i'
-                    ).first.is_visible(timeout=2000)
-                except Exception:
-                    post_login_otp = False
+                # --- Post-login OTP detection + relay ---
+                # Best Buy may require a one-time code AFTER password submission.
+                # Skip if OTP relay already handled the auth during pre-login.
+                if not otp_relay_handled:
+                    try:
+                        post_login_otp = await page.locator(
+                            'text=/one-time code/i, text=/enter your code/i, '
+                            'text=/enter the code/i, text=/verification code/i, '
+                            'text=/enter your one-time/i'
+                        ).first.is_visible(timeout=2000)
+                    except Exception:
+                        post_login_otp = False
 
-                if post_login_otp:
-                    logger.error(
-                        "Best Buy sign-in: post-login OTP code requested — "
-                        "password was accepted but Best Buy wants a verification code"
-                    )
-                    return CheckoutResult(
-                        url=url,
-                        retailer="bestbuy",
-                        product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message=(
-                            "Best Buy accepted the password but is requesting a one-time "
-                            "verification code. Log in manually in a browser first to "
-                            "establish a trusted device, then import session cookies "
-                            "(Settings > Session Cookies)."
-                        ),
-                    )
+                    if post_login_otp:
+                        otp_result = await self._wait_for_otp_code(
+                            page, user_id, "bestbuy", product_name, url,
+                        )
+                        if otp_result is not None:
+                            return otp_result
 
                 # Sweep post-login popups
                 await sweep_popups(page)

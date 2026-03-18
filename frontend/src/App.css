@@ -54,3 +54,64 @@
   margin-bottom: 20px;
   font-size: 14px;
 }
+
+/* OTP Banner */
+.otp-banner {
+  background: rgba(255, 165, 0, 0.15);
+  border: 1px solid #ffa500;
+  color: var(--text);
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+
+.otp-banner.otp-success {
+  background: rgba(0, 255, 0, 0.15);
+  border-color: var(--green, #00e676);
+  color: var(--green, #00e676);
+  font-weight: 600;
+}
+
+.otp-banner-text {
+  margin-bottom: 12px;
+}
+
+.otp-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.otp-input {
+  font-size: 18px;
+  letter-spacing: 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  width: 160px;
+  text-align: center;
+}
+
+.otp-submit {
+  padding: 8px 20px;
+  background: #ffa500;
+  color: #000;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.otp-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.otp-error {
+  color: var(--red);
+  margin-top: 8px;
+  font-size: 13px;
+}

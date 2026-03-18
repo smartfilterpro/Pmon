@@ -127,6 +127,18 @@ def _init_tables(conn: sqlite3.Connection):
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             UNIQUE(user_id, retailer)
         );
+
+        CREATE TABLE IF NOT EXISTS otp_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            retailer TEXT NOT NULL,
+            context TEXT DEFAULT '',
+            code TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            resolved_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
     """)
     conn.commit()
 
@@ -458,6 +470,77 @@ def delete_retailer_session(user_id: int, retailer: str):
     db.execute(
         "DELETE FROM retailer_sessions WHERE user_id = ? AND retailer = ?",
         (user_id, retailer),
+    )
+    db.commit()
+
+
+# --- OTP relay operations ---
+
+def create_otp_request(user_id: int, retailer: str, context: str = "") -> int:
+    """Create a pending OTP request. Returns the request id."""
+    db = get_db()
+    # Expire any stale pending requests for this user+retailer
+    db.execute(
+        "UPDATE otp_requests SET status = 'expired' "
+        "WHERE user_id = ? AND retailer = ? AND status = 'pending'",
+        (user_id, retailer),
+    )
+    cursor = db.execute(
+        "INSERT INTO otp_requests (user_id, retailer, context) VALUES (?, ?, ?)",
+        (user_id, retailer, context),
+    )
+    db.commit()
+    return cursor.lastrowid
+
+
+def get_pending_otp(user_id: int, retailer: str | None = None) -> dict | None:
+    """Get the most recent pending OTP request for a user (optionally filtered by retailer)."""
+    db = get_db()
+    if retailer:
+        row = db.execute(
+            "SELECT * FROM otp_requests WHERE user_id = ? AND retailer = ? AND status = 'pending' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id, retailer),
+        ).fetchone()
+    else:
+        row = db.execute(
+            "SELECT * FROM otp_requests WHERE user_id = ? AND status = 'pending' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def submit_otp_code(otp_id: int, code: str) -> bool:
+    """Submit a code for a pending OTP request. Returns True if updated."""
+    db = get_db()
+    cursor = db.execute(
+        "UPDATE otp_requests SET code = ?, status = 'submitted', resolved_at = datetime('now') "
+        "WHERE id = ? AND status = 'pending'",
+        (code, otp_id),
+    )
+    db.commit()
+    return cursor.rowcount > 0
+
+
+def get_otp_code(otp_id: int) -> str | None:
+    """Check if an OTP code has been submitted. Returns the code or None."""
+    db = get_db()
+    row = db.execute(
+        "SELECT code, status FROM otp_requests WHERE id = ?",
+        (otp_id,),
+    ).fetchone()
+    if row and row["status"] == "submitted" and row["code"]:
+        return row["code"]
+    return None
+
+
+def expire_otp_request(otp_id: int):
+    """Mark an OTP request as expired."""
+    db = get_db()
+    db.execute(
+        "UPDATE otp_requests SET status = 'expired', resolved_at = datetime('now') WHERE id = ?",
+        (otp_id,),
     )
     db.commit()
 

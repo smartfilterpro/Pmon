@@ -212,6 +212,15 @@ export async function disableTotp() {
   return (await apiFetch('/auth/totp/disable', { method: 'POST' })).json();
 }
 
+// --- OTP ---
+
+export async function submitOtp(otpId: number, code: string) {
+  return (await apiFetch('/otp/submit', {
+    method: 'POST',
+    body: JSON.stringify({ otp_id: otpId, code }),
+  })).json();
+}
+
 // --- Errors ---
 
 export async function getErrors(): Promise<ErrorEntry[]> {
