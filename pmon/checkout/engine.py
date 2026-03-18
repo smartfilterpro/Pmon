@@ -1692,12 +1692,15 @@ class CheckoutEngine:
         )
 
         # Header sign-in link/icon (multiple selector strategies)
+        # PKC uses a span with class like "header-sign-in-mobile--YnxZz" inside the header.
+        # The login is a modal on the homepage — there is NO /account/login page.
         sign_in_header_sel = (
+            'span[class*="header-sign-in" i], '
+            '[class*="header-sign-in" i], '
             'a:has-text("Sign In"), '
             'button:has-text("Sign In"), '
             'a[href*="/account/login"], '
             '[class*="sign-in" i], '
-            '[class*="header-sign-in" i], '
             '[data-testid*="sign-in" i], '
             '[data-testid*="signin" i], '
             'a:has-text("Log In"), '
@@ -1774,10 +1777,28 @@ class CheckoutEngine:
                 )
 
             if not sign_in_clicked:
-                # Last resort: navigate directly to login page
-                logger.warning("PKC login: header sign-in not found — navigating to /account/login")
-                await page.goto("https://www.pokemoncenter.com/account/login", wait_until="domcontentloaded")
-                await wait_for_page_ready(page, timeout=15000)
+                # PKC login is modal-only on the homepage — no dedicated login page.
+                # Try JS click on any element with "sign-in" in its class name.
+                logger.warning("PKC login: header sign-in not found — trying JS click on sign-in class")
+                try:
+                    clicked_js = await page.evaluate("""() => {
+                        const els = document.querySelectorAll('span, a, button, div');
+                        for (const el of els) {
+                            const cls = (el.className || '').toString().toLowerCase();
+                            const text = (el.textContent || '').trim().toLowerCase();
+                            if ((cls.includes('sign-in') || cls.includes('signin') || cls.includes('header-sign-in'))
+                                && el.offsetParent !== null) {
+                                el.click();
+                                return el.tagName + '.' + el.className.substring(0, 60);
+                            }
+                        }
+                        return null;
+                    }""")
+                    if clicked_js:
+                        sign_in_clicked = True
+                        logger.info("PKC login: clicked sign-in via JS class match: %s", clicked_js)
+                except Exception:
+                    pass
 
             await random_delay(page, 1000, 2500)
             await sweep_popups(page)
@@ -1908,36 +1929,53 @@ class CheckoutEngine:
         # ──────────────────────────────────────────────────────────
         # Step 7: Verify login success
         # ──────────────────────────────────────────────────────────
+        # PKC login is a modal on the homepage — the URL stays on pokemoncenter.com
+        # and does NOT redirect to /account. The best success signal is the network
+        # monitor: if SSAccountSignInCustomEvent or profile API fired, login succeeded.
+
+        # Best signal: network monitor saw the auth/login API respond successfully
+        if auth_ok:
+            logger.info("PKC login: success — auth API responded (network monitor confirmed)")
+            return
+
         final_url = page.url
 
-        # Check if we landed on /account (success) or still on login
+        # Secondary: check if we landed on /account (rare, but possible)
         if "/account" in final_url and "/login" not in final_url:
             logger.info("PKC login: success — redirected to %s", final_url)
             return
 
-        # Check if we're back on homepage (modal closed = success)
-        if final_url.rstrip("/") == "https://www.pokemoncenter.com":
-            # Verify by checking if sign-in link is gone / My Account is visible
-            try:
-                my_acct = page.locator('a:has-text("My Account"), a[href="/account"]')
-                if await my_acct.first.is_visible(timeout=3000):
-                    logger.info("PKC login: success — 'My Account' link visible on homepage")
-                    return
-            except Exception:
-                pass
-            # Check header changed from "Sign In" to account indicator
-            try:
-                still_sign_in = page.locator(sign_in_header_sel)
-                if await still_sign_in.first.is_visible(timeout=2000):
-                    logger.warning("PKC login: may have failed — 'Sign In' still visible in header")
-                else:
-                    logger.info("PKC login: success — sign-in link no longer visible")
-                    return
-            except Exception:
-                logger.info("PKC login: assuming success (sign-in check inconclusive)")
+        # Tertiary: we're on the homepage — check if the sign-in header element
+        # has been replaced by an account indicator (modal closed = success)
+        # Look for account-related elements that appear after login
+        try:
+            acct_indicators = page.locator(
+                'a:has-text("My Account"), a[href="/account"], '
+                '[class*="account-icon" i], [class*="account-menu" i], '
+                'span[class*="header-sign-in" i]:has-text("Hi")'
+            )
+            if await acct_indicators.first.is_visible(timeout=3000):
+                logger.info("PKC login: success — account indicator visible in header")
                 return
+        except Exception:
+            pass
 
-        # If we got here with no clear failure signal, check for error messages
+        # Check if sign-in link is still visible (failure indicator)
+        try:
+            still_sign_in = page.locator(
+                'span[class*="header-sign-in" i]:has-text("Sign In"), '
+                'a:has-text("Sign In")'
+            )
+            if await still_sign_in.first.is_visible(timeout=2000):
+                logger.warning("PKC login: may have failed — 'Sign In' still visible in header")
+            else:
+                logger.info("PKC login: success — sign-in link no longer visible")
+                return
+        except Exception:
+            logger.info("PKC login: assuming success (sign-in check inconclusive)")
+            return
+
+        # If we got here with no clear success signal, check for error messages
         error_msg = await self._smart_read_error(page)
         if error_msg:
             logger.warning("PKC login: error detected — %s", error_msg)
