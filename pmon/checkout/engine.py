@@ -710,8 +710,10 @@ class CheckoutEngine:
                 await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                 await wait_for_page_ready(page, timeout=15000)
 
-            # Sweep popups on cart page
+            # Sweep popups on cart page and browse briefly
             await sweep_popups(page)
+            await random_mouse_jitter(page)
+            await random_delay(page, 300, 800)
 
             # --- Handle delivery method selection on cart page ---
             # Target requires choosing "Shipping" or "Pickup" for each item.
@@ -1010,6 +1012,10 @@ class CheckoutEngine:
         for step in range(5):
             # Sweep popups before each step (address suggestions, promos, etc.)
             await sweep_popups(page)
+
+            # Human-like: small jitter between checkout steps
+            await random_mouse_jitter(page)
+            await random_delay(page, 200, 600)
 
             # Check if "Place your order" is already visible — we're done
             try:
@@ -1435,17 +1441,33 @@ class CheckoutEngine:
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=10000)
 
+            # Human-like: browse the product page before interacting
+            await sweep_popups(page)
+            await random_mouse_jitter(page)
+            await idle_scroll(page)
+            await random_delay(page, 500, 1500)
+
             # Add to cart
             await sweep_popups(page)
             if not await self._smart_click(
                 page, "Add to cart",
                 'button[data-tl-id="ProductPrimaryCTA-cta_add_to_cart_button"], button[data-tl-id*="addToCart"], button:has-text("Add to cart")',
             ):
-                error = await self._smart_read_error(page)
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found")
+                # Popup may have blocked the click — sweep and retry
+                if await sweep_popups(page):
+                    await self._smart_click(
+                        page, "Add to cart",
+                        'button[data-tl-id="ProductPrimaryCTA-cta_add_to_cart_button"], button[data-tl-id*="addToCart"], button:has-text("Add to cart")',
+                    )
+                else:
+                    error = await self._smart_read_error(page)
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found")
             await random_delay(page, 1500, 2500)
+
+            # Sweep popups after add-to-cart (coverage offers, promo modals)
+            await sweep_popups(page)
 
             # Go to checkout via button or direct navigation
             if not await self._smart_click(
@@ -1456,6 +1478,8 @@ class CheckoutEngine:
                 await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
                 await wait_for_page_ready(page, timeout=10000)
 
+            await sweep_popups(page)
+
             # Sign in if needed — try selectors first, then vision
             sign_in_visible = False
             try:
@@ -1464,8 +1488,17 @@ class CheckoutEngine:
                 pass
 
             if sign_in_visible:
+                # Start network monitor to track login completion
+                net_monitor = NetworkMonitor(page)
+                net_monitor.add_pattern("wmt_auth", "/account/electrode/api/signin")
+                net_monitor.add_pattern("wmt_token", "/orchestra/snb/graphql")
+                await net_monitor.start()
+
                 email_sel = 'input[name="email"], input[type="email"], input[id*="email" i], input[type="tel"], input[name="phone"], input[id*="phone" i], #phone-number, input[autocomplete="tel"]'
                 pass_sel = 'input[type="password"], input[name="password"], input[id*="password" i]'
+
+                # Human-like: jitter before interacting with login form
+                await random_mouse_jitter(page)
 
                 # Check if auth method picker is already showing (Walmart with pre-filled phone)
                 auth_picker_visible = False
@@ -1479,14 +1512,27 @@ class CheckoutEngine:
                     pass
 
                 if not auth_picker_visible:
-                    # Standard flow: fill email/phone and submit (human-like via _smart_fill)
+                    # Standard flow: fill email/phone and submit
                     email_filled = await self._smart_fill(page, "email/phone", email_sel, creds.email)
                     if email_filled:
+                        # Verify the value got entered (Walmart's React may clear it)
+                        try:
+                            actual = await page.locator(email_sel).first.input_value(timeout=1000)
+                            if actual != creds.email:
+                                logger.warning("Walmart sign-in: email value mismatch — using fill()")
+                                await page.locator(email_sel).first.fill(creds.email)
+                                await random_delay(page, 200, 400)
+                        except Exception:
+                            pass
+
                         await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                         await self._multi_strategy_click(page, "Continue", [
                             "Continue", "Sign in", "Next",
                         ], 'button[type="submit"]')
                         await wait_for_page_ready(page, timeout=10000)
+
+                        # Sweep popups after email submit
+                        await sweep_popups(page)
 
                         # Check for auth method picker after submit
                         try:
@@ -1497,17 +1543,43 @@ class CheckoutEngine:
                         except Exception:
                             pass
 
-                # Now enter password (human-like via _smart_fill)
+                # Now enter password
                 pass_filled = await self._smart_fill(page, "password", pass_sel, creds.password)
                 if pass_filled:
+                    # Verify password was entered
+                    try:
+                        pw_value = await page.locator(pass_sel).first.input_value(timeout=1000)
+                        if not pw_value:
+                            logger.warning("Walmart sign-in: password empty — using fill()")
+                            await page.locator(pass_sel).first.fill(creds.password)
+                            await random_delay(page, 200, 400)
+                    except Exception:
+                        pass
+
                     await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+
+                    pre_url = page.url
                     await self._multi_strategy_click(page, "Sign in", [
                         "Sign in", "Log in", "Continue",
                     ], 'button[type="submit"]')
-                    await wait_for_page_ready(page, timeout=10000)
+
+                    # Wait for login to complete via network monitoring
+                    login_done = await net_monitor.wait_for("wmt_auth", timeout=15000)
+                    if not login_done:
+                        await wait_for_url_change(page, pre_url, timeout=10000)
                 else:
                     # Full vision-assisted sign-in
                     await self._smart_sign_in(page, creds, "walmart")
+
+                # Check if blocked during login
+                if net_monitor.was_blocked():
+                    blocked = net_monitor.get_blocked_details()
+                    logger.warning("Walmart sign-in: blocked %d request(s) during login", len(blocked))
+
+                await net_monitor.stop()
+
+                # Sweep post-login popups
+                await sweep_popups(page)
 
             # Guest checkout fallback if not signed in
             await self._smart_click(
@@ -1515,6 +1587,9 @@ class CheckoutEngine:
                 'button[data-tl-id="Wel-Guest_cxo_btn"], button:has-text("Continue without account"), button:has-text("Guest")',
                 timeout=2000,
             )
+
+            # Sweep popups on checkout page before placing order
+            await sweep_popups(page)
 
             # Wait for checkout page to be ready, then place order
             if dry_run:
@@ -2412,23 +2487,39 @@ class CheckoutEngine:
                     error_message="Product uses Best Buy invitation system - auto-checkout not possible",
                 )
 
+            # Human-like: browse the product page before interacting
+            await sweep_popups(page)
+            await random_mouse_jitter(page)
+            await idle_scroll(page)
+            await random_delay(page, 500, 1500)
+
             # Standard add to cart
             await sweep_popups(page)
             if not await self._smart_click(
                 page, "Add to Cart",
                 'button.add-to-cart-button:not([disabled]), button.btn-primary.add-to-cart-button',
             ):
-                error = await self._smart_read_error(page)
-                if error and "invitation" in error.lower():
-                    return CheckoutResult(
-                        url=url, retailer="bestbuy", product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message="Product uses Best Buy invitation system - auto-checkout not possible",
+                # Popup may have blocked the click — sweep and retry
+                if await sweep_popups(page):
+                    await self._smart_click(
+                        page, "Add to Cart",
+                        'button.add-to-cart-button:not([disabled]), button.btn-primary.add-to-cart-button',
                     )
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found")
+                else:
+                    error = await self._smart_read_error(page)
+                    if error and "invitation" in error.lower():
+                        return CheckoutResult(
+                            url=url, retailer="bestbuy", product_name=product_name,
+                            status=CheckoutStatus.FAILED,
+                            error_message="Product uses Best Buy invitation system - auto-checkout not possible",
+                        )
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found")
             await random_delay(page, 1500, 2500)
+
+            # Sweep popups after add-to-cart (protection plan offers, etc.)
+            await sweep_popups(page)
 
             # Go to cart via popup button or direct navigation
             if not await self._smart_click(
@@ -2439,6 +2530,9 @@ class CheckoutEngine:
                 await page.goto("https://www.bestbuy.com/cart", wait_until="domcontentloaded")
                 await wait_for_page_ready(page, timeout=10000)
 
+            # Sweep popups on cart page
+            await sweep_popups(page)
+
             # Click checkout
             if not await self._smart_click(
                 page, "Checkout",
@@ -2446,18 +2540,41 @@ class CheckoutEngine:
             ):
                 raise Exception("Checkout button not found")
             await wait_for_page_ready(page, timeout=10000)
+            await sweep_popups(page)
 
             # Sign in if needed — selectors first (human-like via _smart_fill), vision fallback
             email_filled = await self._smart_fill(
                 page, "email", 'input#fld-e, input[id="user.emailAddress"], input[type="email"], input[name="email"]', creds.email, timeout=3000,
             )
             if email_filled:
+                # Start network monitor to track login completion
+                net_monitor = NetworkMonitor(page)
+                net_monitor.add_pattern("bb_auth", "/identity/authenticate")
+                net_monitor.add_pattern("bb_token", "/oauth/token")
+                await net_monitor.start()
+
+                # Human-like: jitter before interacting with login form
+                await random_mouse_jitter(page)
+
+                # Verify the email value got entered
+                try:
+                    actual = await page.locator('input#fld-e, input[type="email"]').first.input_value(timeout=1000)
+                    if actual != creds.email:
+                        logger.warning("Best Buy sign-in: email value mismatch — using fill()")
+                        await page.locator('input#fld-e, input[type="email"]').first.fill(creds.email)
+                        await random_delay(page, 200, 400)
+                except Exception:
+                    pass
+
                 # Submit email first (Best Buy uses multi-step sign-in)
                 await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                 await self._multi_strategy_click(page, "Continue", [
                     "Continue", "Sign In", "Next",
                 ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Sign In")')
                 await wait_for_page_ready(page, timeout=10000)
+
+                # Sweep popups after email submit
+                await sweep_popups(page)
 
                 # Handle Best Buy identity verification step (phone last 4 + last name)
                 await self._bestbuy_handle_verification(page, creds, profile)
@@ -2467,11 +2584,37 @@ class CheckoutEngine:
                     page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password, timeout=5000,
                 )
                 if pass_filled:
+                    # Verify password was entered
+                    try:
+                        pw_value = await page.locator('input#fld-p1, input[type="password"]').first.input_value(timeout=1000)
+                        if not pw_value:
+                            logger.warning("Best Buy sign-in: password empty — using fill()")
+                            await page.locator('input#fld-p1, input[type="password"]').first.fill(creds.password)
+                            await random_delay(page, 200, 400)
+                    except Exception:
+                        pass
+
                     await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+
+                    pre_url = page.url
                     await self._multi_strategy_click(page, "Sign In", [
                         "Sign In", "Log In", "Continue",
                     ], 'button[type="submit"], button:has-text("Sign In")')
-                    await wait_for_page_ready(page, timeout=10000)
+
+                    # Wait for login to complete via network monitoring
+                    login_done = await net_monitor.wait_for("bb_auth", timeout=15000)
+                    if not login_done:
+                        await wait_for_url_change(page, pre_url, timeout=10000)
+
+                # Check if blocked during login
+                if net_monitor.was_blocked():
+                    blocked = net_monitor.get_blocked_details()
+                    logger.warning("Best Buy sign-in: blocked %d request(s) during login", len(blocked))
+
+                await net_monitor.stop()
+
+                # Sweep post-login popups
+                await sweep_popups(page)
             else:
                 # Try full vision-assisted sign-in
                 await self._smart_sign_in(page, creds, "bestbuy")
@@ -2482,6 +2625,9 @@ class CheckoutEngine:
                 'button.cia-guest-content__continue.guest, button:has-text("Continue as Guest"), button:has-text("Guest")',
                 timeout=2000,
             )
+
+            # Sweep popups before placing order
+            await sweep_popups(page)
 
             if dry_run:
                 try:
