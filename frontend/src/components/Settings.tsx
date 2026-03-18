@@ -2,10 +2,10 @@ import { useState, useEffect } from 'react';
 import {
   getSettings, updateSettings, getAccounts, setAccount, testAccount,
   setupTotp, confirmTotp, disableTotp, checkAuth,
-  getSessions, importSession, deleteSession,
+  getSessions, importSession, deleteSession, generateApiKey,
 } from '../hooks/useApi';
 import type { User } from '../types';
-import { Save, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader, Cookie, Trash2, Upload } from 'lucide-react';
+import { Save, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader, Cookie, Trash2, Upload, Key } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import AdminPanel from './AdminPanel';
 import './Settings.css';
@@ -47,6 +47,10 @@ export default function Settings({ user }: Props) {
   const [importLoading, setImportLoading] = useState(false);
   const [importResult, setImportResult] = useState<{ ok: boolean; message: string } | null>(null);
 
+  // API Key
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+
   // 2FA
   const [totpEnabled, setTotpEnabled] = useState(user.totp_enabled);
   const [totpUri, setTotpUri] = useState('');
@@ -63,6 +67,7 @@ export default function Settings({ user }: Props) {
     getSettings().then(data => {
       setPollInterval(data.settings.poll_interval);
       setDiscordWebhook(data.settings.discord_webhook || '');
+      setApiKey(data.settings.api_key || '');
     });
     getAccounts().then(data => setAccounts(data.accounts || {}));
     refreshSessions();
@@ -166,6 +171,14 @@ export default function Settings({ user }: Props) {
     }
   };
 
+  const handleGenerateApiKey = async () => {
+    const data = await generateApiKey();
+    if (data.ok) {
+      setApiKey(data.api_key);
+      setApiKeyVisible(true);
+    }
+  };
+
   const handleDeleteSession = async (retailerId: string) => {
     await deleteSession(retailerId);
     refreshSessions();
@@ -202,6 +215,37 @@ export default function Settings({ user }: Props) {
         <button className="save-btn" onClick={handleSaveSettings}>
           <Save size={14} /> {saved ? 'Saved!' : 'Save Settings'}
         </button>
+      </div>
+
+      {/* API Key for OTP Shortcut */}
+      <div className="settings-section">
+        <h3><Key size={16} /> API Key (Phone Shortcut)</h3>
+        <p className="section-desc">
+          Generate an API key to submit verification codes from your phone. Set up a shortcut that POSTs to:
+        </p>
+        {apiKey ? (
+          <>
+            <div className="api-key-url">
+              <code>POST /api/otp/submit?key={apiKeyVisible ? apiKey : '••••••••'}&code=YOUR_CODE</code>
+              <button className="action-btn" style={{ marginLeft: 8 }} onClick={() => setApiKeyVisible(!apiKeyVisible)}>
+                {apiKeyVisible ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {apiKeyVisible && (
+              <div className="setting-field" style={{ marginTop: 8 }}>
+                <label>Your API Key (keep this secret)</label>
+                <input type="text" readOnly value={apiKey} onClick={e => (e.target as HTMLInputElement).select()} style={{ fontFamily: 'monospace', fontSize: 13 }} />
+              </div>
+            )}
+            <button className="danger-btn" style={{ marginTop: 8 }} onClick={handleGenerateApiKey}>
+              Regenerate Key
+            </button>
+          </>
+        ) : (
+          <button className="save-btn" onClick={handleGenerateApiKey}>
+            <Key size={14} /> Generate API Key
+          </button>
+        )}
       </div>
 
       {/* Retailer Accounts */}

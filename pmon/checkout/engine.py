@@ -2549,10 +2549,6 @@ class CheckoutEngine:
         logger.info("%s: OTP code requested — creating OTP relay request for user %d", retailer, user_id)
         otp_id = db.create_otp_request(user_id, retailer, context=f"checkout:{product_name}")
 
-        # Build the OTP submit URL for phone shortcuts
-        from pmon.auth import create_otp_token
-        otp_token = create_otp_token(otp_id, user_id, ttl_minutes=10)
-
         # Send Discord notification if configured
         try:
             settings = db.get_user_settings(user_id)
@@ -2560,7 +2556,8 @@ class CheckoutEngine:
             if webhook_url:
                 import httpx
                 server_url = os.environ.get("PMON_SERVER_URL", "")
-                submit_url = f"{server_url}/api/otp/submit?token={otp_token}&code=" if server_url else ""
+                api_key = settings.get("api_key", "")
+                submit_url = f"{server_url}/api/otp/submit?key={api_key}&code=" if server_url and api_key else ""
                 embed = {
                     "title": f"🔐 Verification Code Needed: {retailer.title()}",
                     "description": (
@@ -2577,7 +2574,7 @@ class CheckoutEngine:
                     })
                 embed["fields"].append({
                     "name": "Expires",
-                    "value": "10 minutes",
+                    "value": "5 minutes",
                     "inline": True,
                 })
                 async with httpx.AsyncClient(timeout=10.0) as client:

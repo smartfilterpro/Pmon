@@ -1754,6 +1754,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         )
         return {"ok": True}
 
+    @app.post("/api/settings/generate_api_key")
+    async def api_generate_key(user: dict = Depends(get_current_user)):
+        """Generate a new API key for the current user (replaces any existing key)."""
+        key = db.generate_api_key(user["id"])
+        return {"ok": True, "api_key": key}
+
     # --- Error log ---
 
     @app.get("/api/errors")
@@ -1906,33 +1912,28 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.post("/api/otp/submit")
     async def api_submit_otp(request: Request):
-        """Submit an OTP code. Supports three modes:
-        1. JWT + code only — pass {code} in body (auto-finds pending OTP)
-        2. JWT + explicit — pass {otp_id, code} in body
-        3. Token query params — pass ?token=<jwt>&code=<code> (for phone shortcuts)
+        """Submit an OTP code. Supports two modes:
+        1. API key (phone shortcut) — POST /api/otp/submit?key=API_KEY&code=123456
+        2. JWT (dashboard UI)      — POST /api/otp/submit  body: {code: "123456"}
         """
         code = request.query_params.get("code", "").strip()
-        token = request.query_params.get("token", "").strip()
+        api_key = request.query_params.get("key", "").strip()
         otp_id = None
 
-        if token and code:
-            # Mode 3: Phone shortcut — token is the user's JWT, code is query param
-            payload = decode_token(token)
-            if not payload:
-                return JSONResponse({"error": "Invalid or expired token"}, 401)
-            # Token could be a regular JWT or an OTP-specific token
-            if "otp_id" in payload:
-                otp_id = payload["otp_id"]
-            elif "user_id" in payload:
-                pending = db.get_pending_otp(payload["user_id"])
-                if pending:
-                    otp_id = pending["id"]
+        if api_key:
+            # Mode 1: API key from phone shortcut
+            user = db.get_user_by_api_key(api_key)
+            if not user:
+                return JSONResponse({"error": "Invalid API key"}, 401)
+            pending = db.get_pending_otp(user["id"])
+            if pending:
+                otp_id = pending["id"]
         else:
-            # Mode 1 or 2: JWT auth from header
+            # Mode 2: JWT auth from header
             try:
                 user = get_current_user(request)
             except HTTPException:
-                return JSONResponse({"error": "Authentication required (JWT or token query param)"}, 401)
+                return JSONResponse({"error": "Authentication required (API key or JWT)"}, 401)
             try:
                 body = await request.json()
             except Exception:

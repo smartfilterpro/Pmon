@@ -154,6 +154,11 @@ def _migrate(conn: sqlite3.Connection):
     if "approved" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
 
+    # Add api_key to user_settings
+    settings_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
+    if "api_key" not in settings_cols:
+        conn.execute("ALTER TABLE user_settings ADD COLUMN api_key TEXT DEFAULT ''")
+
     # Add card fields to retailer_accounts
     acct_cols = {row[1] for row in conn.execute("PRAGMA table_info(retailer_accounts)").fetchall()}
     if "card_cvv" not in acct_cols:
@@ -472,6 +477,34 @@ def delete_retailer_session(user_id: int, retailer: str):
         (user_id, retailer),
     )
     db.commit()
+
+
+# --- API key operations ---
+
+def generate_api_key(user_id: int) -> str:
+    """Generate and store a new API key for the user."""
+    import secrets
+    key = secrets.token_urlsafe(32)
+    db = get_db()
+    db.execute(
+        "UPDATE user_settings SET api_key = ? WHERE user_id = ?",
+        (key, user_id),
+    )
+    db.commit()
+    return key
+
+
+def get_user_by_api_key(api_key: str) -> dict | None:
+    """Look up a user by their API key. Returns user dict or None."""
+    if not api_key:
+        return None
+    db = get_db()
+    row = db.execute(
+        "SELECT u.* FROM users u JOIN user_settings s ON u.id = s.user_id "
+        "WHERE s.api_key = ? AND s.api_key != ''",
+        (api_key,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # --- OTP relay operations ---
