@@ -847,6 +847,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com"]
                 landed_on_login = any(ind in current_url.lower() for ind in login_indicators)
 
+                # Walmart: verifyToken means OAuth completed — NOT a login page
+                if retailer == "walmart" and ("verifytoken" in current_url.lower() or "action=signin" in current_url.lower()):
+                    landed_on_login = False
+
                 # Check for bot-block pages (URL or page content)
                 if "blocked" in current_url or "captcha" in current_url or "challenge" in current_url:
                     landed_on_login = False
@@ -1151,6 +1155,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         login_path_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com"]
                         still_on_login_after_email = any(ind in post_submit_url.lower() for ind in login_path_indicators)
 
+                        # Walmart: verifyToken/action=SignIn means OAuth succeeded
+                        if retailer == "walmart" and still_on_login_after_email:
+                            if "verifytoken" in post_submit_url.lower() or "action=signin" in post_submit_url.lower():
+                                still_on_login_after_email = False
+
                         if not still_on_login_after_email:
                             logger.info("Test login %s: navigated away from login after email submit (URL: %s) — checking if logged in", retailer_name, post_submit_url)
                             # Check for success indicators on the page we landed on
@@ -1416,13 +1425,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             return {"ok": False, "message": msg}
 
                 # Wait for login to complete via network monitoring instead of fixed 5s
-                # Start monitoring for Target's OAuth token validation
+                # Monitors both Target OAuth (token_validations) and Walmart OAuth (verifyToken)
                 net_monitor = NetworkMonitor(page)
                 await net_monitor.start()
                 pre_submit_url = page.url
 
                 # Give the OAuth flow time to complete
-                login_done = await net_monitor.wait_for_login_complete(timeout=15000)
+                login_done = await net_monitor.wait_for_login_complete(timeout=15000, retailer=retailer)
                 if not login_done:
                     # Fallback: wait for URL change
                     await wait_for_url_change(page, pre_submit_url, timeout=10000)
@@ -1441,6 +1450,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 logger.info("Test login %s: final URL after submit: %s", retailer_name, final_url)
 
                 still_on_login = "/login" in final_url or "/signin" in final_url or "/sign-in" in final_url or "/identity" in final_url
+
+                # Walmart-specific: /account/verifyToken redirect or ?action=SignIn means
+                # OAuth code exchange succeeded — treat as login success
+                if retailer == "walmart" and still_on_login:
+                    if "verifyToken" in final_url or "action=SignIn" in final_url:
+                        still_on_login = False
+                        logger.info("Test login %s: Walmart OAuth verifyToken/SignIn detected in URL", retailer_name)
 
                 # If we navigated away from the login page, that's a strong success signal
                 if not still_on_login:
