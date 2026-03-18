@@ -511,6 +511,8 @@ class CheckoutEngine:
                         card_exp_month=acct.get("card_exp_month", ""),
                         card_exp_year=acct.get("card_exp_year", ""),
                         card_name=acct.get("card_name", ""),
+                        phone_last4=acct.get("phone_last4", ""),
+                        account_last_name=acct.get("account_last_name", ""),
                     )
             except Exception as exc:
                 logger.debug("Failed to load DB credentials for %s: %s", retailer, exc)
@@ -2286,6 +2288,108 @@ class CheckoutEngine:
 
         logger.info("PKC checkout: payment form filled")
 
+    async def _bestbuy_handle_verification(self, page, creds: AccountCredentials, profile: Profile):
+        """Handle Best Buy's identity verification step.
+
+        After submitting the email, Best Buy may ask for the last 4 digits of
+        the phone number on the account and the account holder's last name
+        before showing the password field.
+        """
+        # Detect the verification page — look for phone last 4 or last name fields
+        verification_selectors = (
+            'input[id*="phone" i], input[name*="phone" i], '
+            'input[id*="last4" i], input[name*="last4" i], '
+            'input[id*="lastDigits" i], input[name*="lastDigits" i], '
+            'input[id*="phoneLast" i], input[name*="phoneLast" i]'
+        )
+        last_name_selectors = (
+            'input[id*="lastName" i], input[name*="lastName" i], '
+            'input[id*="last_name" i], input[name*="last_name" i], '
+            'input[id*="familyName" i], input[name*="familyName" i]'
+        )
+
+        phone_field_found = False
+        try:
+            phone_loc = page.locator(verification_selectors)
+            phone_field_found = await phone_loc.first.is_visible(timeout=3000)
+        except Exception:
+            pass
+
+        if not phone_field_found:
+            # Also check via vision if there's a verification prompt
+            screenshot = await self._screenshot_b64(page)
+            answer = self._ask_vision(
+                screenshot,
+                'Does this page ask for "last 4 digits of phone number" and/or "last name" '
+                'as an identity verification step? Return ONLY JSON: '
+                '{"verification": true/false, "phone_field": {"x": N, "y": N}, "last_name_field": {"x": N, "y": N}, "submit": {"x": N, "y": N}}. '
+                'Use null coordinates if a field is not visible.',
+            )
+            if answer:
+                try:
+                    result = json.loads(answer.strip())
+                    if result.get("verification"):
+                        phone_last4 = creds.phone_last4 or (profile.phone[-4:] if len(profile.phone) >= 4 else "")
+                        last_name = creds.account_last_name or profile.last_name
+
+                        if not phone_last4 or not last_name:
+                            logger.warning("Best Buy verification: missing phone_last4 or last_name — cannot complete verification")
+                            return
+
+                        # Fill phone last 4 via vision coordinates
+                        phone_coords = result.get("phone_field", {})
+                        if phone_coords.get("x") is not None:
+                            await human_click(page, int(phone_coords["x"]), int(phone_coords["y"]))
+                            await random_delay(page, 100, 250)
+                            await human_type(page, phone_last4)
+                            await random_delay(page, 300, 600)
+
+                        # Fill last name via vision coordinates
+                        name_coords = result.get("last_name_field", {})
+                        if name_coords.get("x") is not None:
+                            await human_click(page, int(name_coords["x"]), int(name_coords["y"]))
+                            await random_delay(page, 100, 250)
+                            await human_type(page, last_name)
+                            await random_delay(page, 300, 600)
+
+                        # Submit
+                        submit_coords = result.get("submit", {})
+                        if submit_coords.get("x") is not None:
+                            await human_click(page, int(submit_coords["x"]), int(submit_coords["y"]))
+                        else:
+                            await self._multi_strategy_click(page, "Continue", [
+                                "Continue", "Verify", "Submit", "Next",
+                            ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Verify")')
+                        await wait_for_page_ready(page, timeout=10000)
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    logger.warning("Best Buy verification vision parse error: %s", e)
+            return
+
+        # Selector-based verification flow
+        phone_last4 = creds.phone_last4 or (profile.phone[-4:] if len(profile.phone) >= 4 else "")
+        last_name = creds.account_last_name or profile.last_name
+
+        if not phone_last4 or not last_name:
+            logger.warning("Best Buy verification: missing phone_last4 (%s) or last_name (%s)", bool(phone_last4), bool(last_name))
+            return
+
+        logger.info("Best Buy: identity verification step detected — filling phone last 4 + last name")
+
+        # Fill phone last 4 digits
+        await self._smart_fill(page, "phone last 4 digits", verification_selectors, phone_last4)
+        await random_delay(page, 300, 600)
+
+        # Fill last name
+        await self._smart_fill(page, "last name", last_name_selectors, last_name)
+        await random_delay(page, 300, 600)
+
+        # Submit verification
+        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+        await self._multi_strategy_click(page, "Continue", [
+            "Continue", "Verify", "Submit", "Next",
+        ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Verify")')
+        await wait_for_page_ready(page, timeout=10000)
+
     async def _checkout_bestbuy(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials, dry_run: bool = False
     ) -> CheckoutResult:
@@ -2348,12 +2452,26 @@ class CheckoutEngine:
                 page, "email", 'input#fld-e, input[id="user.emailAddress"], input[type="email"], input[name="email"]', creds.email, timeout=3000,
             )
             if email_filled:
-                await self._smart_fill(page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password)
+                # Submit email first (Best Buy uses multi-step sign-in)
                 await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
-                await self._multi_strategy_click(page, "Sign In", [
-                    "Sign In", "Log In", "Continue",
-                ], 'button[type="submit"], button:has-text("Sign In")')
+                await self._multi_strategy_click(page, "Continue", [
+                    "Continue", "Sign In", "Next",
+                ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Sign In")')
                 await wait_for_page_ready(page, timeout=10000)
+
+                # Handle Best Buy identity verification step (phone last 4 + last name)
+                await self._bestbuy_handle_verification(page, creds, profile)
+
+                # Now look for the password field
+                pass_filled = await self._smart_fill(
+                    page, "password", 'input#fld-p1, input[type="password"], input[name="password"]', creds.password, timeout=5000,
+                )
+                if pass_filled:
+                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                    await self._multi_strategy_click(page, "Sign In", [
+                        "Sign In", "Log In", "Continue",
+                    ], 'button[type="submit"], button:has-text("Sign In")')
+                    await wait_for_page_ready(page, timeout=10000)
             else:
                 # Try full vision-assisted sign-in
                 await self._smart_sign_in(page, creds, "bestbuy")

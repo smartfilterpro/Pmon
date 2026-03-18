@@ -73,6 +73,8 @@ class AccountCredentials:
     card_exp_month: str = ""
     card_exp_year: str = ""
     card_name: str = ""
+    phone_last4: str = ""
+    account_last_name: str = ""
 
 
 @dataclass

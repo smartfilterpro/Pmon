@@ -154,6 +154,10 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE retailer_accounts ADD COLUMN card_exp_year TEXT DEFAULT ''")
     if "card_name" not in acct_cols:
         conn.execute("ALTER TABLE retailer_accounts ADD COLUMN card_name TEXT DEFAULT ''")
+    if "phone_last4" not in acct_cols:
+        conn.execute("ALTER TABLE retailer_accounts ADD COLUMN phone_last4 TEXT DEFAULT ''")
+    if "account_last_name" not in acct_cols:
+        conn.execute("ALTER TABLE retailer_accounts ADD COLUMN account_last_name TEXT DEFAULT ''")
 
     conn.commit()
 
@@ -315,35 +319,42 @@ def get_retailer_accounts(user_id: int) -> dict[str, dict]:
 def set_retailer_account(user_id: int, retailer: str, email: str, password: str,
                          card_cvv: str = "", card_number: str = "",
                          card_exp_month: str = "", card_exp_year: str = "",
-                         card_name: str = ""):
+                         card_name: str = "", phone_last4: str = "",
+                         account_last_name: str = ""):
     db = get_db()
     if password:
         db.execute(
             """INSERT INTO retailer_accounts (user_id, retailer, email, password, card_cvv,
-                   card_number, card_exp_month, card_exp_year, card_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   card_number, card_exp_month, card_exp_year, card_name,
+                   phone_last4, account_last_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, retailer) DO UPDATE SET
                  email=excluded.email, password=excluded.password,
                  card_cvv=CASE WHEN excluded.card_cvv != '' THEN excluded.card_cvv ELSE retailer_accounts.card_cvv END,
                  card_number=CASE WHEN excluded.card_number != '' THEN excluded.card_number ELSE retailer_accounts.card_number END,
                  card_exp_month=CASE WHEN excluded.card_exp_month != '' THEN excluded.card_exp_month ELSE retailer_accounts.card_exp_month END,
                  card_exp_year=CASE WHEN excluded.card_exp_year != '' THEN excluded.card_exp_year ELSE retailer_accounts.card_exp_year END,
-                 card_name=CASE WHEN excluded.card_name != '' THEN excluded.card_name ELSE retailer_accounts.card_name END""",
-            (user_id, retailer, email, password, card_cvv, card_number, card_exp_month, card_exp_year, card_name),
+                 card_name=CASE WHEN excluded.card_name != '' THEN excluded.card_name ELSE retailer_accounts.card_name END,
+                 phone_last4=CASE WHEN excluded.phone_last4 != '' THEN excluded.phone_last4 ELSE retailer_accounts.phone_last4 END,
+                 account_last_name=CASE WHEN excluded.account_last_name != '' THEN excluded.account_last_name ELSE retailer_accounts.account_last_name END""",
+            (user_id, retailer, email, password, card_cvv, card_number, card_exp_month, card_exp_year, card_name, phone_last4, account_last_name),
         )
     else:
         db.execute(
             """INSERT INTO retailer_accounts (user_id, retailer, email, password, card_cvv,
-                   card_number, card_exp_month, card_exp_year, card_name)
-               VALUES (?, ?, ?, '', ?, ?, ?, ?, ?)
+                   card_number, card_exp_month, card_exp_year, card_name,
+                   phone_last4, account_last_name)
+               VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, retailer) DO UPDATE SET
                  email=excluded.email,
                  card_cvv=CASE WHEN excluded.card_cvv != '' THEN excluded.card_cvv ELSE retailer_accounts.card_cvv END,
                  card_number=CASE WHEN excluded.card_number != '' THEN excluded.card_number ELSE retailer_accounts.card_number END,
                  card_exp_month=CASE WHEN excluded.card_exp_month != '' THEN excluded.card_exp_month ELSE retailer_accounts.card_exp_month END,
                  card_exp_year=CASE WHEN excluded.card_exp_year != '' THEN excluded.card_exp_year ELSE retailer_accounts.card_exp_year END,
-                 card_name=CASE WHEN excluded.card_name != '' THEN excluded.card_name ELSE retailer_accounts.card_name END""",
-            (user_id, retailer, email, card_cvv, card_number, card_exp_month, card_exp_year, card_name),
+                 card_name=CASE WHEN excluded.card_name != '' THEN excluded.card_name ELSE retailer_accounts.card_name END,
+                 phone_last4=CASE WHEN excluded.phone_last4 != '' THEN excluded.phone_last4 ELSE retailer_accounts.phone_last4 END,
+                 account_last_name=CASE WHEN excluded.account_last_name != '' THEN excluded.account_last_name ELSE retailer_accounts.account_last_name END""",
+            (user_id, retailer, email, card_cvv, card_number, card_exp_month, card_exp_year, card_name, phone_last4, account_last_name),
         )
     db.commit()
 
