@@ -461,7 +461,11 @@ async def sweep_popups(page, *, use_js_fallback: bool = True) -> int:
             try:
                 btn = page.locator(sel).first
                 if await btn.is_visible(timeout=400):
-                    await btn.click(timeout=2000)
+                    # Use human-like click to avoid bot detection on popup dismissal
+                    clicked = await human_click_element(page, btn, timeout=2000)
+                    if not clicked:
+                        # Fallback to direct click if human click fails (e.g. overlay)
+                        await btn.click(timeout=2000)
                     logger.info("Popup sweep: dismissed %s via '%s'", description, sel)
                     dismissed += 1
                     found_this_round = True
