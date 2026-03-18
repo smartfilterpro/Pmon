@@ -273,6 +273,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "email": acc["email"],
                 "has_password": bool(acc["password"]),
                 "has_cvv": bool(acc.get("card_cvv")),
+                "has_phone_last4": bool(acc.get("phone_last4")),
+                "has_account_last_name": bool(acc.get("account_last_name")),
             }
         return {"accounts": safe}
 
@@ -283,9 +285,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         email = data.get("email", "").strip()
         password = data.get("password", "")
         card_cvv = data.get("card_cvv", "").strip()
+        phone_last4 = data.get("phone_last4", "").strip()
+        account_last_name = data.get("account_last_name", "").strip()
         if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
-        db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv)
+        db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv,
+                                phone_last4=phone_last4, account_last_name=account_last_name)
         return {"ok": True}
 
     @app.post("/api/accounts/test")
@@ -403,6 +408,126 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         except Exception as exc:
             logger.error("Walmart session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
+
+    async def _bestbuy_test_verification(page, user: dict, email_sel: str, pass_sel: str,
+                                          vision_fill, vision_click, vision_read_page):
+        """Handle Best Buy's identity verification step during test login.
+
+        After submitting email, Best Buy may ask for last 4 digits of phone
+        and last name before showing the password field.
+        """
+        from pmon.checkout.human_behavior import (
+            human_click_element, human_type, random_delay, wait_for_button_enabled, wait_for_page_ready,
+        )
+
+        # Check if verification fields are visible
+        phone_selectors = (
+            'input[id*="phone" i], input[name*="phone" i], '
+            'input[id*="last4" i], input[name*="last4" i], '
+            'input[id*="lastDigits" i], input[name*="lastDigits" i], '
+            'input[id*="phoneLast" i], input[name*="phoneLast" i]'
+        )
+        last_name_selectors = (
+            'input[id*="lastName" i], input[name*="lastName" i], '
+            'input[id*="last_name" i], input[name*="last_name" i], '
+            'input[id*="familyName" i], input[name*="familyName" i]'
+        )
+
+        # First check: is the password field already visible? If so, no verification needed.
+        try:
+            if await page.locator(pass_sel).first.is_visible(timeout=1500):
+                return
+        except Exception:
+            pass
+
+        phone_field_found = False
+        try:
+            phone_loc = page.locator(phone_selectors)
+            phone_field_found = await phone_loc.first.is_visible(timeout=3000)
+        except Exception:
+            pass
+
+        if not phone_field_found:
+            # Check via page text if there's a verification prompt
+            try:
+                body_text = await page.locator("body").first.inner_text(timeout=2000)
+                body_lower = (body_text or "").lower()
+                if "last 4 digits" not in body_lower and "verify your identity" not in body_lower:
+                    return  # No verification step detected
+                # Text suggests verification but selectors didn't find fields — try vision
+                phone_field_found = True
+            except Exception:
+                return
+
+        # Load verification data from the user's stored account
+        accounts = db.get_retailer_accounts(user["id"])
+        acc = accounts.get("bestbuy", {})
+        phone_last4 = acc.get("phone_last4", "")
+        account_last_name = acc.get("account_last_name", "")
+
+        if not phone_last4 or not account_last_name:
+            logger.warning("Best Buy test login: verification step detected but phone_last4 or account_last_name not configured")
+            return
+
+        logger.info("Best Buy test login: identity verification step detected — filling phone last 4 + last name")
+
+        # Fill phone last 4
+        filled_phone = False
+        try:
+            phone_loc = page.locator(phone_selectors).first
+            if await phone_loc.is_visible(timeout=2000):
+                await human_click_element(page, phone_loc)
+                await random_delay(page, 100, 250)
+                await human_type(page, phone_last4)
+                filled_phone = True
+        except Exception:
+            pass
+        if not filled_phone:
+            await vision_fill(page, "last 4 digits of phone number input", phone_last4)
+
+        await random_delay(page, 300, 600)
+
+        # Fill last name
+        filled_name = False
+        try:
+            name_loc = page.locator(last_name_selectors).first
+            if await name_loc.is_visible(timeout=2000):
+                await human_click_element(page, name_loc)
+                await random_delay(page, 100, 250)
+                await human_type(page, account_last_name)
+                filled_name = True
+        except Exception:
+            pass
+        if not filled_name:
+            await vision_fill(page, "last name input", account_last_name)
+
+        await random_delay(page, 300, 600)
+
+        # Submit verification
+        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+        submit_clicked = False
+        for btn_text in ["Continue", "Verify", "Submit", "Next"]:
+            try:
+                btn = page.get_by_role("button", name=btn_text, exact=False)
+                if await btn.first.is_visible(timeout=500):
+                    await btn.first.click()
+                    submit_clicked = True
+                    break
+            except Exception:
+                continue
+        if not submit_clicked:
+            try:
+                submit_btn = page.locator('button[type="submit"]')
+                if await submit_btn.first.is_visible(timeout=1000):
+                    await submit_btn.first.click()
+                    submit_clicked = True
+            except Exception:
+                pass
+        if not submit_clicked:
+            await vision_click(page, "Continue or Verify button")
+
+        await wait_for_page_ready(page, timeout=10000)
+        logger.info("Best Buy test login: verification step submitted")
 
     async def _test_login_browser(retailer: str, email: str, password: str, user: dict):
         """Test retailer login using Playwright browser automation."""
@@ -1106,6 +1231,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         pass
                         except Exception:
                             pass
+
+                    # --- Best Buy identity verification step ---
+                    # After submitting email, Best Buy may ask for last 4 digits of phone
+                    # and last name before showing the password field.
+                    if retailer == "bestbuy":
+                        await _bestbuy_test_verification(page, user, email_sel, pass_sel, vision_fill, vision_click, vision_read_page)
 
                     # Some sites show an auth method picker before the password field:
                     # - Target: links/buttons "Enter your password", "Use a passkey", "Get a code"

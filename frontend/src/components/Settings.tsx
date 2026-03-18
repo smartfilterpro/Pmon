@@ -27,11 +27,13 @@ export default function Settings({ user }: Props) {
   const [saved, setSaved] = useState(false);
 
   // Retailer accounts
-  const [accounts, setAccounts] = useState<Record<string, { email: string; has_password: boolean; has_cvv: boolean }>>({});
+  const [accounts, setAccounts] = useState<Record<string, { email: string; has_password: boolean; has_cvv: boolean; has_phone_last4: boolean; has_account_last_name: boolean }>>({});
   const [editRetailer, setEditRetailer] = useState('');
   const [retailerEmail, setRetailerEmail] = useState('');
   const [retailerPassword, setRetailerPassword] = useState('');
   const [retailerCvv, setRetailerCvv] = useState('');
+  const [retailerPhoneLast4, setRetailerPhoneLast4] = useState('');
+  const [retailerAccountLastName, setRetailerAccountLastName] = useState('');
   const [accountSaved, setAccountSaved] = useState('');
 
   // Test login
@@ -76,11 +78,13 @@ export default function Settings({ user }: Props) {
 
   const handleSaveAccount = async () => {
     if (!editRetailer) return;
-    await setAccount(editRetailer, retailerEmail, retailerPassword, retailerCvv);
+    await setAccount(editRetailer, retailerEmail, retailerPassword, retailerCvv, retailerPhoneLast4, retailerAccountLastName);
     setAccountSaved(editRetailer);
     setTimeout(() => setAccountSaved(''), 2000);
     setRetailerPassword('');
     setRetailerCvv('');
+    setRetailerPhoneLast4('');
+    setRetailerAccountLastName('');
     const data = await getAccounts();
     setAccounts(data.accounts || {});
   };
@@ -131,6 +135,8 @@ export default function Settings({ user }: Props) {
     setRetailerEmail(acc?.email || '');
     setRetailerPassword('');
     setRetailerCvv('');
+    setRetailerPhoneLast4('');
+    setRetailerAccountLastName('');
   };
 
   const handleImportCookies = async () => {
@@ -212,7 +218,7 @@ export default function Settings({ user }: Props) {
                 <div className="retailer-info">
                   <strong>{r.name}</strong>
                   {acc?.email ? (
-                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}{acc.has_password && !acc.has_cvv && (r.id === 'target' || r.id === 'walmart' || r.id === 'bestbuy') ? ' — missing CVV' : ''}</span>
+                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}{acc.has_password && !acc.has_cvv && (r.id === 'target' || r.id === 'walmart' || r.id === 'bestbuy') ? ' — missing CVV' : ''}{r.id === 'bestbuy' && acc.has_password && (!acc.has_phone_last4 || !acc.has_account_last_name) ? ' — missing verification info' : ''}</span>
                   ) : (
                     <span className="retailer-none">Not configured</span>
                   )}
@@ -266,6 +272,24 @@ export default function Settings({ user }: Props) {
                   maxLength={4}
                   style={{ maxWidth: '120px' }} />
               </div>
+            )}
+            {editRetailer === 'bestbuy' && (
+              <>
+                <div className="setting-field">
+                  <label>Phone Last 4 Digits {accounts[editRetailer]?.has_phone_last4 ? '(saved — leave blank to keep current)' : '(for sign-in verification)'}</label>
+                  <input type="text" inputMode="numeric" pattern="[0-9]*" value={retailerPhoneLast4}
+                    onChange={e => setRetailerPhoneLast4(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    placeholder={accounts[editRetailer]?.has_phone_last4 ? 'Leave blank to keep current' : 'Last 4 digits of phone on account'}
+                    maxLength={4}
+                    style={{ maxWidth: '120px' }} />
+                </div>
+                <div className="setting-field">
+                  <label>Account Last Name {accounts[editRetailer]?.has_account_last_name ? '(saved — leave blank to keep current)' : '(for sign-in verification)'}</label>
+                  <input type="text" value={retailerAccountLastName}
+                    onChange={e => setRetailerAccountLastName(e.target.value)}
+                    placeholder={accounts[editRetailer]?.has_account_last_name ? 'Leave blank to keep current' : 'Last name on Best Buy account'} />
+                </div>
+              </>
             )}
             <div className="retailer-edit-actions">
               <button className="save-btn" onClick={handleSaveAccount}>
