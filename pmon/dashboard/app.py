@@ -1906,40 +1906,49 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.post("/api/otp/submit")
     async def api_submit_otp(request: Request):
-        """Submit an OTP code. Supports two modes:
-        1. Authenticated (JWT) — pass {otp_id, code} in body
-        2. Token-based (phone shortcut) — pass ?token=<otp_token>&code=<code> as query params
+        """Submit an OTP code. Supports three modes:
+        1. JWT + code only — pass {code} in body (auto-finds pending OTP)
+        2. JWT + explicit — pass {otp_id, code} in body
+        3. Token query params — pass ?token=<jwt>&code=<code> (for phone shortcuts)
         """
-        # Try query-param token mode first (for phone shortcuts)
-        token = request.query_params.get("token")
         code = request.query_params.get("code", "").strip()
+        token = request.query_params.get("token", "").strip()
         otp_id = None
 
-        if token:
-            # Decode the OTP token to get the otp_id
+        if token and code:
+            # Mode 3: Phone shortcut — token is the user's JWT, code is query param
             payload = decode_token(token)
-            if not payload or "otp_id" not in payload:
-                return JSONResponse({"error": "Invalid or expired OTP token"}, 401)
-            otp_id = payload["otp_id"]
-            if not code:
-                # Also check body
-                try:
-                    body = await request.json()
-                    code = body.get("code", "").strip()
-                except Exception:
-                    pass
+            if not payload:
+                return JSONResponse({"error": "Invalid or expired token"}, 401)
+            # Token could be a regular JWT or an OTP-specific token
+            if "otp_id" in payload:
+                otp_id = payload["otp_id"]
+            elif "user_id" in payload:
+                pending = db.get_pending_otp(payload["user_id"])
+                if pending:
+                    otp_id = pending["id"]
         else:
-            # Authenticated mode — require JWT
+            # Mode 1 or 2: JWT auth from header
             try:
                 user = get_current_user(request)
             except HTTPException:
-                return JSONResponse({"error": "Authentication required (JWT or OTP token)"}, 401)
-            body = await request.json()
+                return JSONResponse({"error": "Authentication required (JWT or token query param)"}, 401)
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            code = code or body.get("code", "").strip()
             otp_id = body.get("otp_id")
-            code = body.get("code", "").strip()
+            # Auto-find pending OTP if otp_id not provided
+            if not otp_id:
+                pending = db.get_pending_otp(user["id"])
+                if pending:
+                    otp_id = pending["id"]
 
-        if not otp_id or not code:
-            return JSONResponse({"error": "otp_id and code required"}, 400)
+        if not code:
+            return JSONResponse({"error": "code is required"}, 400)
+        if not otp_id:
+            return JSONResponse({"error": "No pending OTP request found"}, 404)
 
         # Strip spaces/dashes from code
         code = code.replace(" ", "").replace("-", "")
