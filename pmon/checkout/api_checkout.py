@@ -805,6 +805,9 @@ class ApiCheckout:
             if resp.status_code == 200:
                 logger.info("Walmart: session is valid (bootstrap OK)")
                 return True
+            if resp.status_code == 429:
+                logger.warning("Walmart: rate limited (429) during session validation")
+                return False
 
             # Fallback: try GraphQL cart query
             cart_resp = await client.post(
