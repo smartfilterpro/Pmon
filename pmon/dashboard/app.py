@@ -464,6 +464,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             pass
 
         if not phone_field_found:
+            # Check if auth picker or OTP page is visible instead — skip verification
+            try:
+                picker_visible = await page.locator(
+                    'text=/choose.*sign.?in/i, text=/use password/i, '
+                    'text=/one-time code/i, label:has-text("Use password")'
+                ).first.is_visible(timeout=500)
+                if picker_visible:
+                    logger.info("Best Buy test: auth picker visible, skipping verification")
+                    return
+            except Exception:
+                pass
+
             # Check via page text if there's a verification prompt
             try:
                 body_text = await page.locator("body").first.inner_text(timeout=2000)
@@ -1391,7 +1403,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
                         pass_found = True
                     except Exception:
-                        pass
+                        # Password field didn't appear — verification may show after auth picker
+                        if retailer == "bestbuy":
+                            await _bestbuy_test_verification(page, user, email_sel, pass_sel, vision_fill, vision_click, vision_read_page)
+                            try:
+                                await page.locator(pass_sel).first.wait_for(state="visible", timeout=5000)
+                                pass_found = True
+                            except Exception:
+                                pass
 
                     if pass_found:
                         # Click the password field to focus it, then type — human-like
