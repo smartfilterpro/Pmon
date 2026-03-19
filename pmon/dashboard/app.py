@@ -771,7 +771,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "target": None,
             "walmart": "https://identity.walmart.com/signin",
             "bestbuy": "https://www.bestbuy.com/identity/global/signin",
-            "pokemoncenter": "https://www.pokemoncenter.com/account/login",
+            # Pokemon Center: login is a modal on the homepage, NOT a standalone
+            # page.  Navigating to /account/login triggers the WAF block page.
+            # Use None to force the homepage → click-sign-in-link approach.
+            "pokemoncenter": None,
         }
 
         # Fallback: navigate to homepage and click sign-in link if direct URL fails

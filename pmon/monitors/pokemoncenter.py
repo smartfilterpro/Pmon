@@ -17,15 +17,24 @@ logger = logging.getLogger(__name__)
 class PokemonCenterMonitor(BaseMonitor):
     retailer_name = "pokemoncenter"
 
+    # Pokemon Center aggressively blocks rapid requests — their WAF flags IPs
+    # after just a few hits and serves a "unusual activity" block page.
+    # Use a higher interval than the 2s default to stay under the radar.
+    _min_request_interval: float = 8.0
+
     async def check_stock(self, url: str, product_name: str) -> StockResult:
         client = await self.get_client()
 
-        # Try API/JSON approach first, fall back to HTML scraping
+        # Try API/JSON approach first — this fetches the page and parses
+        # embedded JSON data.  If it can't determine status, _last_html is
+        # saved so the HTML fallback can reuse it without a second request.
+        self._last_html: str | None = None
         result = await self._check_stock_api(client, url, product_name)
         if result and result.status != StockStatus.ERROR:
             return result
 
-        # Fallback to HTML scraping
+        # Fallback to HTML scraping — reuses _last_html to avoid a duplicate
+        # request that doubles our fingerprint with Pokemon Center's WAF.
         return await self._check_stock_html(client, url, product_name)
 
     async def _check_stock_api(self, client, url: str, product_name: str) -> StockResult | None:
@@ -33,28 +42,44 @@ class PokemonCenterMonitor(BaseMonitor):
         try:
             resp = await client.get(url)
 
-            # Detect block page
+            # Detect block page — trigger exponential backoff so we stop
+            # hammering the blocked endpoint and making the IP ban worse.
             if resp.status_code == 403:
+                self.record_rate_limit()
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.ERROR,
-                    error_message="Access blocked (403) — IP may be flagged",
+                    error_message="Access blocked (403) — IP may be flagged, backing off",
+                )
+
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                self.record_rate_limit(float(retry_after) if retry_after else None)
+                return StockResult(
+                    url=url,
+                    retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.ERROR,
+                    error_message="Rate limited (429) — backing off",
                 )
 
             resp.raise_for_status()
             html = resp.text
+            # Cache for HTML fallback so we don't make a second request
+            self._last_html = html
 
-            # Check for bot block in content
+            # Check for bot block in content (block page served as 200)
             lower = html.lower()
             if "unusual activity" in lower or "access to this page has been denied" in lower:
+                self.record_rate_limit()
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.ERROR,
-                    error_message="Access blocked — bot detection triggered",
+                    error_message="Access blocked — bot detection triggered, backing off",
                 )
 
             # Strategy 1: JSON-LD structured data (schema.org Product)
@@ -150,6 +175,8 @@ class PokemonCenterMonitor(BaseMonitor):
                             status=StockStatus.OUT_OF_STOCK,
                         )
 
+            # Request succeeded (no block), reset backoff counter
+            self.record_success()
             return None  # Couldn't determine from API data, try HTML fallback
 
         except Exception as exc:
@@ -157,12 +184,18 @@ class PokemonCenterMonitor(BaseMonitor):
             return None
 
     async def _check_stock_html(self, client, url: str, product_name: str) -> StockResult:
-        """Fallback: check stock via HTML content parsing."""
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
+        """Fallback: check stock via HTML content parsing.
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+        Reuses HTML from the API check when available to avoid a second request.
+        """
+        try:
+            html = self._last_html
+            if not html:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+
+            soup = BeautifulSoup(html, "html.parser")
 
             # Check for "Add to Cart" button
             add_to_cart = soup.find("button", string=re.compile(r"add to cart", re.I))
