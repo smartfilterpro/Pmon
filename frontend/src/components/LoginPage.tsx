@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { login, register, hasUsers } from '../hooks/useApi';
 import type { User } from '../types';
 import './LoginPage.css';
@@ -16,6 +16,8 @@ export default function LoginPage({ onLogin }: Props) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [noUsers, setNoUsers] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     hasUsers().then(has => {
@@ -25,6 +27,19 @@ export default function LoginPage({ onLogin }: Props) {
       }
     });
   }, []);
+
+  // Auto-poll: when pending approval, retry login every 5s to detect approval
+  useEffect(() => {
+    if (!pendingApproval || !username || !password) return;
+    pollRef.current = setInterval(async () => {
+      const res = await login(username, password);
+      if (!res.pending && !res.error) {
+        setPendingApproval(false);
+        onLogin({ user_id: res.user_id, username: res.username, is_admin: res.is_admin, totp_enabled: res.totp_enabled });
+      }
+    }, 5000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [pendingApproval, username, password, onLogin]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,7 +54,8 @@ export default function LoginPage({ onLogin }: Props) {
         const loginRes = await login(username, password);
         if (loginRes.error) {
           if (loginRes.pending) {
-            setError('Account created! Waiting for admin approval.');
+            setError('Account created! Waiting for admin approval — you\'ll be logged in automatically once approved.');
+            setPendingApproval(true);
           } else {
             setError(loginRes.error);
           }
@@ -53,7 +69,8 @@ export default function LoginPage({ onLogin }: Props) {
           return;
         }
         if (res.pending) {
-          setError('Account pending admin approval.');
+          setError('Account pending admin approval — you\'ll be logged in automatically once approved.');
+          setPendingApproval(true);
           return;
         }
         if (res.error) { setError(res.error); return; }
@@ -73,7 +90,7 @@ export default function LoginPage({ onLogin }: Props) {
         </p>
 
         <form onSubmit={handleSubmit}>
-          {error && <div className="login-error">{error}</div>}
+          {error && <div className={`login-error ${pendingApproval ? 'login-pending' : ''}`}>{error}</div>}
 
           <div className="field">
             <label>Username</label>

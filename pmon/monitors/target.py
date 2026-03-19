@@ -419,12 +419,18 @@ class TargetMonitor(BaseMonitor):
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        # Try to get price from embedded data for remaining strategies
+        page_price = ""
+        price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', html)
+        if price_match:
+            page_price = price_match.group(1)
+
         # Strategy 4: Text-based out-of-stock detection
         if re.search(r"(out of stock|sold out|temporarily unavailable)", html, re.I):
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK,
+                status=StockStatus.OUT_OF_STOCK, price=page_price,
             )
 
         # Strategy 5: "Add to cart" button presence
@@ -435,7 +441,7 @@ class TargetMonitor(BaseMonitor):
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.IN_STOCK, price="",
+                status=StockStatus.IN_STOCK, price=page_price,
             )
 
         return StockResult(
