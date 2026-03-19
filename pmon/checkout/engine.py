@@ -2443,8 +2443,28 @@ class CheckoutEngine:
         except Exception:
             pass
 
+        # Also check if password field or auth picker is already visible —
+        # if so, skip the expensive vision call and return immediately.
         if not phone_field_found:
-            # Also check via vision if there's a verification prompt
+            try:
+                pw_visible = await page.locator('input#fld-p1, input[type="password"]').first.is_visible(timeout=500)
+                if pw_visible:
+                    logger.info("Best Buy verification: password field already visible, skipping")
+                    return
+            except Exception:
+                pass
+            try:
+                picker_visible = await page.locator(
+                    'text=/choose.*sign.?in/i, text=/use password/i, '
+                    'text=/one-time code/i, label:has-text("Use password")'
+                ).first.is_visible(timeout=500)
+                if picker_visible:
+                    logger.info("Best Buy verification: auth picker visible, skipping verification")
+                    return
+            except Exception:
+                pass
+
+            # Vision fallback only if no other UI elements detected
             screenshot = await self._screenshot_b64(page)
             answer = self._ask_vision(
                 screenshot,
@@ -2629,9 +2649,10 @@ class CheckoutEngine:
                 # Sweep popups after email submit
                 await sweep_popups(page)
 
-                # Handle Best Buy identity verification step (phone last 4 + last name)
-                # This must happen BEFORE the auth method picker — Best Buy shows
-                # verification first, then the "Choose a sign-in method" screen.
+                # Best Buy's post-email flow varies: it may show verification
+                # (phone last 4 + last name), auth method picker, or password
+                # field directly — in any order.  Detect what's on the page and
+                # handle whichever step appears, then check again after.
                 await self._bestbuy_handle_verification(page, creds, profile)
 
                 # --- Auth method picker: Best Buy may show "Choose a sign-in method" ---
@@ -2797,6 +2818,8 @@ class CheckoutEngine:
                         logger.info("Best Buy sign-in: password field appeared after selecting 'Use password'")
                     except Exception:
                         logger.warning("Best Buy sign-in: password field did not appear after selecting 'Use password'")
+                        # Verification may appear AFTER selecting password auth method
+                        await self._bestbuy_handle_verification(page, creds, profile)
                     await random_delay(page, 300, 700)
                 else:
                     logger.warning("Best Buy sign-in: could not select password sign-in method")
