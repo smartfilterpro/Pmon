@@ -552,6 +552,52 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         await wait_for_page_ready(page, timeout=10000)
         logger.info("Best Buy test login: verification step submitted")
 
+    async def _poll_for_otp_code(otp_id: int, timeout_seconds: int = 300) -> str | None:
+        """Poll the database for a submitted OTP code.
+
+        Returns the code string if submitted, or None on timeout.
+        """
+        import asyncio
+        import time
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            code = db.get_otp_code(otp_id)
+            if code:
+                return code
+            await asyncio.sleep(3)
+        return None
+
+    async def _enter_otp_code(page, code: str):
+        """Enter an OTP code into the current page's input field and submit."""
+        from pmon.checkout.human_behavior import wait_for_page_ready
+        try:
+            otp_input = page.locator(
+                'input[type="text"], input[type="tel"], input[type="number"], '
+                'input[inputmode="numeric"], input[autocomplete="one-time-code"]'
+            ).first
+            await otp_input.click()
+            await otp_input.fill(code)
+            import asyncio
+            await asyncio.sleep(0.5)
+            # Try clicking submit/verify/continue
+            for btn_text in ["Continue", "Verify", "Submit", "Sign In"]:
+                try:
+                    btn = page.get_by_role("button", name=btn_text, exact=False)
+                    if await btn.first.is_visible(timeout=500):
+                        await btn.first.click()
+                        break
+                except Exception:
+                    continue
+            else:
+                # Fallback: click any submit button
+                try:
+                    await page.locator('button[type="submit"]').first.click()
+                except Exception:
+                    pass
+            await wait_for_page_ready(page, timeout=10000)
+        except Exception as e:
+            logger.error("Failed to enter OTP code on page: %s", e)
+
     async def _test_login_browser(retailer: str, email: str, password: str, user: dict):
         """Test retailer login using Playwright browser automation."""
         import base64
@@ -1505,21 +1551,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             if pw_option_clicked:
                                 await wait_for_page_ready(page, timeout=5000)
                             else:
-                                # Can't switch to password — create OTP request for user
+                                # Can't switch to password — wait for OTP code from user
                                 otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
-                                otp_token = create_otp_token(otp_id, user["id"], ttl_minutes=10)
-                                server_url = os.environ.get("PMON_SERVER_URL", "")
-                                return {
-                                    "ok": False,
-                                    "otp_required": True,
-                                    "otp_id": otp_id,
-                                    "otp_token": otp_token,
-                                    "submit_url": f"{server_url}/api/otp/submit?token={otp_token}&code=" if server_url else "",
-                                    "message": (
-                                        f"{retailer_name} is showing a verification code page. "
-                                        "Enter the code you receive via text in the dashboard or use your phone shortcut."
-                                    ),
-                                }
+                                logger.info("Test login %s: OTP required (pre-login), waiting for code (otp_id=%d)", retailer_name, otp_id)
+                                code = await _poll_for_otp_code(otp_id, timeout_seconds=300)
+                                if code:
+                                    await _enter_otp_code(page, code)
+                                    logger.info("Test login %s: pre-login OTP code entered", retailer_name)
+                                    # After OTP, we should be logged in — skip password entry
+                                    pw_option_clicked = True
+                                else:
+                                    db.expire_otp_request(otp_id)
+                                    return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
 
                     # Wait for password field — selectors first, then vision
                     pass_found = False
@@ -1610,20 +1653,15 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     if post_login_otp:
                         logger.warning("Test login %s: post-login OTP code requested after password accepted", retailer_name)
                         otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
-                        otp_token = create_otp_token(otp_id, user["id"], ttl_minutes=10)
-                        server_url = os.environ.get("PMON_SERVER_URL", "")
-                        return {
-                            "ok": False,
-                            "otp_required": True,
-                            "otp_id": otp_id,
-                            "otp_token": otp_token,
-                            "submit_url": f"{server_url}/api/otp/submit?token={otp_token}&code=" if server_url else "",
-                            "message": (
-                                f"{retailer_name} accepted the password but needs a verification "
-                                "code. Enter the code you receive via text in the dashboard or "
-                                "use your phone shortcut."
-                            ),
-                        }
+                        logger.info("Test login %s: OTP required (post-login), waiting for code (otp_id=%d)", retailer_name, otp_id)
+                        code = await _poll_for_otp_code(otp_id, timeout_seconds=300)
+                        if code:
+                            await _enter_otp_code(page, code)
+                            logger.info("Test login %s: post-login OTP code entered", retailer_name)
+                            await wait_for_page_ready(page, timeout=10000)
+                        else:
+                            db.expire_otp_request(otp_id)
+                            return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
 
                 # Sweep any post-login popups
                 await sweep_popups(page)

@@ -71,7 +71,7 @@ function AuthenticatedApp({ user, tab, setTab }: { user: User; tab: Tab; setTab:
         )}
         {tab === 'log' && <CheckoutLog checkouts={data?.checkouts ?? []} />}
         {tab === 'errors' && <ErrorLog />}
-        {tab === 'settings' && <Settings user={user} />}
+        {tab === 'settings' && <Settings user={user} onOtpRequired={refresh} />}
       </main>
     </div>
   );
