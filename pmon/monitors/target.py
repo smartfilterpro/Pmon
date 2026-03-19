@@ -209,7 +209,7 @@ class TargetMonitor(BaseMonitor):
                         fulfillment_result.price = result.price
                         return fulfillment_result
                     else:
-                        logger.warning("Target: pdp_client_v1 returned 200 but parse returned UNKNOWN for %s", tcin)
+                        logger.debug("Target: pdp_client_v1 returned 200 but parse returned UNKNOWN for %s", tcin)
                 elif resp.status_code == 403:
                     logger.warning("Target: pdp_client_v1 403 for %s with key ...%s", tcin, api_key[-6:])
                     self._visitor_id = uuid.uuid4().hex
@@ -219,7 +219,7 @@ class TargetMonitor(BaseMonitor):
                     logger.debug("Target: pdp_client_v1 returned 410 for %s", tcin)
                 else:
                     api_all_blocked = False
-                    logger.warning("Target: pdp_client_v1 returned %d for %s", resp.status_code, tcin)
+                    logger.debug("Target: pdp_client_v1 returned %d for %s", resp.status_code, tcin)
             except Exception as e:
                 logger.debug("Target: pdp_client_v1 failed for %s: %s", tcin, e)
 
@@ -362,7 +362,7 @@ class TargetMonitor(BaseMonitor):
             return _in_stock("broad product string search")
 
         # Nothing found → OUT_OF_STOCK
-        logger.warning(
+        logger.debug(
             "Target stock: no availability signals found for %s — returning OUT_OF_STOCK. "
             "Fulfillment keys: %s",
             product_name,
