@@ -112,7 +112,7 @@ class PokemonCenterMonitor(BaseMonitor):
                         return StockResult(
                             url=url, retailer=self.retailer_name,
                             product_name=product_name,
-                            status=StockStatus.OUT_OF_STOCK,
+                            status=StockStatus.OUT_OF_STOCK, price=price,
                         )
                 except (json.JSONDecodeError, StopIteration):
                     continue
@@ -148,6 +148,7 @@ class PokemonCenterMonitor(BaseMonitor):
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
                                 status=StockStatus.OUT_OF_STOCK,
+                                price=str(price),
                             )
                 except (json.JSONDecodeError, AttributeError):
                     pass
@@ -173,6 +174,7 @@ class PokemonCenterMonitor(BaseMonitor):
                             url=url, retailer=self.retailer_name,
                             product_name=product_name,
                             status=StockStatus.OUT_OF_STOCK,
+                            price=self._extract_price_from_html(html),
                         )
 
             # Request succeeded (no block), reset backoff counter

@@ -106,26 +106,32 @@ class BestBuyMonitor(BaseMonitor):
         client = await self.get_client()
 
         # Primary: fulfillment GraphQL endpoint (works with new PDP)
+        fulfillment_result = None
         if sku:
             try:
-                result = await self._check_fulfillment_api(url, product_name, sku, client)
-                if result.status != StockStatus.UNKNOWN:
-                    return result
+                fulfillment_result = await self._check_fulfillment_api(url, product_name, sku, client)
             except Exception as e:
                 logger.debug("Best Buy fulfillment API failed for %s: %s", sku, e)
 
-        # Secondary: priceBlocks API (legacy, still works for old SKUs)
+        # priceBlocks API — used for price even when fulfillment already got status
+        price_result = None
         if sku:
             try:
                 api_url = "https://www.bestbuy.com/api/3.0/priceBlocks"
                 params = {"skus": sku}
                 resp = await client.get(api_url, params=params)
                 if resp.status_code == 200:
-                    result = self._parse_api_response(url, product_name, resp.json())
-                    if result.status != StockStatus.UNKNOWN:
-                        return result
+                    price_result = self._parse_api_response(url, product_name, resp.json())
             except Exception as e:
                 logger.debug("Best Buy priceBlocks API failed for %s: %s", sku, e)
+
+        # Combine: use fulfillment for status, priceBlocks for price
+        if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
+            if not fulfillment_result.price and price_result and price_result.price:
+                fulfillment_result.price = price_result.price
+            return fulfillment_result
+        if price_result and price_result.status != StockStatus.UNKNOWN:
+            return price_result
 
         # Fallback: scrape the product page
         try:
@@ -218,12 +224,25 @@ class BestBuyMonitor(BaseMonitor):
                 elif isinstance(found, str):
                     state = found
 
+            # Try to extract price from fulfillment response
+            price = ""
+            price_val = self._find_in_dict(data, "currentPrice")
+            if price_val and isinstance(price_val, (int, float)):
+                price = f"${price_val}"
+            elif price_val and isinstance(price_val, str) and price_val.replace(".", "").isdigit():
+                price = f"${price_val}"
+            if not price:
+                price_val = self._find_in_dict(data, "customerPrice")
+                if isinstance(price_val, str) and "$" in price_val:
+                    price = price_val
+
             if state in ("ADD_TO_CART", "PRE_ORDER"):
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.IN_STOCK,
+                    price=price,
                 )
             elif state in ("SOLD_OUT", "UNAVAILABLE", "CHECK_STORES", "COMING_SOON", "SAVE"):
                 return StockResult(
@@ -231,16 +250,16 @@ class BestBuyMonitor(BaseMonitor):
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.OUT_OF_STOCK,
+                    price=price,
                     error_message=f"Button state: {state}" if state != "SOLD_OUT" else "",
                 )
             elif state == "RESERVATION":
-                # High Demand Product — uses reservation/invite system
-                # Treat as out of stock but with descriptive message
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.OUT_OF_STOCK,
+                    price=price,
                     error_message="High Demand Product — reservation/invite required",
                 )
             elif state:
@@ -250,6 +269,7 @@ class BestBuyMonitor(BaseMonitor):
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.OUT_OF_STOCK,
+                    price=price,
                     error_message=f"Button state: {state}",
                 )
 
@@ -289,6 +309,7 @@ class BestBuyMonitor(BaseMonitor):
                 retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.OUT_OF_STOCK,
+                price=price,
             )
         except (KeyError, TypeError, IndexError):
             return StockResult(

@@ -165,6 +165,7 @@ class WalmartMonitor(BaseMonitor):
                 retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.OUT_OF_STOCK,
+                price=self._extract_price(soup),
             )
 
         return StockResult(
