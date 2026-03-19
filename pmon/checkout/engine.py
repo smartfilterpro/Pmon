@@ -3062,6 +3062,10 @@ class CheckoutEngine:
 
                 # Sweep post-login popups
                 await sweep_popups(page)
+
+                # Save cookies immediately after sign-in so they persist
+                # even if checkout fails later (add-to-cart, queue, etc.)
+                await self._save_context(context, "bestbuy")
             else:
                 # Try full vision-assisted sign-in
                 await self._smart_sign_in(page, creds, "bestbuy")
@@ -3182,6 +3186,11 @@ class CheckoutEngine:
                 error_message=error or "Checkout flow interrupted - manual intervention needed",
             )
         except Exception as e:
+            # Save cookies even on failure so sign-in session persists
+            try:
+                await self._save_context(context, "bestbuy")
+            except Exception:
+                pass
             return CheckoutResult(
                 url=url,
                 retailer="bestbuy",
