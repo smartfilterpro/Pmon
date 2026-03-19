@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { removeProduct, toggleAutoCheckout, checkoutNow, setQuantity } from '../hooks/useApi';
-import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus, AlertTriangle } from 'lucide-react';
+import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus, AlertTriangle, DollarSign } from 'lucide-react';
 import type { Product } from '../types';
 import './ProductList.css';
 
@@ -85,10 +85,16 @@ export default function ProductList({ products, refresh }: Props) {
               <span className={`stock-badge stock-${p.status}`}>
                 {STATUS_LABELS[p.status] ?? p.status}
               </span>
-              {p.price && <span className="price">{p.price}</span>}
             </div>
 
             <h3 className="product-name">{p.name || 'Unnamed Product'}</h3>
+
+            <div className="product-meta">
+              <span className={`price-tag ${p.price ? '' : 'price-unavailable'}`}>
+                <DollarSign size={12} />
+                {p.price || 'Price unavailable'}
+              </span>
+            </div>
 
             {p.error && <p className="product-error">{p.error}</p>}
 

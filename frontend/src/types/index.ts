@@ -34,6 +34,8 @@ export interface StatusResponse {
   products: Product[];
   checkouts: CheckoutEntry[];
   pending_otp: OtpRequest | null;
+  total_spent: number;
+  spend_limit: number;
 }
 
 export interface User {

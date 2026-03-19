@@ -56,7 +56,29 @@
 .stock-error { background: rgba(255, 145, 0, 0.2); color: var(--orange); }
 .stock-unknown { background: rgba(136, 136, 136, 0.2); color: var(--text-secondary); }
 
-.price { font-size: 14px; font-weight: 700; color: var(--green); }
+.product-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.price-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--green);
+}
+.price-tag svg { opacity: 0.7; }
+
+.price-unavailable {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
 
 .product-name {
   font-size: 16px;

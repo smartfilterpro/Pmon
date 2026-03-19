@@ -177,12 +177,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if pending_otp:
             _fix_utc_timestamps(pending_otp, "created_at")
 
+        total_spent = db.get_user_total_spent(user_id)
+        settings = db.get_user_settings(user_id)
+
         return {
             "is_running": engine.state.is_running,
             "started_at": engine.state.started_at.isoformat() if engine.state.started_at else None,
             "products": product_list,
             "checkouts": checkouts,
             "pending_otp": pending_otp,
+            "total_spent": total_spent,
+            "spend_limit": settings.get("spend_limit", 0),
         }
 
     @app.post("/api/products")
@@ -1877,10 +1882,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.post("/api/settings")
     async def api_update_settings(request: Request, user: dict = Depends(get_current_user)):
         data = await request.json()
+        spend_limit = data.get("spend_limit")
+        if spend_limit is not None:
+            spend_limit = max(0, float(spend_limit))
         db.update_user_settings(
             user["id"],
             poll_interval=data.get("poll_interval"),
             discord_webhook=data.get("discord_webhook"),
+            spend_limit=spend_limit,
         )
         return {"ok": True}
 

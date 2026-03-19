@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 from datetime import datetime, timezone
 
 from pmon.config import Config, Product
@@ -17,6 +18,16 @@ from pmon.checkout.engine import CheckoutEngine
 from pmon import database as db
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_price(price_str: str) -> float:
+    """Parse a price string like '$49.99' into a float. Returns 0 if unparseable."""
+    if not price_str:
+        return 0.0
+    match = re.search(r"[\d]+(?:[.,]\d{1,2})?", price_str.replace(",", ""))
+    if match:
+        return float(match.group())
+    return 0.0
 
 
 class PmonEngine:
@@ -176,6 +187,20 @@ class PmonEngine:
                         # Auto-checkout if enabled and not already purchased
                         purchase_key = f"{user_id}:{product.url}"
                         if p["auto_checkout"] and purchase_key not in self._purchased:
+                            # Check spend limit before attempting checkout
+                            spend_limit = settings.get("spend_limit", 0)
+                            if spend_limit and spend_limit > 0:
+                                total_spent = db.get_user_total_spent(user_id)
+                                price = _parse_price(result.price)
+                                estimated_cost = price * p.get("quantity", 1)
+                                if total_spent + estimated_cost > spend_limit:
+                                    logger.warning(
+                                        f"Spend limit reached for user {user_id}: "
+                                        f"${total_spent:.2f} spent + ${estimated_cost:.2f} "
+                                        f"would exceed ${spend_limit:.2f} limit. "
+                                        f"Skipping auto-checkout for {product.name}"
+                                    )
+                                    continue
                             await self._auto_checkout_for_user(p, user_id)
 
         elif result.status == StockStatus.OUT_OF_STOCK:
@@ -210,6 +235,11 @@ class PmonEngine:
             user_id=user_id,
         )
 
+        # Calculate price amount for spend tracking
+        stock = self.state.products.get(product_row["url"])
+        price = _parse_price(stock.price if stock else "")
+        price_amount = price * product_row.get("quantity", 1)
+
         # Log to database
         db.add_checkout_log(
             user_id=user_id,
@@ -219,6 +249,7 @@ class PmonEngine:
             status=checkout_result.status.value,
             order_number=checkout_result.order_number,
             error_message=checkout_result.error_message,
+            price_amount=price_amount if checkout_result.status == CheckoutStatus.SUCCESS else 0,
         )
 
         self.state.add_checkout(checkout_result)
@@ -265,6 +296,10 @@ class PmonEngine:
         )
 
         if user_id:
+            stock = self.state.products.get(product.url)
+            price = _parse_price(stock.price if stock else "")
+            price_amount = price  # manual checkout uses product's own quantity
+
             db.add_checkout_log(
                 user_id=user_id,
                 url=product.url,
@@ -273,6 +308,7 @@ class PmonEngine:
                 status=checkout_result.status.value,
                 order_number=checkout_result.order_number,
                 error_message=checkout_result.error_message,
+                price_amount=price_amount if checkout_result.status == CheckoutStatus.SUCCESS else 0,
             )
 
             # On success: disable auto-buy to prevent duplicate orders

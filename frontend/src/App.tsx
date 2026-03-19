@@ -65,6 +65,22 @@ function AuthenticatedApp({ user, tab, setTab }: { user: User; tab: Tab; setTab:
         )}
         {tab === 'monitor' && (
           <>
+            {(data?.spend_limit ?? 0) > 0 && (
+              <div className="spend-tracker">
+                <div className="spend-tracker-label">
+                  <span>Spend: ${(data?.total_spent ?? 0).toFixed(2)} / ${(data?.spend_limit ?? 0).toFixed(2)}</span>
+                  {(data?.total_spent ?? 0) >= (data?.spend_limit ?? 0) && (
+                    <span className="spend-limit-hit">Limit reached — auto-checkout paused</span>
+                  )}
+                </div>
+                <div className="spend-bar">
+                  <div
+                    className={`spend-bar-fill ${(data?.total_spent ?? 0) >= (data?.spend_limit ?? 0) ? 'spend-bar-full' : ''}`}
+                    style={{ width: `${Math.min(100, ((data?.total_spent ?? 0) / (data?.spend_limit ?? 1)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
             <ProductList products={data?.products ?? []} refresh={refresh} />
             <AddProduct refresh={refresh} />
           </>
