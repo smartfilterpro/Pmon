@@ -108,6 +108,9 @@ class TargetMonitor(BaseMonitor):
         # --- Strategy 1: product_fulfillment_and_variation_hierarchy_v1 ---
         # This is the endpoint Target's frontend calls for fulfillment data.
         # It returns location-aware availability (shipping, pickup, delivery).
+        # Note: this endpoint often lacks price data, so we save the result
+        # and continue to pdp_client_v1 to fill in the price if needed.
+        fulfillment_result: StockResult | None = None
         for api_key in self.API_KEYS:
             fulfillment_params = {
                 "key": api_key,
@@ -143,9 +146,12 @@ class TargetMonitor(BaseMonitor):
                             "Target stock for %s: %s (via fulfillment API)",
                             product_name, result.status.value,
                         )
-                        return result
-                    # If UNKNOWN, fall through to pdp_client_v1
-                    logger.debug("Target: fulfillment API returned UNKNOWN for %s, trying pdp_client_v1", tcin)
+                        if result.price:
+                            return result
+                        # Got status but no price — save and try PDP for price
+                        fulfillment_result = result
+                    else:
+                        logger.debug("Target: fulfillment API returned UNKNOWN for %s, trying pdp_client_v1", tcin)
                     break  # Got 200, no need to try other keys for this endpoint
                 elif resp.status_code == 403:
                     logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id", tcin)
@@ -192,7 +198,16 @@ class TargetMonitor(BaseMonitor):
                     result = self._parse_pdp(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
                         logger.info("Target stock for %s: %s (via pdp_client_v1)", product_name, result.status.value)
+                        # If we had a fulfillment result with status but no price,
+                        # use the fulfillment status with the PDP price
+                        if fulfillment_result and not fulfillment_result.price and result.price:
+                            fulfillment_result.price = result.price
+                            return fulfillment_result
                         return result
+                    elif fulfillment_result and result.price:
+                        # PDP couldn't determine status but got price — merge into fulfillment result
+                        fulfillment_result.price = result.price
+                        return fulfillment_result
                     else:
                         logger.warning("Target: pdp_client_v1 returned 200 but parse returned UNKNOWN for %s", tcin)
                 elif resp.status_code == 403:
@@ -211,6 +226,10 @@ class TargetMonitor(BaseMonitor):
         if api_attempted and api_all_blocked:
             logger.warning("Target: ALL API keys blocked for %s — falling back to scrape", tcin)
 
+        # If fulfillment got a definitive status but PDP couldn't add price, return it anyway
+        if fulfillment_result:
+            return fulfillment_result
+
         # --- Strategy 3: HTML scrape ---
         logger.info("Target stock for %s: falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
@@ -220,8 +239,7 @@ class TargetMonitor(BaseMonitor):
         try:
             product = data.get("data", {}).get("product", {})
             fulfillment = product.get("fulfillment", {})
-            price_info = product.get("price", {})
-            price = price_info.get("formatted_current_price", "")
+            price = self._extract_price_from_product(product)
 
             logger.debug("Target fulfillment response keys: %s", list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A")
 
@@ -234,13 +252,33 @@ class TargetMonitor(BaseMonitor):
                 error_message=f"Could not parse fulfillment data: {e}",
             )
 
+    @staticmethod
+    def _extract_price_from_product(product: dict) -> str:
+        """Extract price from a Target product dict, trying multiple paths."""
+        price_info = product.get("price", {})
+        if isinstance(price_info, dict):
+            # formatted_current_price is the most common field
+            price = price_info.get("formatted_current_price", "")
+            if price:
+                return price
+            # Fallback: current_retail / current_retail_min
+            for key in ("current_retail", "current_retail_min"):
+                val = price_info.get(key)
+                if val is not None:
+                    return f"${val}" if not str(val).startswith("$") else str(val)
+        # Search entire product JSON for formatted_current_price as last resort
+        product_str = json.dumps(product)
+        match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', product_str)
+        if match:
+            return match.group(1)
+        return ""
+
     def _parse_pdp(self, url: str, product_name: str, data: dict) -> StockResult:
         """Parse pdp_client_v1 response for stock status."""
         try:
             product = data.get("data", {}).get("product", {})
             fulfillment = product.get("fulfillment", {})
-            price_info = product.get("price", {})
-            price = price_info.get("formatted_current_price", "")
+            price = self._extract_price_from_product(product)
 
             logger.debug("Target pdp_client_v1 fulfillment data: %s", json.dumps(fulfillment, indent=2)[:2000])
 
