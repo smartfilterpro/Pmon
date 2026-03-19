@@ -34,15 +34,25 @@ class BestBuyMonitor(BaseMonitor):
         """Extract BSIN from new Best Buy URL format.
 
         New URLs: /product/product-name/JJG2TLCK6H
+        The BSIN is always the last path segment (alphanumeric, 6-12 chars).
         """
-        match = re.search(r"/product/[^/]+/([A-Za-z0-9]{8,12})(?:\?|$|#)", url)
+        match = re.search(r"/product/[^/]+/([A-Za-z0-9]{6,12})(?:\?|$|#|/|$)", url)
+        if not match:
+            # Handle URLs that may end without query/hash
+            match = re.search(r"/product/[^/]+/([A-Za-z0-9]{6,12})\s*$", url)
         return match.group(1) if match else None
 
     async def _resolve_sku_from_page(self, url: str) -> str | None:
         """Fetch the product page and extract the SKU from embedded data.
 
-        Best Buy's Next.js pages embed product data in __NEXT_DATA__ script
-        tags and meta tags containing the numeric SKU.
+        Best Buy's Next.js PDP pages embed product data in multiple places:
+        - __NEXT_DATA__ script tags with skuId/sku fields
+        - Meta tags with SKU content
+        - Inline JSON with "skuId" or "sku" keys
+        - The page title contains "SKU: XXXXXXXX" in the page metadata
+        - GraphQL fulfillment calls reference the SKU
+
+        SKUs are typically 7-8 digits (e.g. 10890190).
         """
         client = await self.get_client()
         try:
@@ -60,6 +70,11 @@ class BestBuyMonitor(BaseMonitor):
             if match:
                 return match.group(1)
 
+            # Try SKU: XXXXXXXX pattern in page content (visible in title/meta)
+            match = re.search(r'SKU:\s*(\d{7,8})', html)
+            if match:
+                return match.group(1)
+
             # Try meta tags
             match = re.search(r'<meta[^>]*content="(\d{7,8})"[^>]*name="[^"]*sku[^"]*"', html, re.I)
             if match:
@@ -67,6 +82,11 @@ class BestBuyMonitor(BaseMonitor):
 
             # Try og:url or canonical that might have old-format URL with SKU
             match = re.search(r'/(\d{7,8})\.p', html)
+            if match:
+                return match.group(1)
+
+            # Try data attributes with SKU
+            match = re.search(r'data-sku-id="(\d{7,8})"', html)
             if match:
                 return match.group(1)
 
@@ -129,8 +149,15 @@ class BestBuyMonitor(BaseMonitor):
         """Check stock via Best Buy's fulfillment GraphQL endpoint.
 
         This is the same endpoint the PDP uses to render the Add to Cart button.
+        The PDP makes multiple fulfillment calls:
+        1. Basic: just sku + context=PDP (initial button state)
+        2. With location: sku + zipCode + storeId (full fulfillment options)
+
+        We use the basic call first since it doesn't require location data.
         """
         fulfillment_url = "https://www.bestbuy.com/gateway/graphql/fulfillment"
+
+        # Basic call — just needs SKU and context
         variables = {
             "fulfillmentOptionsInput": {
                 "sku": sku,
@@ -153,7 +180,18 @@ class BestBuyMonitor(BaseMonitor):
         return self._parse_fulfillment_response(url, product_name, data)
 
     def _parse_fulfillment_response(self, url: str, product_name: str, data: dict) -> StockResult:
-        """Parse the fulfillment GraphQL response for stock status."""
+        """Parse the fulfillment GraphQL response for stock status.
+
+        Known button states from Best Buy PDP:
+        - ADD_TO_CART: Available for purchase (including third-party sellers)
+        - SOLD_OUT: No stock anywhere
+        - UNAVAILABLE: Not available in this region/config
+        - CHECK_STORES: Might be available in stores only
+        - RESERVATION: "High Demand Product" reservation/invite system
+        - COMING_SOON: Not yet released
+        - PRE_ORDER: Available for pre-order
+        - SAVE: Wishlist only (cannot purchase)
+        """
         try:
             # Navigate the GraphQL response structure
             ff_data = data.get("data", {}).get("fulfillmentOptions", data.get("data", {}))
@@ -169,24 +207,43 @@ class BestBuyMonitor(BaseMonitor):
                     if isinstance(nested, dict):
                         state = nested.get("buttonState", {}).get("buttonState", "")
                         if state:
+                            button_state = nested.get("buttonState", {})
                             break
 
-            if state == "ADD_TO_CART":
+            # Also search recursively as a last resort
+            if not state:
+                found = self._find_in_dict(data, "buttonState")
+                if isinstance(found, dict):
+                    state = found.get("buttonState", "")
+                elif isinstance(found, str):
+                    state = found
+
+            if state in ("ADD_TO_CART", "PRE_ORDER"):
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.IN_STOCK,
                 )
-            elif state in ("SOLD_OUT", "UNAVAILABLE", "CHECK_STORES"):
+            elif state in ("SOLD_OUT", "UNAVAILABLE", "CHECK_STORES", "COMING_SOON", "SAVE"):
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.OUT_OF_STOCK,
+                    error_message=f"Button state: {state}" if state != "SOLD_OUT" else "",
+                )
+            elif state == "RESERVATION":
+                # High Demand Product — uses reservation/invite system
+                # Treat as out of stock but with descriptive message
+                return StockResult(
+                    url=url,
+                    retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.OUT_OF_STOCK,
+                    error_message="High Demand Product — reservation/invite required",
                 )
             elif state:
-                # Some other known state — log it and return OUT_OF_STOCK
                 logger.info("Best Buy fulfillment: button state = %s for %s", state, url)
                 return StockResult(
                     url=url,
@@ -284,16 +341,23 @@ class BestBuyMonitor(BaseMonitor):
                 error_message="Coming soon",
             )
 
-        # Check for invitation-only (Best Buy's Pokemon system)
-        invite = soup.find(string=re.compile(r"(get your invite|invitation)", re.I))
+        # Check for invitation-only or reservation system (Best Buy's Pokemon/high-demand system)
+        invite = soup.find(string=re.compile(r"(get your invite|invitation|reservation process)", re.I))
         if invite:
             return StockResult(
                 url=url,
                 retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.OUT_OF_STOCK,
-                error_message="Invitation-only product",
+                error_message="Invitation/reservation product",
             )
+
+        # Check for "High Demand Product" notice (visible on PDP for Pokemon items)
+        high_demand = soup.find(string=re.compile(r"high demand product", re.I))
+        if high_demand:
+            # High demand doesn't mean out of stock — it may still have "Add to cart"
+            # from third-party sellers. Continue checking for add-to-cart below.
+            logger.info("Best Buy: high demand product detected for %s", url)
 
         # Check __NEXT_DATA__ for button state (new Next.js PDP)
         next_data_match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
