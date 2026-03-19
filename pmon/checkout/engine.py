@@ -2733,9 +2733,10 @@ class CheckoutEngine:
             )
             if email_filled:
                 # Start network monitor to track login completion
+                # Best Buy patterns (bb_auth, bb_token, bb_account_menu, etc.)
+                # are pre-configured in NetworkMonitor
                 net_monitor = NetworkMonitor(page)
-                net_monitor.add_pattern("bb_auth", "/identity/authenticate")
-                net_monitor.add_pattern("bb_token", "/oauth/token")
+                net_monitor.add_pattern("bb_signin_page", "/identity/signin")
                 await net_monitor.start()
 
                 # Human-like: jitter before interacting with login form
@@ -3052,14 +3053,33 @@ class CheckoutEngine:
                     ], 'button[type="submit"], button:has-text("Sign In")')
 
                     # Wait for login to complete via network monitoring
-                    login_done = await net_monitor.wait_for("bb_auth", timeout=15000)
+                    # Uses Best Buy-specific detection: /identity/authenticate,
+                    # /oauth/token, account-menu, and welcome-back-toast signals
+                    login_done = await net_monitor.wait_for_login_complete(
+                        timeout=20000, retailer="bestbuy"
+                    )
                     if not login_done:
+                        logger.warning("Best Buy sign-in: network login signals not detected, falling back to URL change")
                         await wait_for_url_change(page, pre_url, timeout=10000)
 
                 # Check if blocked during login
                 if net_monitor.was_blocked():
                     blocked = net_monitor.get_blocked_details()
                     logger.warning("Best Buy sign-in: blocked %d request(s) during login", len(blocked))
+
+                # Check for reCAPTCHA challenge that may have fired
+                recaptcha_count = net_monitor.response_count("bb_recaptcha")
+                if recaptcha_count > 0:
+                    logger.info("Best Buy sign-in: reCAPTCHA Enterprise fired %d time(s) during login", recaptcha_count)
+
+                # Verify login success via post-login indicators
+                account_menu_loaded = net_monitor.response_count("bb_account_menu") > 0
+                welcome_back_loaded = net_monitor.response_count("bb_welcome_back") > 0
+                if account_menu_loaded or welcome_back_loaded:
+                    logger.info(
+                        "Best Buy sign-in: post-login confirmation — account_menu=%s, welcome_back=%s",
+                        account_menu_loaded, welcome_back_loaded,
+                    )
 
                 await net_monitor.stop()
 

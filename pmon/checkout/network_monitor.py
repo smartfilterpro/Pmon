@@ -56,6 +56,15 @@ class NetworkMonitor:
             "walmart_bootstrap": "orchestra/api/ccm/v3/bootstrap",
             "walmart_account_landing": "orchestra/cph/graphql/accountLandingPage",
             "walmart_cart_merge": "orchestra/cartxo/graphql/MergeAndGetCart",
+            # Best Buy OAuth & session
+            "bb_auth": "/identity/authenticate",
+            "bb_token": "/oauth/token",
+            "bb_signin_options": "/identity/signin/options",
+            "bb_account_menu": "canopy/component/shop/account-menu",
+            "bb_graphql": "/gateway/graphql",
+            "bb_recaptcha": "recaptcha/enterprise",
+            "bb_welcome_back": "canopy/component/shop/welcome-back-toast",
+            "bb_streams": "web-streams/v1/events",
             # Shared
             "cart": "web_checkouts/v1/cart",
             "px_collector": "px-cloud.net/api/v2/collector",
@@ -192,6 +201,9 @@ class NetworkMonitor:
         if retailer == "walmart":
             return await self._wait_for_walmart_login(timeout=timeout)
 
+        if retailer == "bestbuy":
+            return await self._wait_for_bestbuy_login(timeout=timeout)
+
         return await self._wait_for_target_login(timeout=timeout)
 
     async def _wait_for_target_login(self, *, timeout: int) -> bool:
@@ -249,6 +261,50 @@ class NetworkMonitor:
             logger.info(
                 "NetworkMonitor: Walmart post-login APIs detected (bootstrap=%d, account=%d, cart=%d)",
                 bootstrap_count, account_count, cart_count,
+            )
+            return True
+
+        return False
+
+    async def _wait_for_bestbuy_login(self, *, timeout: int) -> bool:
+        """Wait for Best Buy's authentication flow to complete.
+
+        Best Buy's login flow (from network analysis):
+        1. POST /identity/authenticate — primary auth call
+        2. POST /oauth/token — token exchange
+        3. GET /canopy/component/shop/account-menu — confirms session (isRecognized)
+        4. GET /canopy/component/shop/welcome-back-toast — post-login toast
+
+        The referrer after login shows: /identity/signin/options?token=tid:...
+        """
+        # Primary signal: /identity/authenticate response
+        auth_ok = await self.wait_for("bb_auth", expected_count=1, timeout=timeout)
+        if auth_ok:
+            # Wait briefly for the token exchange that follows
+            try:
+                await self.wait_for("bb_token", expected_count=1, timeout=5000)
+            except Exception:
+                pass
+            logger.info("NetworkMonitor: Best Buy /identity/authenticate seen — login complete")
+            return True
+
+        # Fallback: check for post-login API calls as indirect evidence
+        # After successful login, Best Buy loads account-menu and welcome-back-toast
+        account_menu_count = len(self._responses.get("bb_account_menu", []))
+        welcome_back_count = len(self._responses.get("bb_welcome_back", []))
+        token_count = len(self._responses.get("bb_token", []))
+
+        if token_count >= 1:
+            logger.info(
+                "NetworkMonitor: Best Buy token exchange detected (token=%d, account_menu=%d)",
+                token_count, account_menu_count,
+            )
+            return True
+
+        if account_menu_count >= 1 and welcome_back_count >= 1:
+            logger.info(
+                "NetworkMonitor: Best Buy post-login APIs detected (account_menu=%d, welcome_back=%d)",
+                account_menu_count, welcome_back_count,
             )
             return True
 
