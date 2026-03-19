@@ -395,7 +395,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     )
                     if resp.status_code != 429:
                         break
-                    delay = 2 ** (attempt + 1)  # 2, 4, 8, 16
+                    delay = 15 * (2 ** attempt)  # 15, 30, 60, 120
                     logger.info("Walmart session check: HTTP 429 (rate limited), retrying in %ds (attempt %d/4)", delay, attempt + 1)
                     await _asyncio.sleep(delay)
 
