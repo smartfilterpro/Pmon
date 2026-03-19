@@ -1016,38 +1016,62 @@ class ApiCheckout:
         )
 
     async def _pkc_sso_login(self, client: httpx.AsyncClient, creds: AccountCredentials) -> bool:
-        """Attempt Pokemon SSO login via access.pokemon.com."""
+        """Attempt Pokemon SSO login via access.pokemon.com.
+
+        IMPORTANT: Pokemon Center login is a modal on the homepage, NOT a
+        standalone page at /account/login.  Hitting /account/login directly
+        triggers their WAF and serves a block page.  Instead we load the
+        homepage to warm cookies and look for the SSO entry point there.
+        """
         if not creds.email or not creds.password:
             return False
 
         try:
-            # Step 1: Initialize SSO flow
+            # Step 1: Load homepage to warm cookies (NOT /account/login which
+            # triggers the block page / "unusual activity" WAF response).
             resp = await client.get(
-                "https://www.pokemoncenter.com/account/login",
+                "https://www.pokemoncenter.com",
                 headers={**HEADERS, "Accept": "text/html,*/*"},
             )
 
-            # Check for block page
+            # Check for block page even on homepage
             if resp.status_code == 403 or "unusual activity" in resp.text.lower():
-                logger.warning("Pokemon Center: IP blocked during login attempt")
+                logger.warning("Pokemon Center: IP blocked during homepage load")
                 return False
 
-            # Step 2: Follow SSO redirect to access.pokemon.com
-            # The login page typically redirects to Pokemon's SSO
+            # Step 2: Look for SSO redirect URL in homepage content
             sso_url = None
             if "access.pokemon.com" in resp.text or "sso.pokemon.com" in resp.text:
-                # Extract SSO URL from page
                 sso_match = re.search(r'(https://(?:access|sso)\.pokemon\.com[^"\'>\s]+)', resp.text)
                 if sso_match:
                     sso_url = sso_match.group(1)
 
+            # If the homepage doesn't embed the SSO URL, try the known
+            # auth API endpoint that the login modal calls.
+            if not sso_url:
+                # PKC's login modal POSTs to their internal auth API
+                auth_api = "https://www.pokemoncenter.com/tpci-ecommweb-api/auth/login"
+                login_resp = await client.post(
+                    auth_api,
+                    json={"email": creds.email, "password": creds.password},
+                    headers={
+                        **HEADERS,
+                        "Content-Type": "application/json",
+                        "Origin": "https://www.pokemoncenter.com",
+                        "Referer": "https://www.pokemoncenter.com/",
+                    },
+                )
+                if login_resp.status_code in (200, 201):
+                    logger.info("Pokemon Center: auth API login appears successful")
+                    return True
+                logger.warning("Pokemon Center: auth API login returned %d", login_resp.status_code)
+                return False
+
             if sso_url:
                 sso_resp = await client.get(sso_url)
-                # Extract CSRF/auth tokens from SSO page
                 csrf_match = re.search(r'name="csrf[_-]?token"[^>]*value="([^"]+)"', sso_resp.text, re.I)
                 csrf = csrf_match.group(1) if csrf_match else ""
 
-                # Submit credentials to SSO
                 login_data = {
                     "email": creds.email,
                     "password": creds.password,
@@ -1066,7 +1090,6 @@ class ApiCheckout:
                     },
                 )
 
-                # Check for successful redirect back to pokemoncenter.com
                 if login_resp.status_code in (200, 302) and "error" not in login_resp.text.lower()[:500]:
                     logger.info("Pokemon Center: SSO login appears successful")
                     return True
