@@ -83,3 +83,12 @@
   font-size: 13px;
   text-decoration: underline;
 }
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .login-card {
+    padding: 24px 20px;
+    border-radius: 12px;
+  }
+  .login-logo { font-size: 32px; }
+}
