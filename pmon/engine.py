@@ -115,35 +115,39 @@ class PmonEngine:
     async def _check_all(self):
         """Check stock on all monitored products.
 
-        Adds small random delays between requests to avoid burst patterns
-        that PerimeterX flags as bot traffic.
+        Groups products by retailer and runs each retailer's checks
+        sequentially (with per-retailer throttling enforced by BaseMonitor),
+        while different retailers are checked concurrently.
         """
         if not self.config.products:
             return
 
-        # Shuffle order each cycle so we don't always hit the same retailer first
-        products = list(self.config.products)
-        random.shuffle(products)
+        # Group products by retailer so we can throttle per-retailer
+        by_retailer: dict[str, list] = {}
+        for product in self.config.products:
+            by_retailer.setdefault(product.retailer, []).append(product)
 
-        # Stagger requests with small delays (0.5-2s between each) to look human.
-        # Simultaneous burst requests to the same retailer from one IP = instant flag.
+        # Each retailer gets its own sequential task; retailers run in parallel
         tasks = []
-        for i, product in enumerate(products):
+        for retailer, products in by_retailer.items():
             try:
-                monitor = self._get_monitor(product.retailer)
+                monitor = self._get_monitor(retailer)
             except ValueError:
-                logger.warning(f"Skipping product with unsupported retailer: {product.retailer} ({product.url})")
+                logger.warning(f"Skipping unsupported retailer: {retailer}")
                 continue
-            delay = i * random.uniform(0.5, 2.0)
-            tasks.append(self._delayed_check(monitor, product, delay))
+            random.shuffle(products)
+            tasks.append(self._check_retailer_group(monitor, products))
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _delayed_check(self, monitor, product, delay: float):
-        """Check a product after a short delay."""
-        if delay > 0:
-            await asyncio.sleep(delay)
-        await self._check_product(monitor, product)
+    async def _check_retailer_group(self, monitor, products: list):
+        """Check all products for a single retailer sequentially.
+
+        BaseMonitor.safe_check() already enforces per-retailer throttle
+        and rate-limit cooldowns, so we just iterate.
+        """
+        for product in products:
+            await self._check_product(monitor, product)
 
     async def _check_product(self, monitor: BaseMonitor, product: Product):
         result = await monitor.safe_check(product.url, product.name)
