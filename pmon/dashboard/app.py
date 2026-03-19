@@ -336,10 +336,27 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         browser login (which always fails), we validate that the user's imported
         session cookies are still valid by making an API call to Walmart's
         lightweight config endpoint.
+
+        This function coordinates with the shared WalmartMonitor rate-limit
+        state so the dashboard and monitor loop don't pile requests on top of
+        each other.
         """
         import json as _json
         import httpx
         from pmon.monitors.base import DEFAULT_HEADERS
+
+        # Check if the Walmart monitor is currently in a rate-limit cooldown.
+        # If so, skip the network call — another request would just extend the ban.
+        walmart_monitor = engine._monitors.get("walmart")
+        if walmart_monitor and walmart_monitor.is_rate_limited():
+            remaining = walmart_monitor.rate_limit_remaining()
+            return {
+                "ok": False,
+                "message": (
+                    f"Walmart is rate limiting us (429). "
+                    f"All Walmart requests paused — wait {remaining:.0f}s before testing again."
+                ),
+            }
 
         session = db.get_retailer_session(user["id"], "walmart")
         if not session or not session.get("cookies_json"):
@@ -363,10 +380,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if not cookies:
             return {"ok": False, "message": "No session cookies found — import them via Settings > Session Cookies"}
 
-        # Validate session by hitting a lightweight API endpoint
-        # Retry on 429 (rate limiting) with exponential backoff
-        import asyncio as _asyncio
-
+        # Single attempt — no retry loop.  If we get 429, record it on the
+        # shared monitor so the entire system backs off together.
         try:
             async with httpx.AsyncClient(
                 headers=DEFAULT_HEADERS,
@@ -386,24 +401,43 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "Referer": "https://www.walmart.com/",
                 }
 
-                resp = None
-                for attempt in range(4):
-                    resp = await client.get(
-                        "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
-                        "?configNames=identity",
-                        headers=req_headers,
-                    )
-                    if resp.status_code != 429:
-                        break
-                    delay = 2 ** (attempt + 1)  # 2, 4, 8, 16
-                    logger.info("Walmart session check: HTTP 429 (rate limited), retrying in %ds (attempt %d/4)", delay, attempt + 1)
-                    await _asyncio.sleep(delay)
+                resp = await client.get(
+                    "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                    "?configNames=identity",
+                    headers=req_headers,
+                )
+
+                if resp.status_code == 429:
+                    # Parse optional Retry-After header
+                    retry_after = None
+                    retry_after_val = resp.headers.get("Retry-After")
+                    if retry_after_val:
+                        try:
+                            retry_after = float(retry_after_val)
+                        except (ValueError, TypeError):
+                            pass
+                    # Record on shared monitor so the monitor loop backs off too
+                    if walmart_monitor:
+                        walmart_monitor.record_rate_limit(retry_after)
+                        remaining = walmart_monitor.rate_limit_remaining()
+                    else:
+                        remaining = 60
+                    return {
+                        "ok": False,
+                        "message": (
+                            f"Walmart rate limited (429). "
+                            f"All Walmart requests paused for {remaining:.0f}s. "
+                            f"Wait and try again."
+                        ),
+                    }
 
                 if resp.status_code == 200:
                     data = resp.json()
                     # Check if identity config indicates logged in
                     identity = data.get("identity", {})
                     is_logged_in = identity.get("isLoggedIn", False)
+                    if walmart_monitor:
+                        walmart_monitor.record_success()
                     if is_logged_in:
                         logger.info("Walmart: session cookies valid (logged in)")
                         return {"ok": True, "message": f"Walmart session valid — {len(cookies)} cookies active"}
@@ -416,11 +450,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     return {
                         "ok": False,
                         "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
-                    }
-                elif resp.status_code == 429:
-                    return {
-                        "ok": False,
-                        "message": "Walmart rate limited session check (429) after 4 retries. Wait a few minutes and try again.",
                     }
                 else:
                     return {
