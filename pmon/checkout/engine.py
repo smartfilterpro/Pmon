@@ -2427,31 +2427,6 @@ class CheckoutEngine:
         the phone number on the account and the account holder's last name
         before showing the password field.
         """
-        # Check if the auth picker is visible FIRST — the picker page shows
-        # radio options like "Text a code", "Use password", etc.  The phone
-        # last-4 / last-name fields are nested under the pre-selected "Text a
-        # code" option, so the phone field check would wrongly match them if
-        # we checked phone fields first.  When the auth picker is present we
-        # must return and let the caller select "Use password" instead.
-        try:
-            picker_visible = await page.locator(
-                'text=/choose.*sign.?in/i, text=/use password/i, '
-                'text=/one-time code/i, label:has-text("Use password")'
-            ).first.is_visible(timeout=2000)
-            if picker_visible:
-                logger.info("Best Buy verification: auth picker visible, skipping verification")
-                return
-        except Exception:
-            pass
-
-        try:
-            pw_visible = await page.locator('input#fld-p1, input[type="password"]').first.is_visible(timeout=500)
-            if pw_visible:
-                logger.info("Best Buy verification: password field already visible, skipping")
-                return
-        except Exception:
-            pass
-
         # Detect the verification page — look for phone last 4 or last name fields
         verification_selectors = (
             'input[id*="phone" i], input[name*="phone" i], '
@@ -2472,7 +2447,26 @@ class CheckoutEngine:
         except Exception:
             pass
 
+        # Also check if password field or auth picker is already visible —
+        # if so, skip the expensive vision call and return immediately.
         if not phone_field_found:
+            try:
+                pw_visible = await page.locator('input#fld-p1, input[type="password"]').first.is_visible(timeout=500)
+                if pw_visible:
+                    logger.info("Best Buy verification: password field already visible, skipping")
+                    return
+            except Exception:
+                pass
+            try:
+                picker_visible = await page.locator(
+                    'text=/choose.*sign.?in/i, text=/use password/i, '
+                    'text=/one-time code/i, label:has-text("Use password")'
+                ).first.is_visible(timeout=500)
+                if picker_visible:
+                    logger.info("Best Buy verification: auth picker visible, skipping verification")
+                    return
+            except Exception:
+                pass
 
             # Vision fallback only if no other UI elements detected
             screenshot = await self._screenshot_b64(page)
