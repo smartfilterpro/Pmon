@@ -37,3 +37,23 @@
   padding: 10px 20px;
   white-space: nowrap;
 }
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .add-form {
+    padding: 14px;
+    gap: 10px;
+  }
+  .add-url, .add-name {
+    min-width: 100%;
+    flex: 1 1 100%;
+  }
+  .add-qty {
+    width: auto;
+    flex: 0 0 60px;
+  }
+  .add-btn {
+    width: 100%;
+    justify-content: center;
+  }
+}

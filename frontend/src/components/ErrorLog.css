@@ -80,3 +80,20 @@
   text-align: center;
   color: var(--text-secondary);
 }
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .error-entry { padding: 10px 12px; }
+  .error-entry-header {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .error-time {
+    margin-left: 0;
+    width: 100%;
+  }
+  .error-details pre {
+    font-size: 10px;
+    padding: 8px;
+  }
+}

@@ -215,3 +215,34 @@
   font-size: 13px;
   margin-bottom: 14px;
 }
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .settings-section {
+    padding: 14px;
+    border-radius: 8px;
+  }
+  .retailer-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+  }
+  .retailer-actions {
+    width: 100%;
+  }
+  .retailer-actions .action-btn,
+  .retailer-actions .test-btn {
+    flex: 1;
+    justify-content: center;
+  }
+  .retailer-edit-actions {
+    flex-wrap: wrap;
+  }
+  .totp-confirm {
+    max-width: 100%;
+  }
+  .cookie-input {
+    font-size: 11px;
+  }
+}

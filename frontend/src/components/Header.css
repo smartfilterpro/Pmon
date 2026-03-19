@@ -60,3 +60,32 @@
   display: flex; align-items: center;
 }
 .logout-btn:hover { color: var(--red); }
+
+/* Mobile responsive */
+@media (max-width: 600px) {
+  .header {
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 16px 0;
+    margin-bottom: 16px;
+  }
+  .header-left {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .logo { font-size: 24px; }
+  .subtitle { font-size: 12px; }
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .user-info {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
+  }
+  .toggle-btn {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+}
