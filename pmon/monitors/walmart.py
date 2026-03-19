@@ -14,8 +14,21 @@ from .base import API_HEADERS, BaseMonitor
 logger = logging.getLogger(__name__)
 
 
+def _parse_retry_after(resp) -> float | None:
+    """Extract Retry-After header value in seconds, or None if absent."""
+    val = resp.headers.get("Retry-After")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
 class WalmartMonitor(BaseMonitor):
     retailer_name = "walmart"
+    # Walmart aggressively rate-limits — enforce at least 5s between requests
+    _min_request_interval: float = 5.0
 
     def _extract_product_id(self, url: str) -> str | None:
         """Extract product/item ID from Walmart URL.
@@ -46,6 +59,15 @@ class WalmartMonitor(BaseMonitor):
             },
         )
 
+        if resp.status_code == 429:
+            retry_after = _parse_retry_after(resp)
+            self.record_rate_limit(retry_after)
+            return StockResult(
+                url=url, retailer=self.retailer_name, product_name=product_name,
+                status=StockStatus.ERROR,
+                error_message=f"Rate limited by Walmart (429). Cooling down for {self.rate_limit_remaining():.0f}s.",
+            )
+
         if resp.status_code == 403:
             logger.warning("Walmart: 403 on product page — PerimeterX blocked")
             return StockResult(
@@ -55,6 +77,7 @@ class WalmartMonitor(BaseMonitor):
             )
 
         resp.raise_for_status()
+        self.record_success()
 
         html = resp.text
 
@@ -177,10 +200,20 @@ class WalmartMonitor(BaseMonitor):
                 },
             )
 
+            if resp.status_code == 429:
+                retry_after = _parse_retry_after(resp)
+                self.record_rate_limit(retry_after)
+                return StockResult(
+                    url=url, retailer=self.retailer_name, product_name=product_name,
+                    status=StockStatus.ERROR,
+                    error_message=f"Rate limited by Walmart (429). Cooling down for {self.rate_limit_remaining():.0f}s.",
+                )
+
             if resp.status_code != 200:
                 logger.debug("Walmart API returned %d for product %s", resp.status_code, product_id)
                 return None
 
+            self.record_success()
             data = resp.json()
             # Navigate the GraphQL response structure
             product = (

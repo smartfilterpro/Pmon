@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from abc import ABC, abstractmethod
 
 import httpx
@@ -63,8 +64,18 @@ class BaseMonitor(ABC):
 
     retailer_name: str = "unknown"
 
+    # Per-retailer minimum seconds between requests.  Retailers that aggressively
+    # rate-limit (e.g. Walmart) override this with a higher value.
+    _min_request_interval: float = 2.0
+
     def __init__(self):
         self._client: httpx.AsyncClient | None = None
+        # Timestamp (monotonic) of the last request we made
+        self._last_request_at: float = 0.0
+        # Rate-limit cooldown: if we get a 429 we back off until this time
+        self._rate_limit_until: float = 0.0
+        # Consecutive 429 count — drives exponential backoff
+        self._consecutive_429s: int = 0
 
     async def get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -80,13 +91,73 @@ class BaseMonitor(ABC):
         if self._client and not self._client.is_closed:
             await self._client.aclose()
 
+    # ------------------------------------------------------------------
+    # Rate-limit helpers
+    # ------------------------------------------------------------------
+
+    def is_rate_limited(self) -> bool:
+        """Return True if we are currently in a cooldown period from a 429."""
+        return time.monotonic() < self._rate_limit_until
+
+    def rate_limit_remaining(self) -> float:
+        """Seconds remaining in the current cooldown, or 0."""
+        return max(0.0, self._rate_limit_until - time.monotonic())
+
+    def record_rate_limit(self, retry_after: float | None = None):
+        """Record that we received a 429 and compute the next cooldown.
+
+        Uses exponential backoff: 60s, 120s, 240s, capped at 5 minutes.
+        If the server sends a Retry-After header we honour it (with a floor
+        of 60 s so we don't hammer them).
+        """
+        self._consecutive_429s += 1
+        backoff = min(60 * (2 ** (self._consecutive_429s - 1)), 300)
+        if retry_after is not None:
+            backoff = max(retry_after, 60)
+        self._rate_limit_until = time.monotonic() + backoff
+        logger.warning(
+            "%s rate-limited (429). Backing off for %.0fs (attempt %d)",
+            self.retailer_name, backoff, self._consecutive_429s,
+        )
+
+    def record_success(self):
+        """Reset the consecutive-429 counter after a successful request."""
+        self._consecutive_429s = 0
+
+    async def throttle(self):
+        """Sleep if needed to respect _min_request_interval between requests."""
+        now = time.monotonic()
+        elapsed = now - self._last_request_at
+        if elapsed < self._min_request_interval:
+            wait = self._min_request_interval - elapsed
+            await asyncio.sleep(wait)
+        self._last_request_at = time.monotonic()
+
     @abstractmethod
     async def check_stock(self, url: str, product_name: str) -> StockResult:
         """Check if a product is in stock. Must be implemented by each retailer."""
         ...
 
     async def safe_check(self, url: str, product_name: str) -> StockResult:
-        """Check stock with error handling."""
+        """Check stock with error handling and rate-limit awareness."""
+        # If we're in a cooldown from a previous 429, skip this check entirely
+        if self.is_rate_limited():
+            remaining = self.rate_limit_remaining()
+            logger.info(
+                "Skipping %s check for %s — rate-limit cooldown (%.0fs left)",
+                self.retailer_name, product_name, remaining,
+            )
+            return StockResult(
+                url=url,
+                retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.ERROR,
+                error_message=f"Rate limited — retrying in {remaining:.0f}s",
+            )
+
+        # Throttle to respect per-retailer minimum interval
+        await self.throttle()
+
         try:
             return await self.check_stock(url, product_name)
         except httpx.TimeoutException:
