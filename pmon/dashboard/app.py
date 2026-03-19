@@ -497,6 +497,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         except Exception:
             pass
 
+        # Check if auth picker is visible FIRST — the picker page shows radio
+        # options like "Text a code", "Use password", etc.  The phone last-4
+        # fields are nested under the pre-selected "Text a code" option, so
+        # the phone field check would wrongly match them.  Return early and
+        # let the auth picker strategies select "Use password" instead.
+        try:
+            picker_visible = await page.locator(
+                'text=/choose.*sign.?in/i, text=/use password/i, '
+                'text=/one-time code/i, label:has-text("Use password")'
+            ).first.is_visible(timeout=2000)
+            if picker_visible:
+                logger.info("Best Buy test: auth picker visible, skipping verification")
+                return
+        except Exception:
+            pass
+
         phone_field_found = False
         try:
             phone_loc = page.locator(phone_selectors)
@@ -505,18 +521,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             pass
 
         if not phone_field_found:
-            # Check if auth picker or OTP page is visible instead — skip verification
-            try:
-                picker_visible = await page.locator(
-                    'text=/choose.*sign.?in/i, text=/use password/i, '
-                    'text=/one-time code/i, label:has-text("Use password")'
-                ).first.is_visible(timeout=500)
-                if picker_visible:
-                    logger.info("Best Buy test: auth picker visible, skipping verification")
-                    return
-            except Exception:
-                pass
-
             # Check via page text if there's a verification prompt
             try:
                 body_text = await page.locator("body").first.inner_text(timeout=2000)
