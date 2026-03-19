@@ -2427,12 +2427,30 @@ class CheckoutEngine:
         the phone number on the account and the account holder's last name
         before showing the password field.
         """
-        # Detect the verification page — look for phone last 4 or last name fields
+        # Early exit: if the auth picker ("Choose a sign-in method") is visible,
+        # this is NOT a verification page — return immediately so the main flow
+        # can handle the picker.
+        try:
+            picker_heading = page.locator('text=/choose.*sign.?in/i')
+            if await picker_heading.first.is_visible(timeout=1500):
+                logger.info("Best Buy verification: auth picker heading visible, skipping verification")
+                return
+        except Exception:
+            pass
+
+        # Detect the verification page — look for phone last 4 or last name fields.
+        # IMPORTANT: exclude radio inputs — Best Buy's auth picker has radio
+        # buttons with "phone" in their id (e.g. "Text a code to my account
+        # phone number") which must NOT be treated as verification fields.
         verification_selectors = (
-            'input[id*="phone" i], input[name*="phone" i], '
-            'input[id*="last4" i], input[name*="last4" i], '
-            'input[id*="lastDigits" i], input[name*="lastDigits" i], '
-            'input[id*="phoneLast" i], input[name*="phoneLast" i]'
+            'input[id*="phone" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="phone" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[id*="last4" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="last4" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[id*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[id*="phoneLast" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="phoneLast" i]:not([type="radio"]):not([type="hidden"])'
         )
         last_name_selectors = (
             'input[id*="lastName" i], input[name*="lastName" i], '
