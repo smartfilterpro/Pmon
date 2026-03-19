@@ -41,6 +41,12 @@
   margin-bottom: 16px;
 }
 
+.login-pending {
+  background: rgba(255, 193, 7, 0.15);
+  border-color: var(--accent-yellow);
+  color: var(--accent-yellow);
+}
+
 .field {
   margin-bottom: 16px;
 }
