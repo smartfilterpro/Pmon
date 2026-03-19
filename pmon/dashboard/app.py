@@ -1660,13 +1660,15 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 # Best Buy may require a one-time code AFTER password submission (2FA).
                 # Detect this and return a clear error instead of misreporting success/failure.
                 if retailer == "bestbuy":
+                    # Give page time to settle after login network activity
+                    await wait_for_page_ready(page, timeout=5000)
                     post_login_otp = False
                     try:
                         post_login_otp = await page.locator(
                             'text=/one-time code/i, text=/enter your code/i, '
                             'text=/enter the code/i, text=/verification code/i, '
                             'text=/enter your one-time/i'
-                        ).first.is_visible(timeout=2000)
+                        ).first.is_visible(timeout=5000)
                     except Exception:
                         pass
                     if post_login_otp:
@@ -1754,6 +1756,45 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     pass
 
                 if error_text:
+                    # Check if the "error" is actually an OTP prompt that we missed earlier
+                    otp_keywords = ["one-time code", "enter your code", "enter the code",
+                                    "verification code", "verify code", "verifycode"]
+                    if retailer == "bestbuy" and any(kw in error_text.lower() for kw in otp_keywords):
+                        logger.warning("Test login %s: OTP page detected via error text fallback", retailer_name)
+                        otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
+                        logger.info("Test login %s: OTP required (fallback), waiting for code (otp_id=%d)", retailer_name, otp_id)
+                        code = await _poll_for_otp_code(otp_id, timeout_seconds=300)
+                        if code:
+                            await _enter_otp_code(page, code)
+                            logger.info("Test login %s: OTP code entered via fallback path", retailer_name)
+                            await wait_for_page_ready(page, timeout=10000)
+                            # Re-check if we navigated away from login
+                            final_url2 = page.url
+                            still_on_login2 = "/login" in final_url2 or "/signin" in final_url2 or "/sign-in" in final_url2 or "/identity" in final_url2
+                            if not still_on_login2:
+                                logger.info("Test login successful for %s user=%s after OTP (navigated to %s)", retailer_name, email, final_url2)
+                                try:
+                                    browser_cookies = await context.cookies()
+                                    cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                                    if cookies_dict:
+                                        import json as _json
+                                        db.set_retailer_session(
+                                            user["id"], retailer,
+                                            cookies_json=_json.dumps(cookies_dict),
+                                        )
+                                        if engine.checkout_engine:
+                                            engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                            engine.checkout_engine._api.reset_client(retailer)
+                                        logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                                except Exception as cookie_err:
+                                    logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+                                return {"ok": True, "message": f"{retailer_name} login successful — session cookies saved for API checkout"}
+                            else:
+                                return {"ok": False, "message": f"{retailer_name} login: OTP code entered but still on login page"}
+                        else:
+                            db.expire_otp_request(otp_id)
+                            return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
+
                     msg = f"{retailer_name} login failed: {error_text[:200]}"
                     logger.warning("Test login failed for %s user=%s: %s", retailer_name, email, error_text)
                     db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
