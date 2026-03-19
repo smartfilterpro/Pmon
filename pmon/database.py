@@ -154,10 +154,12 @@ def _migrate(conn: sqlite3.Connection):
     if "approved" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN approved INTEGER DEFAULT 0")
 
-    # Add api_key to user_settings
+    # Add api_key and spend_limit to user_settings
     settings_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
     if "api_key" not in settings_cols:
         conn.execute("ALTER TABLE user_settings ADD COLUMN api_key TEXT DEFAULT ''")
+    if "spend_limit" not in settings_cols:
+        conn.execute("ALTER TABLE user_settings ADD COLUMN spend_limit REAL DEFAULT 0")
 
     # Add card fields to retailer_accounts
     acct_cols = {row[1] for row in conn.execute("PRAGMA table_info(retailer_accounts)").fetchall()}
@@ -175,6 +177,11 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE retailer_accounts ADD COLUMN phone_last4 TEXT DEFAULT ''")
     if "account_last_name" not in acct_cols:
         conn.execute("ALTER TABLE retailer_accounts ADD COLUMN account_last_name TEXT DEFAULT ''")
+
+    # Add price_amount to checkout_log for spend tracking
+    checkout_cols = {row[1] for row in conn.execute("PRAGMA table_info(checkout_log)").fetchall()}
+    if "price_amount" not in checkout_cols:
+        conn.execute("ALTER TABLE checkout_log ADD COLUMN price_amount REAL DEFAULT 0")
 
     conn.commit()
 
@@ -391,7 +398,8 @@ def get_user_settings(user_id: int) -> dict:
 
 
 def update_user_settings(user_id: int, poll_interval: int | None = None,
-                         discord_webhook: str | None = None):
+                         discord_webhook: str | None = None,
+                         spend_limit: float | None = None):
     db = get_db()
     # Ensure the row exists first (handles users created before settings table)
     db.execute(
@@ -404,18 +412,22 @@ def update_user_settings(user_id: int, poll_interval: int | None = None,
     if discord_webhook is not None:
         db.execute("UPDATE user_settings SET discord_webhook = ? WHERE user_id = ?",
                    (discord_webhook, user_id))
+    if spend_limit is not None:
+        db.execute("UPDATE user_settings SET spend_limit = ? WHERE user_id = ?",
+                   (spend_limit, user_id))
     db.commit()
 
 
 # --- Checkout log operations ---
 
 def add_checkout_log(user_id: int, url: str, retailer: str, product_name: str,
-                     status: str, order_number: str = "", error_message: str = ""):
+                     status: str, order_number: str = "", error_message: str = "",
+                     price_amount: float = 0):
     db = get_db()
     db.execute(
-        """INSERT INTO checkout_log (user_id, url, retailer, product_name, status, order_number, error_message)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (user_id, url, retailer, product_name, status, order_number, error_message),
+        """INSERT INTO checkout_log (user_id, url, retailer, product_name, status, order_number, error_message, price_amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, url, retailer, product_name, status, order_number, error_message, price_amount),
     )
     db.commit()
 
@@ -427,6 +439,17 @@ def get_checkout_log(user_id: int, limit: int = 50) -> list[dict]:
         (user_id, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_user_total_spent(user_id: int) -> float:
+    """Sum the price_amount of all successful checkouts for a user."""
+    db = get_db()
+    row = db.execute(
+        "SELECT COALESCE(SUM(price_amount), 0) as total FROM checkout_log "
+        "WHERE user_id = ? AND status = 'success'",
+        (user_id,),
+    ).fetchone()
+    return float(row["total"])
 
 
 # --- Error log operations ---

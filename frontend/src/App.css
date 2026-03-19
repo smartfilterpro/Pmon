@@ -115,3 +115,39 @@
   margin-top: 8px;
   font-size: 13px;
 }
+
+/* Spend Tracker */
+.spend-tracker {
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.spend-tracker-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+.spend-limit-hit {
+  color: var(--red);
+  font-size: 12px;
+}
+.spend-bar {
+  height: 6px;
+  background: var(--bg-tertiary, rgba(255,255,255,0.1));
+  border-radius: 3px;
+  overflow: hidden;
+}
+.spend-bar-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.spend-bar-full {
+  background: var(--red);
+}

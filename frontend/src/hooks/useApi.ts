@@ -151,7 +151,7 @@ export async function getSettings() {
   return (await apiFetch('/settings')).json();
 }
 
-export async function updateSettings(settings: { poll_interval?: number; discord_webhook?: string }) {
+export async function updateSettings(settings: { poll_interval?: number; discord_webhook?: string; spend_limit?: number }) {
   return (await apiFetch('/settings', {
     method: 'POST',
     body: JSON.stringify(settings),

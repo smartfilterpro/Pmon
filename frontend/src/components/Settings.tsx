@@ -5,7 +5,7 @@ import {
   getSessions, importSession, deleteSession, generateApiKey,
 } from '../hooks/useApi';
 import type { User } from '../types';
-import { Save, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader, Cookie, Trash2, Upload, Key } from 'lucide-react';
+import { Save, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader, Cookie, Trash2, Upload, Key, DollarSign } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import AdminPanel from './AdminPanel';
 import './Settings.css';
@@ -25,6 +25,7 @@ const RETAILERS = [
 export default function Settings({ user, onOtpRequired }: Props) {
   const [pollInterval, setPollInterval] = useState(30);
   const [discordWebhook, setDiscordWebhook] = useState('');
+  const [spendLimit, setSpendLimit] = useState(0);
   const [saved, setSaved] = useState(false);
 
   // Retailer accounts
@@ -68,6 +69,7 @@ export default function Settings({ user, onOtpRequired }: Props) {
     getSettings().then(data => {
       setPollInterval(data.settings.poll_interval);
       setDiscordWebhook(data.settings.discord_webhook || '');
+      setSpendLimit(data.settings.spend_limit || 0);
       setApiKey(data.settings.api_key || '');
     });
     getAccounts().then(data => setAccounts(data.accounts || {}));
@@ -77,7 +79,7 @@ export default function Settings({ user, onOtpRequired }: Props) {
   }, []);
 
   const handleSaveSettings = async () => {
-    await updateSettings({ poll_interval: pollInterval, discord_webhook: discordWebhook });
+    await updateSettings({ poll_interval: pollInterval, discord_webhook: discordWebhook, spend_limit: spendLimit });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -227,6 +229,26 @@ export default function Settings({ user, onOtpRequired }: Props) {
         </div>
         <button className="save-btn" onClick={handleSaveSettings}>
           <Save size={14} /> {saved ? 'Saved!' : 'Save Settings'}
+        </button>
+      </div>
+
+      {/* Spend Limit */}
+      <div className="settings-section">
+        <h3><DollarSign size={16} /> Spend Limit</h3>
+        <p className="section-desc">
+          Set a maximum total spend for auto-checkout. When your successful purchases reach this amount,
+          auto-checkout will stop buying new items. Set to 0 to disable the limit.
+        </p>
+        <div className="settings-grid">
+          <div className="setting-field">
+            <label>Maximum Spend ($)</label>
+            <input type="number" min={0} step={1} value={spendLimit}
+              onChange={e => setSpendLimit(Math.max(0, Number(e.target.value)))}
+              placeholder="0 = no limit" />
+          </div>
+        </div>
+        <button className="save-btn" onClick={handleSaveSettings}>
+          <Save size={14} /> {saved ? 'Saved!' : 'Save Spend Limit'}
         </button>
       </div>
 
