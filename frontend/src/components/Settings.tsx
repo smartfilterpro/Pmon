@@ -12,6 +12,7 @@ import './Settings.css';
 
 interface Props {
   user: User;
+  onOtpRequired?: () => void;
 }
 
 const RETAILERS = [
@@ -21,7 +22,7 @@ const RETAILERS = [
   { id: 'pokemoncenter', name: 'Pokemon Center' },
 ];
 
-export default function Settings({ user }: Props) {
+export default function Settings({ user, onOtpRequired }: Props) {
   const [pollInterval, setPollInterval] = useState(30);
   const [discordWebhook, setDiscordWebhook] = useState('');
   const [saved, setSaved] = useState(false);
@@ -126,7 +127,19 @@ export default function Settings({ user }: Props) {
     setTestLoading(prev => ({ ...prev, [retailerId]: true }));
     try {
       const data = await testAccount(retailerId);
-      setTestResult(prev => ({ ...prev, [retailerId]: { ok: data.ok, message: data.message } }));
+      if (data.otp_required && onOtpRequired) {
+        // OTP code needed — trigger status refresh so OTP banner appears
+        onOtpRequired();
+        setTestResult(prev => ({
+          ...prev,
+          [retailerId]: {
+            ok: false,
+            message: data.message || 'Verification code needed — enter it in the banner above.',
+          },
+        }));
+      } else {
+        setTestResult(prev => ({ ...prev, [retailerId]: { ok: data.ok, message: data.message } }));
+      }
     } catch {
       setTestResult(prev => ({ ...prev, [retailerId]: { ok: false, message: 'Request failed' } }));
     } finally {
