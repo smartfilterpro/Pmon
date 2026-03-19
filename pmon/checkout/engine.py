@@ -2629,6 +2629,11 @@ class CheckoutEngine:
                 # Sweep popups after email submit
                 await sweep_popups(page)
 
+                # Handle Best Buy identity verification step (phone last 4 + last name)
+                # This must happen BEFORE the auth method picker — Best Buy shows
+                # verification first, then the "Choose a sign-in method" screen.
+                await self._bestbuy_handle_verification(page, creds, profile)
+
                 # --- Auth method picker: Best Buy may show "Choose a sign-in method" ---
                 # or it may auto-send a one-time code (landing on OTP page directly).
                 # Must select "Use password" before filling the password field.
@@ -2795,9 +2800,6 @@ class CheckoutEngine:
                     await random_delay(page, 300, 700)
                 else:
                     logger.warning("Best Buy sign-in: could not select password sign-in method")
-
-                # Handle Best Buy identity verification step (phone last 4 + last name)
-                await self._bestbuy_handle_verification(page, creds, profile)
 
                 # Now look for the password field
                 pass_filled = await self._smart_fill(
