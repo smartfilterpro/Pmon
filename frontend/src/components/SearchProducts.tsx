@@ -16,6 +16,7 @@ export default function SearchProducts({ refresh }: Props) {
   const [adding, setAdding] = useState<Set<string>>(new Set());
   const [hasSearched, setHasSearched] = useState(false);
   const [targetOnly, setTargetOnly] = useState(false);
+  const [includeOos, setIncludeOos] = useState(false);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -27,7 +28,7 @@ export default function SearchProducts({ refresh }: Props) {
     setAdded(new Set());
     setHasSearched(true);
     try {
-      const res = await searchTarget(keyword.trim(), { soldByTargetOnly: targetOnly });
+      const res = await searchTarget(keyword.trim(), { soldByTargetOnly: targetOnly, includeOutOfStock: includeOos });
       setResults(res);
       if (res.length === 0) setError(targetOnly ? 'No products found sold by Target' : 'No products found');
     } catch (err) {
@@ -54,12 +55,16 @@ export default function SearchProducts({ refresh }: Props) {
   };
 
   const statusLabel = (r: TargetSearchResult) => {
+    if (r.release_label) return r.release_label;
     if (r.availability_status === 'IN_STOCK' || r.is_purchasable) return 'In Stock';
     if (r.availability_status === 'OUT_OF_STOCK') return 'Out of Stock';
+    if (r.availability_status === 'PRE_ORDER') return 'Pre-order';
+    if (r.availability_status === 'COMING_SOON') return 'Coming Soon';
     return r.availability_status || 'Unknown';
   };
 
   const statusClass = (r: TargetSearchResult) => {
+    if (r.release_label || r.availability_status === 'PRE_ORDER' || r.availability_status === 'COMING_SOON') return 'upcoming';
     if (r.availability_status === 'IN_STOCK' || r.is_purchasable) return 'in-stock';
     if (r.availability_status === 'OUT_OF_STOCK') return 'out-of-stock';
     return 'unknown';
@@ -84,6 +89,14 @@ export default function SearchProducts({ refresh }: Props) {
           />
           <Store size={13} />
           Sold by Target
+        </label>
+        <label className="target-only-label">
+          <input
+            type="checkbox"
+            checked={includeOos}
+            onChange={(e) => setIncludeOos(e.target.checked)}
+          />
+          Include OOS
         </label>
         <button type="submit" className="search-btn" disabled={searching || !keyword.trim()}>
           {searching ? <Loader size={14} className="spinner" /> : <Search size={14} />}

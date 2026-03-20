@@ -388,6 +388,94 @@ class SearchResult:
     availability_status: str = ""
     is_purchasable: bool = False
     sold_by: str = ""  # e.g. "Target" or marketplace seller name
+    street_date: str = ""  # release/launch date if upcoming (YYYY-MM-DD)
+    release_label: str = ""  # e.g. "Pre-order", "Coming soon", "Launches Apr 25"
+
+
+def _extract_release_info(product: dict) -> tuple[str, str]:
+    """Extract street/release date and a human-readable label from a product.
+
+    Returns (street_date, release_label) where street_date is ISO format
+    (e.g. "2026-04-25") and release_label is a UI string like "Pre-order"
+    or "Launches Apr 25".
+
+    Target uses several fields for this:
+    - item.street_date / item.release_date (ISO date string)
+    - product.availability.availability_status = "PRE_ORDER" / "COMING_SOON"
+    - fulfillment.shipping_options.availability_status = "PRE_ORDER"
+    - Various date fields in scheduled_delivery
+    """
+    product_str = json.dumps(product)
+    street_date = ""
+    label = ""
+
+    # 1. Explicit date fields in item data
+    item = product.get("item", {})
+    if isinstance(item, dict):
+        for date_key in ("street_date", "release_date", "launch_date",
+                         "expected_availability_date"):
+            val = item.get(date_key, "")
+            if val and isinstance(val, str) and len(val) >= 10:
+                street_date = val[:10]  # take YYYY-MM-DD part
+                break
+
+    # 2. Dates in fulfillment data
+    if not street_date:
+        fulfillment = product.get("fulfillment", {})
+        if isinstance(fulfillment, dict):
+            for method_key in ("shipping_options", "scheduled_delivery"):
+                method = fulfillment.get(method_key, {})
+                if isinstance(method, dict):
+                    for date_key in ("available_date", "expected_delivery_date",
+                                     "street_date"):
+                        val = method.get(date_key, "")
+                        if val and isinstance(val, str) and len(val) >= 10:
+                            street_date = val[:10]
+                            break
+                if street_date:
+                    break
+
+    # 3. Regex scan for any date field we missed
+    if not street_date:
+        date_match = re.search(
+            r'"(?:street_date|release_date|launch_date|available_date)"'
+            r'\s*:\s*"(\d{4}-\d{2}-\d{2})',
+            product_str,
+        )
+        if date_match:
+            street_date = date_match.group(1)
+
+    # 4. Determine status label from availability signals
+    avail = product.get("availability", {})
+    if isinstance(avail, dict):
+        status = avail.get("availability_status", "")
+        if status == "PRE_ORDER":
+            label = "Pre-order"
+        elif status == "COMING_SOON":
+            label = "Coming soon"
+
+    # Check fulfillment for pre-order status
+    if not label:
+        for status_str in ('"PRE_ORDER"', '"COMING_SOON"'):
+            if status_str in product_str:
+                label = "Pre-order" if "PRE_ORDER" in status_str else "Coming soon"
+                break
+
+    # Build a descriptive label with date if available
+    if street_date and label:
+        try:
+            dt = datetime.strptime(street_date, "%Y-%m-%d")
+            label = f"{label} \u2014 {dt.strftime('%b %d')}"
+        except ValueError:
+            pass
+    elif street_date and not label:
+        try:
+            dt = datetime.strptime(street_date, "%Y-%m-%d")
+            label = f"Launches {dt.strftime('%b %d')}"
+        except ValueError:
+            label = f"Launches {street_date}"
+
+    return street_date, label
 
 
 def _extract_seller(product: dict) -> str:
@@ -474,12 +562,19 @@ class RedSkySearch:
         self._visitor_id = uuid.uuid4().hex
 
     async def find(
-        self, keyword: str, *, sold_by_target_only: bool = False,
+        self,
+        keyword: str,
+        *,
+        sold_by_target_only: bool = False,
+        include_out_of_stock: bool = False,
     ) -> list[SearchResult]:
         """Search Target for *keyword* and return matching products.
 
         If *sold_by_target_only* is True, results are filtered to items
         sold and shipped by Target (excludes marketplace / 3P sellers).
+
+        If *include_out_of_stock* is True, disables Target's default
+        purchasability filter so unlisted / OOS products can appear.
         """
         async with httpx.AsyncClient(
             headers=API_HEADERS,
@@ -493,7 +588,7 @@ class RedSkySearch:
                     "keyword": keyword,
                     "channel": "WEB",
                     "count": str(self.max_results),
-                    "default_purchasability_filter": "true",
+                    "default_purchasability_filter": "false" if include_out_of_stock else "true",
                     "is_bot": "false",
                     "offset": "0",
                     "page": f"/s/{keyword}",
@@ -617,6 +712,9 @@ class RedSkySearch:
                 # product JSON for known third-party signals.
                 sold_by = _extract_seller(item)
 
+                # Release / launch date for upcoming products
+                street_date, release_label = _extract_release_info(item)
+
                 results.append(SearchResult(
                     tcin=tcin,
                     title=title,
@@ -626,6 +724,8 @@ class RedSkySearch:
                     availability_status=avail_status,
                     is_purchasable=is_purchasable,
                     sold_by=sold_by,
+                    street_date=street_date,
+                    release_label=release_label,
                 ))
             except Exception:
                 logger.debug("RedSkySearch: skipping unparseable item", exc_info=True)

@@ -150,11 +150,13 @@ export interface TargetSearchResult {
   availability_status: string;
   is_purchasable: boolean;
   sold_by: string;
+  street_date: string;
+  release_label: string;
 }
 
 export async function searchTarget(
   keyword: string,
-  opts: { maxResults?: number; soldByTargetOnly?: boolean } = {},
+  opts: { maxResults?: number; soldByTargetOnly?: boolean; includeOutOfStock?: boolean } = {},
 ): Promise<TargetSearchResult[]> {
   const resp = await apiFetch('/search', {
     method: 'POST',
@@ -162,6 +164,7 @@ export async function searchTarget(
       keyword,
       max_results: opts.maxResults ?? 10,
       sold_by_target_only: opts.soldByTargetOnly ?? false,
+      include_out_of_stock: opts.includeOutOfStock ?? false,
     }),
   });
   const data = await resp.json();

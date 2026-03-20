@@ -151,6 +151,10 @@
   background: rgba(255, 23, 68, 0.15);
   color: var(--red);
 }
+.search-result-status.status-upcoming {
+  background: rgba(255, 183, 77, 0.15);
+  color: #ffb74d;
+}
 .search-result-status.status-unknown {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
