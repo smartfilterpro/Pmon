@@ -20,7 +20,6 @@ const RETAILERS = [
   { id: 'walmart', name: 'Walmart' },
   { id: 'bestbuy', name: 'Best Buy' },
   { id: 'pokemoncenter', name: 'Pokemon Center' },
-  { id: 'costco', name: 'Costco' },
 ];
 
 export default function Settings({ user, onOtpRequired }: Props) {
