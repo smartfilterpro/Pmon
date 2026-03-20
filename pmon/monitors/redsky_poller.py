@@ -474,12 +474,19 @@ class RedSkySearch:
         self._visitor_id = uuid.uuid4().hex
 
     async def find(
-        self, keyword: str, *, sold_by_target_only: bool = False,
+        self,
+        keyword: str,
+        *,
+        sold_by_target_only: bool = False,
+        include_out_of_stock: bool = False,
     ) -> list[SearchResult]:
         """Search Target for *keyword* and return matching products.
 
         If *sold_by_target_only* is True, results are filtered to items
         sold and shipped by Target (excludes marketplace / 3P sellers).
+
+        If *include_out_of_stock* is True, disables Target's default
+        purchasability filter so unlisted / OOS products can appear.
         """
         async with httpx.AsyncClient(
             headers=API_HEADERS,
@@ -493,7 +500,7 @@ class RedSkySearch:
                     "keyword": keyword,
                     "channel": "WEB",
                     "count": str(self.max_results),
-                    "default_purchasability_filter": "true",
+                    "default_purchasability_filter": "false" if include_out_of_stock else "true",
                     "is_bot": "false",
                     "offset": "0",
                     "page": f"/s/{keyword}",
