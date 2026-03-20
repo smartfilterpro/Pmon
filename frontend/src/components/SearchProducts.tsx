@@ -77,7 +77,7 @@ export default function SearchProducts({ refresh }: Props) {
         <input
           type="text"
           className="search-input"
-          placeholder="Search Target products (e.g. &quot;PS5 console&quot;, &quot;Pokemon cards&quot;)"
+          placeholder="Search Target (keyword, TCIN, or Target URL)"
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
