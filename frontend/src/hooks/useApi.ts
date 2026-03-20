@@ -139,6 +139,28 @@ export async function checkoutNow(url: string) {
   })).json();
 }
 
+// --- Search ---
+
+export interface TargetSearchResult {
+  tcin: string;
+  title: string;
+  price: string;
+  url: string;
+  image_url: string;
+  availability_status: string;
+  is_purchasable: boolean;
+}
+
+export async function searchTarget(keyword: string, maxResults = 10): Promise<TargetSearchResult[]> {
+  const resp = await apiFetch('/search', {
+    method: 'POST',
+    body: JSON.stringify({ keyword, max_results: maxResults }),
+  });
+  const data = await resp.json();
+  if (!resp.ok || data.error) throw new Error(data.error || 'Search failed');
+  return data.results;
+}
+
 // --- Monitor ---
 
 export async function controlMonitor(action: 'start' | 'stop') {
