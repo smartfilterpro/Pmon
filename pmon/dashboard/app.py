@@ -1410,8 +1410,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # so go straight to OTP text verification which is more reliable.
                     if retailer == "bestbuy":
                         bb_otp_option_clicked = False
+
+                        # Log what's on the auth picker page before clicking
                         try:
-                            bb_otp_option_clicked = await page.evaluate("""() => {
+                            page_desc = await vision_read_page(page)
+                            logger.info("Test login %s: auth picker page: %s", retailer_name, page_desc)
+                        except Exception:
+                            pass
+
+                        # Strategy 1: Use JS to FIND the best element, mark it, then
+                        # use Playwright's native click (which fires real mouse events).
+                        # JS .click() doesn't work on Best Buy's React radio buttons.
+                        try:
+                            marked = await page.evaluate("""() => {
                                 const phrases = ['text me', 'send a text', 'text message',
                                     'text code', 'send code to',
                                     'send me a text', 'text verification'];
@@ -1423,11 +1434,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 for (const el of allEls) {
                                     if (el.offsetParent === null) continue;
                                     const text = (el.textContent || '').trim().toLowerCase();
-                                    // Skip large container elements — real options have short text
                                     if (text.length > 80) continue;
                                     for (const phrase of phrases) {
                                         if (text.includes(phrase)) {
-                                            // Prefer the smallest (most specific) matching element
                                             if (text.length < bestLen) {
                                                 bestMatch = el;
                                                 bestLen = text.length;
@@ -1437,14 +1446,27 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     }
                                 }
                                 if (bestMatch) {
-                                    bestMatch.click();
+                                    bestMatch.setAttribute('data-pmon-otp-target', 'true');
                                     return bestMatch.tagName + ': ' + (bestMatch.textContent || '').trim().substring(0, 80);
                                 }
                                 return null;
                             }""")
+                            if marked:
+                                logger.info("Test login %s: found OTP element via JS: %s", retailer_name, marked)
+                                otp_target = page.locator('[data-pmon-otp-target="true"]')
+                                if await otp_target.first.is_visible(timeout=2000):
+                                    await otp_target.first.click()
+                                    bb_otp_option_clicked = marked
+                                    logger.info("Test login %s: Playwright-clicked OTP target", retailer_name)
+                                # Clean up marker
+                                await page.evaluate("""() => {
+                                    const el = document.querySelector('[data-pmon-otp-target]');
+                                    if (el) el.removeAttribute('data-pmon-otp-target');
+                                }""")
                         except Exception as e:
-                            logger.debug("Test login %s: BB OTP JS click failed: %s", retailer_name, e)
+                            logger.debug("Test login %s: BB OTP JS+Playwright click failed: %s", retailer_name, e)
 
+                        # Strategy 2: Playwright get_by_text with common OTP phrases
                         if not bb_otp_option_clicked:
                             for otp_text in ["Text me", "Send a text", "Text message", "Send code"]:
                                 try:
@@ -1452,9 +1474,24 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     if await otp_btn.first.is_visible(timeout=500):
                                         await otp_btn.first.click()
                                         bb_otp_option_clicked = otp_text
+                                        logger.info("Test login %s: clicked OTP option via get_by_text: %s", retailer_name, otp_text)
                                         break
                                 except Exception:
                                     continue
+
+                        # Strategy 3: Vision fallback — ask Claude to click the text/SMS option
+                        if not bb_otp_option_clicked:
+                            try:
+                                vision_result = await vision_click(
+                                    page,
+                                    "Click the option to receive a verification code via text message or SMS. "
+                                    "Look for options like 'Text me a code', 'Send a text', or similar."
+                                )
+                                if vision_result:
+                                    bb_otp_option_clicked = "vision"
+                                    logger.info("Test login %s: clicked OTP option via vision", retailer_name)
+                            except Exception as e:
+                                logger.debug("Test login %s: BB OTP vision click failed: %s", retailer_name, e)
 
                         if bb_otp_option_clicked:
                             logger.info("Test login %s: clicked OTP text option: %s", retailer_name, bb_otp_option_clicked)
