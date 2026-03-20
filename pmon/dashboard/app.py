@@ -1495,30 +1495,135 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                         if bb_otp_option_clicked:
                             logger.info("Test login %s: clicked OTP text option: %s", retailer_name, bb_otp_option_clicked)
-                            await random_delay(page, 300, 600)
+                            await random_delay(page, 500, 1000)
+
+                            # Log screenshot after selecting OTP option (before submit)
+                            try:
+                                pre_submit_desc = await vision_read_page(page)
+                                logger.info("Test login %s: page after OTP selection (pre-submit): %s", retailer_name, pre_submit_desc)
+                            except Exception:
+                                pass
+
+                            # Capture URL before submit to detect page navigation
+                            url_before_submit = page.url
+
+                            # Monitor network responses around OTP submit to detect rejections
+                            otp_network_responses = []
+                            async def _capture_response(response):
+                                try:
+                                    url_str = response.url
+                                    if any(kw in url_str.lower() for kw in ["otp", "code", "verify", "identity", "signin", "token", "auth", "challenge"]):
+                                        otp_network_responses.append({
+                                            "url": url_str[:200],
+                                            "status": response.status,
+                                        })
+                                except Exception:
+                                    pass
+                            page.on("response", _capture_response)
 
                             # Click submit to send the OTP text
                             otp_send_clicked = False
+
+                            # Strategy A: wait for submit button to be enabled, then click it
                             otp_send_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
-                            if not otp_send_btn_enabled:
+                            if otp_send_btn_enabled:
+                                # Button is enabled — click it directly
+                                try:
+                                    await page.locator('button[type="submit"]').first.click(timeout=3000)
+                                    otp_send_clicked = True
+                                    logger.info("Test login %s: clicked enabled submit button", retailer_name)
+                                except Exception as e:
+                                    logger.debug("Test login %s: enabled submit click failed: %s", retailer_name, e)
+
+                            # Strategy B: reCAPTCHA force-submit if button stayed disabled
+                            if not otp_send_clicked and not otp_send_btn_enabled:
                                 otp_send_clicked = await try_recaptcha_and_force_submit(page)
+                                if otp_send_clicked:
+                                    logger.info("Test login %s: reCAPTCHA force-submit succeeded", retailer_name)
+
+                            # Strategy C: try broader submit selectors
                             if not otp_send_clicked:
                                 otp_send_clicked = await click_visible_button(page, submit_sel)
+                                if otp_send_clicked:
+                                    logger.info("Test login %s: clicked submit via submit_sel", retailer_name)
+
+                            # Strategy D: try common button text
                             if not otp_send_clicked:
-                                for btn_text in ["Continue", "Send", "Submit", "Verify"]:
+                                for btn_text in ["Continue", "Send", "Send code", "Submit", "Verify", "Send Code"]:
                                     try:
                                         btn = page.get_by_role("button", name=btn_text, exact=False)
                                         if await btn.first.is_visible(timeout=500):
                                             await btn.first.click()
                                             otp_send_clicked = True
+                                            logger.info("Test login %s: clicked '%s' button", retailer_name, btn_text)
                                             break
                                     except Exception:
                                         continue
 
-                            if otp_send_clicked or otp_send_btn_enabled:
+                            # Strategy E: press Enter as last resort (some forms submit on Enter)
+                            if not otp_send_clicked:
+                                try:
+                                    await page.keyboard.press("Enter")
+                                    otp_send_clicked = True
+                                    logger.info("Test login %s: pressed Enter to submit OTP request", retailer_name)
+                                except Exception:
+                                    pass
+
+                            if otp_send_clicked:
                                 await wait_for_page_ready(page, timeout=10000)
+
+                                # Stop capturing network responses and log them
+                                try:
+                                    page.remove_listener("response", _capture_response)
+                                except Exception:
+                                    pass
+                                if otp_network_responses:
+                                    logger.info("Test login %s: network responses after OTP submit: %s", retailer_name, otp_network_responses)
+                                else:
+                                    logger.info("Test login %s: no relevant network responses captured after OTP submit", retailer_name)
+
+                                # Log page state after submit to see if OTP was sent or if there's an error
+                                try:
+                                    post_submit_desc = await vision_read_page(page)
+                                    logger.info("Test login %s: page after OTP submit: %s", retailer_name, post_submit_desc)
+                                except Exception:
+                                    pass
+
+                                # Check if we're on a new page (OTP input page) or still on auth picker
+                                url_after_submit = page.url
+                                if url_after_submit != url_before_submit:
+                                    logger.info("Test login %s: page navigated after OTP submit: %s → %s", retailer_name, url_before_submit, url_after_submit)
+
+                                # Check for error messages that might indicate the OTP send failed
+                                error_detected = False
+                                try:
+                                    error_loc = page.locator('.c-alert, .error-message, [class*="error" i], [role="alert"]')
+                                    if await error_loc.first.is_visible(timeout=2000):
+                                        error_text = await error_loc.first.inner_text(timeout=1000)
+                                        logger.warning("Test login %s: error after OTP submit: %s", retailer_name, error_text)
+                                        error_detected = True
+                                except Exception:
+                                    pass
+
+                                if error_detected:
+                                    logger.warning("Test login %s: OTP send may have failed — error detected on page", retailer_name)
+
+                                # Look for indicators that we're now on the OTP code entry page
+                                otp_entry_visible = False
+                                try:
+                                    otp_entry_visible = await page.locator(
+                                        'input[type="text"], input[type="tel"], input[type="number"], '
+                                        'input[inputmode="numeric"], input[autocomplete="one-time-code"], '
+                                        'text=/enter.*code/i, text=/verification code/i, text=/code sent/i'
+                                    ).first.is_visible(timeout=5000)
+                                except Exception:
+                                    pass
+
+                                if otp_entry_visible:
+                                    logger.info("Test login %s: OTP entry page detected — code should be sent", retailer_name)
+
                                 otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
-                                logger.info("Test login %s: OTP text sent, waiting for code (otp_id=%d)", retailer_name, otp_id)
+                                logger.info("Test login %s: OTP text submitted, waiting for code (otp_id=%d)", retailer_name, otp_id)
                                 code = await _poll_for_otp_code(otp_id, timeout_seconds=300)
                                 if code:
                                     await _enter_otp_code(page, code)
