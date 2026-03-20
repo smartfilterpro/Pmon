@@ -199,9 +199,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if not keyword:
             return JSONResponse({"error": "Keyword required"}, 400)
         max_results = min(int(data.get("max_results", 10)), 20)
+        sold_by_target_only = bool(data.get("sold_by_target_only", False))
         search = RedSkySearch(max_results=max_results)
         try:
-            results = await search.find(keyword)
+            results = await search.find(keyword, sold_by_target_only=sold_by_target_only)
         except Exception as e:
             logger.error("Search failed for '%s': %s", keyword, e)
             return JSONResponse({"error": f"Search failed: {e}"}, 500)
@@ -217,6 +218,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "image_url": r.image_url,
                     "availability_status": r.availability_status,
                     "is_purchasable": r.is_purchasable,
+                    "sold_by": r.sold_by,
                 }
                 for r in results
             ],

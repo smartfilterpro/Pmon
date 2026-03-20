@@ -386,6 +386,7 @@ class SearchResult:
     image_url: str = ""
     availability_status: str = ""
     is_purchasable: bool = False
+    sold_by: str = ""  # e.g. "Target" or marketplace seller name
 
 
 class RedSkySearch:
@@ -416,8 +417,14 @@ class RedSkySearch:
         self._api_keys = [api_key] if api_key else list(self._API_KEYS)
         self._visitor_id = uuid.uuid4().hex
 
-    async def find(self, keyword: str) -> list[SearchResult]:
-        """Search Target for *keyword* and return matching products."""
+    async def find(
+        self, keyword: str, *, sold_by_target_only: bool = False,
+    ) -> list[SearchResult]:
+        """Search Target for *keyword* and return matching products.
+
+        If *sold_by_target_only* is True, results are filtered to items
+        sold and shipped by Target (excludes marketplace / 3P sellers).
+        """
         async with httpx.AsyncClient(
             headers=API_HEADERS,
             follow_redirects=True,
@@ -471,7 +478,10 @@ class RedSkySearch:
                     )
                     continue
 
-                return self._parse_search(resp.json())
+                results = self._parse_search(resp.json())
+                if sold_by_target_only:
+                    results = [r for r in results if r.sold_by == "Target"]
+                return results
 
         logger.error("RedSkySearch: all API keys exhausted for '%s'", keyword)
         return []
@@ -537,6 +547,21 @@ class RedSkySearch:
                         product_avail.get("is_purchasable", False)
                     )
 
+                # Seller / sold-by info.
+                # relationship_type: "TAC" = Target as Channel (1P),
+                #   "TAF" = Target as Fulfiller (marketplace, shipped by Target),
+                #   "SA" = Seller fulfilled (3P marketplace).
+                # Also check marketplace.seller_name for explicit seller name.
+                sold_by = "Target"
+                rel_type = item_data.get("relationship_type", "") if isinstance(item_data, dict) else ""
+                marketplace = item.get("marketplace", {})
+                if isinstance(marketplace, dict):
+                    seller_name = marketplace.get("seller_name", "")
+                    if seller_name:
+                        sold_by = seller_name
+                elif rel_type in ("SA", "TAF"):
+                    sold_by = "Third-party seller"
+
                 results.append(SearchResult(
                     tcin=tcin,
                     title=title,
@@ -545,6 +570,7 @@ class RedSkySearch:
                     image_url=image_url,
                     availability_status=avail_status,
                     is_purchasable=is_purchasable,
+                    sold_by=sold_by,
                 ))
             except Exception:
                 logger.debug("RedSkySearch: skipping unparseable item", exc_info=True)
