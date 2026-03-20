@@ -1,6 +1,2 @@
-[build]
-# If Railway uses Nixpacks instead of Dockerfile, ensure Chromium is installed
-buildCommand = "pip install playwright && playwright install chromium --with-deps"
-
 [deploy]
 startCommand = "python -m pmon.cli run --host 0.0.0.0"
