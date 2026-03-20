@@ -5,6 +5,7 @@ import LoginPage from './components/LoginPage';
 import Header from './components/Header';
 import ProductList from './components/ProductList';
 import AddProduct from './components/AddProduct';
+import SearchProducts from './components/SearchProducts';
 import CheckoutLog from './components/CheckoutLog';
 import Settings from './components/Settings';
 import ErrorLog from './components/ErrorLog';
@@ -82,6 +83,7 @@ function AuthenticatedApp({ user, tab, setTab }: { user: User; tab: Tab; setTab:
               </div>
             )}
             <ProductList products={data?.products ?? []} refresh={refresh} />
+            <SearchProducts refresh={refresh} />
             <AddProduct refresh={refresh} />
           </>
         )}
