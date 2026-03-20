@@ -308,15 +308,8 @@ class TargetMonitor(BaseMonitor):
             )
 
         # 1. is_out_of_stock_in_all_store_locations — explicit flag
-        # NOTE: Only use this as a NEGATIVE signal (True = definitely OOS).
-        # False just means *some* store may have it physically — not that
-        # it's available for online purchase/shipping.
-        if fulfillment.get("is_out_of_stock_in_all_store_locations") is True:
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK, price=price,
-            )
+        if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
+            return _in_stock("is_out_of_stock_in_all_store_locations=false")
 
         # 2. shipping_options.availability_status
         shipping = fulfillment.get("shipping_options", {})
@@ -356,6 +349,17 @@ class TargetMonitor(BaseMonitor):
         reason_code = shipping.get("reason_code", "")
         if reason_code in ("SHIP_ELIGIBLE", "SHIPPING_ELIGIBLE"):
             return _in_stock(f"shipping_options.reason_code={reason_code}")
+
+        # 7. Broad string search across fulfillment JSON
+        fulfillment_str = json.dumps(fulfillment)
+        if '"IN_STOCK"' in fulfillment_str or '"AVAILABLE"' in fulfillment_str:
+            return _in_stock("broad fulfillment string search")
+
+        # 8. Broad string search across entire product JSON
+        product_str = json.dumps(product)
+        positive_signals = ['"IN_STOCK"', '"LIMITED_STOCK"', '"SHIP_ELIGIBLE"', '"SHIPPING_ELIGIBLE"']
+        if any(signal in product_str for signal in positive_signals):
+            return _in_stock("broad product string search")
 
         # Nothing found → OUT_OF_STOCK
         logger.debug(
