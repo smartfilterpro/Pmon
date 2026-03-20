@@ -1654,21 +1654,39 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 pass
 
                     if pass_found:
-                        # Click the password field to focus it, then type — human-like
+                        # Fill password — try human-like typing first, then fill() fallback
                         pw_locator = page.locator(pass_sel).first
                         await human_click_element(page, pw_locator)
                         await random_delay(page, 150, 300)
                         await human_type(page, password)
                         await random_delay(page, 200, 500)
+
                         # Verify password was entered; if empty, fall back to fill()
+                        # then dispatch input events so Best Buy's JS enables the button
                         try:
                             pw_value = await pw_locator.input_value(timeout=1000)
                             if not pw_value:
                                 logger.info("Test login %s: human_type() did not fill password, falling back to fill()", retailer_name)
+                                await pw_locator.focus(timeout=2000)
                                 await pw_locator.fill(password)
                                 await random_delay(page, 200, 400)
+                            else:
+                                logger.info("Test login %s: password entered (%d chars)", retailer_name, len(pw_value))
+                        except Exception as pw_err:
+                            logger.warning("Test login %s: password verification failed: %s — trying direct fill", retailer_name, pw_err)
+                            try:
+                                await pw_locator.focus(timeout=2000)
+                                await pw_locator.fill(password)
+                            except Exception:
+                                pass
+
+                        # Dispatch input/change events to ensure Best Buy's JS picks up the value
+                        try:
+                            await pw_locator.dispatch_event("input")
+                            await pw_locator.dispatch_event("change")
                         except Exception:
                             pass
+
                         # Wait for submit button to be enabled (grayed-out fix)
                         pw_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)

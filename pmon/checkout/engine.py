@@ -3058,12 +3058,20 @@ class CheckoutEngine:
                     )
                 if pass_filled:
                     # Verify password was entered
+                    pw_loc = page.locator('input#fld-p1, input[type="password"]').first
                     try:
-                        pw_value = await page.locator('input#fld-p1, input[type="password"]').first.input_value(timeout=1000)
+                        pw_value = await pw_loc.input_value(timeout=1000)
                         if not pw_value:
                             logger.warning("Best Buy sign-in: password empty — using fill()")
-                            await page.locator('input#fld-p1, input[type="password"]').first.fill(creds.password)
+                            await pw_loc.fill(creds.password)
                             await random_delay(page, 200, 400)
+                    except Exception:
+                        pass
+
+                    # Dispatch input/change events so Best Buy's JS enables the submit button
+                    try:
+                        await pw_loc.dispatch_event("input")
+                        await pw_loc.dispatch_event("change")
                     except Exception:
                         pass
 
