@@ -305,6 +305,105 @@ async def wait_for_button_enabled(
         return False
 
 
+async def try_recaptcha_and_force_submit(
+    page,
+    button_selector: str = 'button[type="submit"]',
+    *,
+    recaptcha_timeout: int = 5000,
+) -> bool:
+    """Try to execute reCAPTCHA Enterprise and force-submit when the button stays disabled.
+
+    Best Buy uses reCAPTCHA Enterprise in invisible mode which keeps submit
+    buttons disabled until a token is obtained.  In headless browsers the token
+    often never arrives, so this helper:
+
+    1. Attempts ``grecaptcha.enterprise.execute()`` to trigger token generation.
+    2. Waits briefly for the button to become enabled naturally.
+    3. If still disabled, removes the ``disabled`` attribute and force-clicks.
+
+    Returns True if the button was clicked, False on failure.
+    """
+    # Step 1: try to trigger reCAPTCHA Enterprise programmatically
+    recaptcha_triggered = await page.evaluate("""() => {
+        try {
+            if (typeof grecaptcha !== 'undefined' && grecaptcha.enterprise) {
+                // Find the site key from existing reCAPTCHA elements
+                const widget = document.querySelector('[data-sitekey]');
+                const siteKey = widget ? widget.getAttribute('data-sitekey') : null;
+                if (siteKey) {
+                    grecaptcha.enterprise.execute(siteKey, {action: 'LOGIN'});
+                    return 'executed_with_key';
+                }
+                // Fallback: try execute with widget ID 0 (default)
+                grecaptcha.enterprise.execute(0);
+                return 'executed_default';
+            }
+            if (typeof grecaptcha !== 'undefined' && grecaptcha.execute) {
+                grecaptcha.execute();
+                return 'executed_v2';
+            }
+            return 'no_grecaptcha';
+        } catch(e) {
+            return 'error: ' + e.message;
+        }
+    }""")
+    logger.info("reCAPTCHA trigger attempt: %s", recaptcha_triggered)
+
+    # Step 2: wait briefly for the button to enable after reCAPTCHA fires
+    if recaptcha_triggered and recaptcha_triggered.startswith("executed"):
+        enabled = await wait_for_button_enabled(
+            page, button_selector, timeout=recaptcha_timeout, poll_interval=300,
+        )
+        if enabled:
+            logger.info("Button enabled after reCAPTCHA trigger — clicking normally")
+            try:
+                await page.locator(button_selector).first.click(timeout=3000)
+                return True
+            except Exception as exc:
+                logger.warning("Normal click after reCAPTCHA failed: %s", exc)
+
+    # Step 3: force-enable the button and click it
+    logger.info("Force-enabling disabled submit button and clicking")
+    try:
+        await page.evaluate("""(selector) => {
+            const btn = document.querySelector(selector);
+            if (btn) {
+                btn.disabled = false;
+                btn.removeAttribute('disabled');
+                btn.removeAttribute('aria-disabled');
+                btn.style.pointerEvents = 'auto';
+                btn.style.opacity = '1';
+            }
+        }""", button_selector)
+        await page.locator(button_selector).first.click(force=True, timeout=3000)
+        return True
+    except Exception as exc:
+        logger.warning("Force-click on '%s' failed: %s", button_selector, exc)
+
+    # Step 4: last resort — submit the form via JS
+    try:
+        submitted = await page.evaluate("""(selector) => {
+            const btn = document.querySelector(selector);
+            if (btn) {
+                // Try clicking the DOM element directly
+                btn.click();
+                return 'clicked';
+            }
+            // Fall back to form submission
+            const form = document.querySelector('form');
+            if (form) {
+                form.submit();
+                return 'form_submitted';
+            }
+            return 'nothing_found';
+        }""", button_selector)
+        logger.info("JS fallback submit result: %s", submitted)
+        return submitted in ("clicked", "form_submitted")
+    except Exception as exc:
+        logger.warning("JS fallback submit failed: %s", exc)
+        return False
+
+
 async def wait_for_element_stable(
     page,
     selector: str,
