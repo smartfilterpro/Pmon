@@ -345,17 +345,12 @@ class TargetMonitor(BaseMonitor):
                     if sub.get("availability_status") == "IN_STOCK":
                         return _in_stock(f"store_options.{sub_key}=IN_STOCK")
 
-        # 5. Product-level availability (sometimes present outside fulfillment)
-        product_avail = product.get("availability", {})
-        if isinstance(product_avail, dict):
-            avail_status = product_avail.get("availability_status", "")
-            if avail_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
-                return _in_stock(f"product.availability.availability_status={avail_status}")
-
-        # 6. shipping reason_code for online-only items
-        reason_code = shipping.get("reason_code", "")
-        if reason_code in ("SHIP_ELIGIBLE", "SHIPPING_ELIGIBLE"):
-            return _in_stock(f"shipping_options.reason_code={reason_code}")
+        # NOTE: product.availability.availability_status is a CATALOG-level field
+        # that says "IN_STOCK" for any active product listing, even when every
+        # fulfillment method is sold out.  Do NOT use it as a positive signal.
+        #
+        # Similarly, shipping_options.reason_code ("SHIP_ELIGIBLE") only means
+        # the product CAN be shipped — not that there's inventory to ship.
 
         # Nothing found → OUT_OF_STOCK
         logger.debug(
