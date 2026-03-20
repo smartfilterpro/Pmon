@@ -1245,10 +1245,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         # Wait for submit button to be enabled (grayed-out fix)
                         email_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)
+
+                        submit_clicked = False
+                        if not email_btn_enabled:
+                            # Button stayed disabled — try reCAPTCHA trigger + force-submit first
+                            logger.info("Test login %s: email submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
+                            submit_clicked = await try_recaptcha_and_force_submit(page)
+
                         # Use multiple strategies to find and click the submit/continue button
-                        submit_clicked = await click_visible_button(page, submit_sel)
-                        if submit_clicked:
-                            logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
+                        if not submit_clicked:
+                            submit_clicked = await click_visible_button(page, submit_sel)
+                            if submit_clicked:
+                                logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
                         if not submit_clicked:
                             # Try Playwright's get_by_role which handles text matching much better
                             for btn_text in ["Continue with email", "Continue", "Sign in", "Next"]:
@@ -1273,10 +1281,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         break
                                 except Exception:
                                     continue
-                        if not submit_clicked and not email_btn_enabled:
-                            # reCAPTCHA Enterprise may be blocking — try to trigger and force-submit
-                            logger.info("Test login %s: email submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
-                            submit_clicked = await try_recaptcha_and_force_submit(page)
                         if not submit_clicked:
                             # Last resort: vision
                             logger.info("Test login %s: all selectors failed, trying vision click for submit button", retailer_name)
@@ -1690,8 +1694,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         # Wait for submit button to be enabled (grayed-out fix)
                         pw_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)
-                        # Multi-strategy submit after password entry
-                        pw_submit_clicked = await click_visible_button(page, submit_sel)
+
+                        pw_submit_clicked = False
+                        if not pw_btn_enabled:
+                            # Button stayed disabled — reCAPTCHA Enterprise is likely blocking.
+                            # Go straight to reCAPTCHA trigger + force-submit instead of
+                            # clicking the disabled button (which just gives "something went wrong").
+                            logger.info("Test login %s: password submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
+                            pw_submit_clicked = await try_recaptcha_and_force_submit(page)
+
+                        # Multi-strategy submit (only if button was enabled or reCAPTCHA didn't click)
+                        if not pw_submit_clicked:
+                            pw_submit_clicked = await click_visible_button(page, submit_sel)
                         if not pw_submit_clicked:
                             for btn_text in ["Sign In", "Sign in", "Verify", "Continue", "Log In", "Submit"]:
                                 try:
@@ -1703,10 +1717,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         break
                                 except Exception:
                                     continue
-                        if not pw_submit_clicked and not pw_btn_enabled:
-                            # reCAPTCHA Enterprise may be blocking — try to trigger and force-submit
-                            logger.info("Test login %s: password submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
-                            pw_submit_clicked = await try_recaptcha_and_force_submit(page)
                         if not pw_submit_clicked:
                             logger.info("Test login %s: trying vision for post-password submit", retailer_name)
                             await vision_click(page, "Sign In / Continue / Verify button")
