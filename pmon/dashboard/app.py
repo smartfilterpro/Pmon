@@ -842,7 +842,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         SELECTORS = {
             "target": {
                 "email": '#username, input[name="username"], input[type="email"], input[type="tel"], input[id*="username" i], input[name*="email" i], input[autocomplete="username"], input[autocomplete="email tel"]',
-                "password": '#password, input[name="password"], input[type="password"], input[id*="password" i]',
+                "password": '#password, input[name="password"], input[type="password"], input[id*="password" i], input[autocomplete="current-password"]',
                 "submit": 'button:has-text("Continue with email"), button:has-text("Continue"), button:has-text("Sign in"), button[type="submit"]',
                 "success": '#account, [data-test="accountNav"], a[href*="/account"], [data-test="@web/AccountLink"]',
                 "error": '[data-test="error"], .error-message, #error, [class*="error" i], [role="alert"]',
@@ -1589,7 +1589,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         pw_option_clicked = await vision_click(page, "Password option (radio button or link to select password sign-in method)")
 
                     if pw_option_clicked:
+                        pre_auth_url = page.url
                         await wait_for_page_ready(page, timeout=8000)
+                        post_auth_url = page.url
+                        if post_auth_url != pre_auth_url:
+                            logger.info("Test login %s: page navigated after auth method click: %s → %s", retailer_name, pre_auth_url[:80], post_auth_url[:80])
+                            # Dismiss any popups on the new page
+                            await sweep_popups(page)
                     else:
                         # Dump page diagnostics so we can see what Best Buy is actually showing
                         logger.warning("Test login %s: could not find password auth method option", retailer_name)
@@ -1669,6 +1675,104 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             except Exception:
                                 pass
 
+                    # --- Target retry: if password field didn't appear, the auth
+                    # method click may not have worked.  Sweep popups, check for
+                    # bot-block, dump diagnostics, and retry the click once. ---
+                    if not pass_found and retailer == "target":
+                        logger.warning("Test login Target: password field missing — running diagnostics and retry")
+
+                        # Sweep any overlay that appeared after the click
+                        swept = await sweep_popups(page)
+                        if swept:
+                            logger.info("Test login Target: dismissed %d popup(s) after auth method click", swept)
+
+                        # Check for bot block
+                        block_result = await _check_bot_block(page, "blocked after selecting auth method")
+                        if block_result:
+                            return block_result
+
+                        # Check if password field appeared after popup dismissal
+                        try:
+                            if await page.locator(pass_sel).first.is_visible(timeout=2000):
+                                pass_found = True
+                                logger.info("Test login Target: password field visible after popup sweep")
+                        except Exception:
+                            pass
+
+                        if not pass_found:
+                            # Log what the page actually shows
+                            try:
+                                diag = await page.evaluate("""() => {
+                                    const info = {url: location.href, title: document.title};
+                                    info.headings = Array.from(document.querySelectorAll('h1, h2, h3'))
+                                        .map(h => h.textContent.trim().substring(0, 100));
+                                    info.inputs = Array.from(document.querySelectorAll('input'))
+                                        .filter(el => el.offsetParent !== null)
+                                        .map(el => ({type: el.type, name: el.name, id: el.id, placeholder: el.placeholder}));
+                                    info.buttons = Array.from(document.querySelectorAll('a, button, [role="button"], [role="link"]'))
+                                        .filter(el => el.offsetParent !== null)
+                                        .map(el => ({tag: el.tagName, text: (el.textContent || '').trim().substring(0, 60)}));
+                                    info.iframes = document.querySelectorAll('iframe').length;
+                                    return info;
+                                }""")
+                                logger.info("Test login Target: page state after auth method click: %s", diag)
+                            except Exception:
+                                pass
+
+                            # Retry: click "Enter your password" one more time with JS
+                            try:
+                                retry_js = await page.evaluate("""() => {
+                                    const els = document.querySelectorAll('a, button, [role="button"], [role="link"], div[tabindex], span[tabindex]');
+                                    for (const el of els) {
+                                        const text = (el.textContent || '').toLowerCase().trim();
+                                        if (text.includes('password') && !text.includes('forgot') && el.offsetParent !== null) {
+                                            el.click();
+                                            return 'RETRY: ' + el.tagName + ': ' + text.substring(0, 60);
+                                        }
+                                    }
+                                    return null;
+                                }""")
+                                if retry_js:
+                                    logger.info("Test login Target: retried auth method click via JS: %s", retry_js)
+                                    await wait_for_page_ready(page, timeout=8000)
+                                    try:
+                                        await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
+                                        pass_found = True
+                                        logger.info("Test login Target: password field appeared after retry")
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                        if not pass_found:
+                            # Check for password field inside iframes
+                            try:
+                                for frame in page.frames:
+                                    if frame == page.main_frame:
+                                        continue
+                                    try:
+                                        if await frame.locator(pass_sel).first.is_visible(timeout=1000):
+                                            pass_found = True
+                                            logger.info("Test login Target: password field found inside iframe: %s", frame.url)
+                                            # Switch to using the iframe for password entry
+                                            pw_locator = frame.locator(pass_sel).first
+                                            await pw_locator.click()
+                                            await random_delay(page, 150, 300)
+                                            await frame.locator(pass_sel).first.fill(password)
+                                            await random_delay(page, 200, 500)
+                                            # Try submit within the iframe
+                                            try:
+                                                submit_btn = frame.locator('button[type="submit"]')
+                                                if await submit_btn.first.is_visible(timeout=2000):
+                                                    await submit_btn.first.click()
+                                            except Exception:
+                                                await vision_click(page, "Sign In / Continue button")
+                                            break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+
                     if pass_found:
                         # Click the password field to focus it, then type — human-like
                         pw_locator = page.locator(pass_sel).first
@@ -1711,7 +1815,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             await vision_click(page, "Sign In / Continue / Verify button")
                         else:
                             page_desc = await vision_read_page(page)
-                            msg = f"{retailer_name} login: submitted email but password field did not appear"
+                            auth_status = "after selecting auth method" if pw_option_clicked else "and auth method picker was not found"
+                            msg = f"{retailer_name} login: password field did not appear {auth_status}"
                             if page_desc:
                                 msg += f" (page shows: {page_desc})"
                             return {"ok": False, "message": msg}
