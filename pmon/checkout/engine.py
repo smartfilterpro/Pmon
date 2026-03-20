@@ -77,7 +77,6 @@ from pmon.checkout.human_behavior import (
     random_delay,
     random_mouse_jitter,
     sweep_popups,
-    try_recaptcha_and_force_submit,
     wait_for_button_enabled,
     wait_for_page_ready,
     wait_for_url_change,
@@ -2428,30 +2427,12 @@ class CheckoutEngine:
         the phone number on the account and the account holder's last name
         before showing the password field.
         """
-        # Early exit: if the auth picker ("Choose a sign-in method") is visible,
-        # this is NOT a verification page — return immediately so the main flow
-        # can handle the picker.
-        try:
-            picker_heading = page.locator('text=/choose.*sign.?in/i')
-            if await picker_heading.first.is_visible(timeout=1500):
-                logger.info("Best Buy verification: auth picker heading visible, skipping verification")
-                return
-        except Exception:
-            pass
-
-        # Detect the verification page — look for phone last 4 or last name fields.
-        # IMPORTANT: exclude radio inputs — Best Buy's auth picker has radio
-        # buttons with "phone" in their id (e.g. "Text a code to my account
-        # phone number") which must NOT be treated as verification fields.
+        # Detect the verification page — look for phone last 4 or last name fields
         verification_selectors = (
-            'input[id*="phone" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="phone" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[id*="last4" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="last4" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[id*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[id*="phoneLast" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="phoneLast" i]:not([type="radio"]):not([type="hidden"])'
+            'input[id*="phone" i], input[name*="phone" i], '
+            'input[id*="last4" i], input[name*="last4" i], '
+            'input[id*="lastDigits" i], input[name*="lastDigits" i], '
+            'input[id*="phoneLast" i], input[name*="phoneLast" i]'
         )
         last_name_selectors = (
             'input[id*="lastName" i], input[name*="lastName" i], '
@@ -2772,10 +2753,7 @@ class CheckoutEngine:
                     pass
 
                 # Submit email first (Best Buy uses multi-step sign-in)
-                email_btn_ok = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
-                if not email_btn_ok:
-                    logger.info("Best Buy sign-in: email submit button still disabled, trying reCAPTCHA force-submit")
-                    await try_recaptcha_and_force_submit(page)
+                await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
                 await self._multi_strategy_click(page, "Continue", [
                     "Continue", "Sign In", "Next",
                 ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Sign In")')
@@ -3058,28 +3036,16 @@ class CheckoutEngine:
                     )
                 if pass_filled:
                     # Verify password was entered
-                    pw_loc = page.locator('input#fld-p1, input[type="password"]').first
                     try:
-                        pw_value = await pw_loc.input_value(timeout=1000)
+                        pw_value = await page.locator('input#fld-p1, input[type="password"]').first.input_value(timeout=1000)
                         if not pw_value:
                             logger.warning("Best Buy sign-in: password empty — using fill()")
-                            await pw_loc.fill(creds.password)
+                            await page.locator('input#fld-p1, input[type="password"]').first.fill(creds.password)
                             await random_delay(page, 200, 400)
                     except Exception:
                         pass
 
-                    # Dispatch input/change events so Best Buy's JS enables the submit button
-                    try:
-                        await pw_loc.dispatch_event("input")
-                        await pw_loc.dispatch_event("change")
-                    except Exception:
-                        pass
-
-                    pw_btn_ok = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
-                    if not pw_btn_ok:
-                        # reCAPTCHA Enterprise may be keeping the button disabled
-                        logger.info("Best Buy sign-in: submit button still disabled, trying reCAPTCHA force-submit")
-                        await try_recaptcha_and_force_submit(page)
+                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
 
                     pre_url = page.url
                     await self._multi_strategy_click(page, "Sign In", [

@@ -31,8 +31,6 @@ def setup_logging(verbose: bool = False):
     # Also capture WARNING+ to database
     from pmon.log_handler import DatabaseLogHandler
     logging.getLogger().addHandler(DatabaseLogHandler())
-    # Silence httpx request logging (noisy during stock polling)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def main():
