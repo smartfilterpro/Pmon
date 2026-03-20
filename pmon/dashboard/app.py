@@ -2087,18 +2087,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         if not code:
             return JSONResponse({"error": "code is required"}, 400)
-        if not otp_id:
-            return JSONResponse({"error": "No pending OTP request found"}, 404)
 
         # Strip spaces/dashes from code
         code = code.replace(" ", "").replace("-", "")
+
+        if not otp_id:
+            # No pending request yet — store for when the engine creates one
+            db.store_presubmitted_otp(user["id"], code)
+            logger.info("OTP code pre-submitted for user %d (no pending request yet)", user["id"])
+            return {"ok": True, "code": code, "message": "Code stored — it will be used when the login is ready."}
 
         ok = db.submit_otp_code(int(otp_id), code)
         if not ok:
             return JSONResponse({"error": "OTP request not found or already resolved"}, 404)
 
         logger.info("OTP code submitted for request %s", otp_id)
-        return {"ok": True, "message": "Code received, entering it now..."}
+        return {"ok": True, "code": code, "message": "Code received, entering it now..."}
 
     # --- Monitor control ---
 
