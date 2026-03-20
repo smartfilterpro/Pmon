@@ -533,7 +533,12 @@ def get_user_by_api_key(api_key: str) -> dict | None:
 # --- OTP relay operations ---
 
 def create_otp_request(user_id: int, retailer: str, context: str = "") -> int:
-    """Create a pending OTP request. Returns the request id."""
+    """Create a pending OTP request. Returns the request id.
+
+    If a pre-submitted OTP code exists (user sent the code before the request
+    was created), the new request is created with that code already attached
+    so the polling loop picks it up immediately.
+    """
     db = get_db()
     # Expire any stale pending requests for this user+retailer
     db.execute(
@@ -541,10 +546,20 @@ def create_otp_request(user_id: int, retailer: str, context: str = "") -> int:
         "WHERE user_id = ? AND retailer = ? AND status = 'pending'",
         (user_id, retailer),
     )
-    cursor = db.execute(
-        "INSERT INTO otp_requests (user_id, retailer, context) VALUES (?, ?, ?)",
-        (user_id, retailer, context),
-    )
+
+    # Check for a pre-submitted code (user sent the OTP before we asked)
+    pre_code = consume_presubmitted_otp(user_id)
+    if pre_code:
+        cursor = db.execute(
+            "INSERT INTO otp_requests (user_id, retailer, context, code, status, resolved_at) "
+            "VALUES (?, ?, ?, ?, 'submitted', datetime('now'))",
+            (user_id, retailer, context, pre_code),
+        )
+    else:
+        cursor = db.execute(
+            "INSERT INTO otp_requests (user_id, retailer, context) VALUES (?, ?, ?)",
+            (user_id, retailer, context),
+        )
     db.commit()
     return cursor.lastrowid
 
@@ -599,6 +614,48 @@ def expire_otp_request(otp_id: int):
         (otp_id,),
     )
     db.commit()
+
+
+def store_presubmitted_otp(user_id: int, code: str):
+    """Store an OTP code that arrived before the request was created.
+
+    Uses a special retailer='_presubmit' row. Only the most recent code is
+    kept (older ones are expired). Codes older than 5 minutes are ignored
+    by consume_presubmitted_otp.
+    """
+    db = get_db()
+    # Expire any existing pre-submitted codes for this user
+    db.execute(
+        "UPDATE otp_requests SET status = 'expired' "
+        "WHERE user_id = ? AND retailer = '_presubmit' AND status = 'submitted'",
+        (user_id,),
+    )
+    db.execute(
+        "INSERT INTO otp_requests (user_id, retailer, context, code, status, resolved_at) "
+        "VALUES (?, '_presubmit', 'early_submit', ?, 'submitted', datetime('now'))",
+        (user_id, code),
+    )
+    db.commit()
+
+
+def consume_presubmitted_otp(user_id: int) -> str | None:
+    """Retrieve and expire a pre-submitted OTP code (if any, within 5 minutes)."""
+    db = get_db()
+    row = db.execute(
+        "SELECT id, code FROM otp_requests "
+        "WHERE user_id = ? AND retailer = '_presubmit' AND status = 'submitted' "
+        "AND created_at >= datetime('now', '-5 minutes') "
+        "ORDER BY created_at DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if row and row["code"]:
+        db.execute(
+            "UPDATE otp_requests SET status = 'expired' WHERE id = ?",
+            (row["id"],),
+        )
+        db.commit()
+        return row["code"]
+    return None
 
 
 def get_error_log(user_id: int | None = None, limit: int = 100) -> list[dict]:
