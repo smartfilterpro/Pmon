@@ -1413,20 +1413,32 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         try:
                             bb_otp_option_clicked = await page.evaluate("""() => {
                                 const phrases = ['text me', 'send a text', 'text message',
-                                    'text code', 'send code to', 'sms',
+                                    'text code', 'send code to',
                                     'send me a text', 'text verification'];
                                 const allEls = document.querySelectorAll(
                                     'label, span, div, a, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]'
                                 );
+                                let bestMatch = null;
+                                let bestLen = Infinity;
                                 for (const el of allEls) {
-                                    const text = (el.textContent || '').trim().toLowerCase();
                                     if (el.offsetParent === null) continue;
+                                    const text = (el.textContent || '').trim().toLowerCase();
+                                    // Skip large container elements — real options have short text
+                                    if (text.length > 80) continue;
                                     for (const phrase of phrases) {
                                         if (text.includes(phrase)) {
-                                            el.click();
-                                            return el.tagName + ': ' + (el.textContent || '').trim().substring(0, 80);
+                                            // Prefer the smallest (most specific) matching element
+                                            if (text.length < bestLen) {
+                                                bestMatch = el;
+                                                bestLen = text.length;
+                                            }
+                                            break;
                                         }
                                     }
+                                }
+                                if (bestMatch) {
+                                    bestMatch.click();
+                                    return bestMatch.tagName + ': ' + (bestMatch.textContent || '').trim().substring(0, 80);
                                 }
                                 return null;
                             }""")
