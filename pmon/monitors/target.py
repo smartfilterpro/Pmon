@@ -142,7 +142,8 @@ class TargetMonitor(BaseMonitor):
                     data = resp.json()
                     result = self._parse_fulfillment(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
-                        logger.info(
+                        log_fn = logger.info if result.status != StockStatus.OUT_OF_STOCK else logger.debug
+                        log_fn(
                             "Target stock for %s: %s (via fulfillment API)",
                             product_name, result.status.value,
                         )
@@ -197,7 +198,8 @@ class TargetMonitor(BaseMonitor):
                     data = resp.json()
                     result = self._parse_pdp(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
-                        logger.info("Target stock for %s: %s (via pdp_client_v1)", product_name, result.status.value)
+                        log_fn = logger.info if result.status != StockStatus.OUT_OF_STOCK else logger.debug
+                        log_fn("Target stock for %s: %s (via pdp_client_v1)", product_name, result.status.value)
                         # If we had a fulfillment result with status but no price,
                         # use the fulfillment status with the PDP price
                         if fulfillment_result and not fulfillment_result.price and result.price:
