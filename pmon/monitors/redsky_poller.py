@@ -561,6 +561,137 @@ class RedSkySearch:
         self._api_keys = [api_key] if api_key else list(self._API_KEYS)
         self._visitor_id = uuid.uuid4().hex
 
+    @staticmethod
+    def _extract_tcin(text: str) -> str | None:
+        """Try to extract a TCIN from a Target URL or raw number."""
+        # Target URL: .../A-12345678 or .../A-12345678?...
+        match = re.search(r"A-(\d{6,10})", text)
+        if match:
+            return match.group(1)
+        # Raw TCIN (just digits, 6-10 chars)
+        stripped = text.strip()
+        if re.fullmatch(r"\d{6,10}", stripped):
+            return stripped
+        return None
+
+    async def lookup_tcin(self, tcin: str) -> SearchResult | None:
+        """Look up a single TCIN via the pdp_client_v1 endpoint.
+
+        This works for products that are delisted from search but still
+        have a product page.
+        """
+        async with httpx.AsyncClient(
+            headers=API_HEADERS,
+            follow_redirects=True,
+            timeout=httpx.Timeout(15.0),
+            http2=True,
+        ) as client:
+            for api_key in self._api_keys:
+                params = {
+                    "key": api_key,
+                    "tcin": tcin,
+                    "is_bot": "false",
+                    "store_id": self.store_id,
+                    "pricing_store_id": self.store_id,
+                    "has_pricing_store_id": "true",
+                    "has_financing_options": "true",
+                    "include_obsolete": "true",
+                    "skip_personalized": "true",
+                    "skip_variation_hierarchy": "true",
+                    "visitor_id": self._visitor_id,
+                    "channel": "WEB",
+                    "page": f"/p/A-{tcin}",
+                }
+                headers = {
+                    **API_HEADERS,
+                    "Referer": f"https://www.target.com/p/A-{tcin}",
+                    "Origin": "https://www.target.com",
+                    "x-application-name": "web",
+                }
+                try:
+                    resp = await client.get(
+                        RedSkyPoller.REDSKY_PDP, params=params, headers=headers,
+                    )
+                except httpx.HTTPError as exc:
+                    logger.warning("RedSkySearch lookup: network error: %s", exc)
+                    continue
+
+                if resp.status_code == 403:
+                    self._visitor_id = uuid.uuid4().hex
+                    continue
+                if resp.status_code != 200:
+                    logger.debug("RedSkySearch lookup: HTTP %d for TCIN %s", resp.status_code, tcin)
+                    continue
+
+                try:
+                    product = resp.json().get("data", {}).get("product", {})
+                except Exception:
+                    continue
+
+                if not product:
+                    continue
+
+                # Parse the same fields as search results
+                item_data = product.get("item", {})
+                title = ""
+                if isinstance(item_data, dict):
+                    desc = item_data.get("product_description", {})
+                    if isinstance(desc, dict):
+                        title = desc.get("title", "")
+
+                price = ""
+                price_info = product.get("price", {})
+                if isinstance(price_info, dict):
+                    price = price_info.get("formatted_current_price", "")
+
+                image_url = ""
+                if isinstance(item_data, dict):
+                    enrichment = item_data.get("enrichment", {})
+                    if isinstance(enrichment, dict):
+                        images = enrichment.get("images", {})
+                        if isinstance(images, dict):
+                            image_url = images.get("primary_image_url", "")
+
+                avail_status = ""
+                is_purchasable = False
+                fulfillment = product.get("fulfillment", {})
+                if isinstance(fulfillment, dict):
+                    shipping = fulfillment.get("shipping_options", {})
+                    if isinstance(shipping, dict):
+                        avail_status = shipping.get("availability_status", "")
+                product_avail = product.get("availability", {})
+                if isinstance(product_avail, dict):
+                    pa = product_avail.get("availability_status", "")
+                    if pa:
+                        avail_status = pa
+                    is_purchasable = bool(product_avail.get("is_purchasable", False))
+
+                # Broad check
+                if avail_status not in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER", "COMING_SOON"):
+                    ful_str = json.dumps(fulfillment)
+                    if '"IN_STOCK"' in ful_str or '"AVAILABLE"' in ful_str:
+                        avail_status = "IN_STOCK"
+
+                sold_by = _extract_seller(product)
+                street_date, release_label = _extract_release_info(product)
+
+                logger.info("RedSkySearch: direct lookup found TCIN %s — %s", tcin, title)
+                return SearchResult(
+                    tcin=tcin,
+                    title=title,
+                    price=price,
+                    url=f"https://www.target.com/p/-/A-{tcin}",
+                    image_url=image_url,
+                    availability_status=avail_status,
+                    is_purchasable=is_purchasable,
+                    sold_by=sold_by,
+                    street_date=street_date,
+                    release_label=release_label,
+                )
+
+        logger.warning("RedSkySearch: direct lookup failed for TCIN %s", tcin)
+        return None
+
     async def find(
         self,
         keyword: str,
@@ -570,12 +701,23 @@ class RedSkySearch:
     ) -> list[SearchResult]:
         """Search Target for *keyword* and return matching products.
 
+        If *keyword* is a TCIN or Target URL, does a direct PDP lookup
+        instead of searching (works for delisted/unlisted products).
+
         If *sold_by_target_only* is True, results are filtered to items
         sold and shipped by Target (excludes marketplace / 3P sellers).
 
         If *include_out_of_stock* is True, disables Target's default
         purchasability filter so unlisted / OOS products can appear.
         """
+        # Direct TCIN / URL lookup — bypass search index entirely
+        tcin = self._extract_tcin(keyword)
+        if tcin:
+            result = await self.lookup_tcin(tcin)
+            if result:
+                return [result]
+            return []
+
         async with httpx.AsyncClient(
             headers=API_HEADERS,
             follow_redirects=True,
