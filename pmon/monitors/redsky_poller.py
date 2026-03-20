@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Callable, Coroutine
@@ -389,6 +390,61 @@ class SearchResult:
     sold_by: str = ""  # e.g. "Target" or marketplace seller name
 
 
+def _extract_seller(product: dict) -> str:
+    """Determine who sells a Target product by scanning the full product dict.
+
+    Returns "Target" for first-party items, or the seller/vendor name for
+    marketplace items.  Uses a multi-path approach because the search API
+    nests seller info inconsistently across product types.
+    """
+    product_str = json.dumps(product)
+
+    # 1. Explicit seller_name in marketplace data (strongest signal)
+    for key in ("marketplace", "marketplace_attributes"):
+        mp = product.get(key, {})
+        if isinstance(mp, dict):
+            seller = mp.get("seller_name", "") or mp.get("seller_display_name", "")
+            if seller and seller.lower() != "target":
+                return seller
+        # Sometimes it's nested under item
+        item = product.get("item", {})
+        if isinstance(item, dict):
+            mp2 = item.get(key, {})
+            if isinstance(mp2, dict):
+                seller = mp2.get("seller_name", "") or mp2.get("seller_display_name", "")
+                if seller and seller.lower() != "target":
+                    return seller
+
+    # 2. relationship_type in item data
+    item = product.get("item", {})
+    if isinstance(item, dict):
+        rel = item.get("relationship_type", "")
+        if rel in ("SA", "TAF"):
+            return "Third-party seller"
+
+    # 3. product_vendors — array of vendor objects
+    vendors = item.get("product_vendors", []) if isinstance(item, dict) else []
+    if isinstance(vendors, list):
+        for v in vendors:
+            if isinstance(v, dict):
+                vname = v.get("vendor_name", "")
+                if vname and vname.upper() != "TARGET":
+                    return vname
+
+    # 4. Broad string scan for marketplace / third-party signals
+    # Check for "Target Plus" partner program or explicit marketplace flags
+    if '"Target Plus"' in product_str or '"target plus"' in product_str.lower():
+        return "Target Plus partner"
+    # Look for seller_name deeper in nested structures
+    match = re.search(r'"seller_name"\s*:\s*"([^"]+)"', product_str)
+    if match:
+        seller = match.group(1)
+        if seller.lower() != "target" and seller.lower() != "target corporation":
+            return seller
+
+    return "Target"
+
+
 class RedSkySearch:
     """Search Target's RedSky API by keyword and resolve to TCINs.
 
@@ -480,7 +536,10 @@ class RedSkySearch:
 
                 results = self._parse_search(resp.json())
                 if sold_by_target_only:
-                    results = [r for r in results if r.sold_by == "Target"]
+                    results = [
+                        r for r in results
+                        if r.sold_by.lower() in ("target", "target corporation")
+                    ]
                 return results
 
         logger.error("RedSkySearch: all API keys exhausted for '%s'", keyword)
@@ -548,19 +607,15 @@ class RedSkySearch:
                     )
 
                 # Seller / sold-by info.
-                # relationship_type: "TAC" = Target as Channel (1P),
-                #   "TAF" = Target as Fulfiller (marketplace, shipped by Target),
-                #   "SA" = Seller fulfilled (3P marketplace).
-                # Also check marketplace.seller_name for explicit seller name.
-                sold_by = "Target"
-                rel_type = item_data.get("relationship_type", "") if isinstance(item_data, dict) else ""
-                marketplace = item.get("marketplace", {})
-                if isinstance(marketplace, dict):
-                    seller_name = marketplace.get("seller_name", "")
-                    if seller_name:
-                        sold_by = seller_name
-                elif rel_type in ("SA", "TAF"):
-                    sold_by = "Third-party seller"
+                # Target's search API uses multiple paths to indicate the seller:
+                #   - item.relationship_type: "TAC" (1P Target), "TAF" (fulfilled
+                #     by Target but 3P seller), "SA" (3P seller-fulfilled)
+                #   - marketplace / marketplace_attributes with seller_name
+                #   - product_vendors with vendor_name
+                #   - fulfillment.vendor_id or partner fields
+                # Since the exact nesting varies, we do a broad scan of the
+                # product JSON for known third-party signals.
+                sold_by = _extract_seller(item)
 
                 results.append(SearchResult(
                     tcin=tcin,
