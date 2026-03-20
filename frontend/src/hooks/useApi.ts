@@ -149,12 +149,20 @@ export interface TargetSearchResult {
   image_url: string;
   availability_status: string;
   is_purchasable: boolean;
+  sold_by: string;
 }
 
-export async function searchTarget(keyword: string, maxResults = 10): Promise<TargetSearchResult[]> {
+export async function searchTarget(
+  keyword: string,
+  opts: { maxResults?: number; soldByTargetOnly?: boolean } = {},
+): Promise<TargetSearchResult[]> {
   const resp = await apiFetch('/search', {
     method: 'POST',
-    body: JSON.stringify({ keyword, max_results: maxResults }),
+    body: JSON.stringify({
+      keyword,
+      max_results: opts.maxResults ?? 10,
+      sold_by_target_only: opts.soldByTargetOnly ?? false,
+    }),
   });
   const data = await resp.json();
   if (!resp.ok || data.error) throw new Error(data.error || 'Search failed');

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { searchTarget, addProduct, type TargetSearchResult } from '../hooks/useApi';
-import { Search, Plus, Loader, ShoppingCart, Check } from 'lucide-react';
+import { Search, Plus, Loader, ShoppingCart, Check, Store } from 'lucide-react';
 import './SearchProducts.css';
 
 interface Props {
@@ -15,6 +15,7 @@ export default function SearchProducts({ refresh }: Props) {
   const [added, setAdded] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState<Set<string>>(new Set());
   const [hasSearched, setHasSearched] = useState(false);
+  const [targetOnly, setTargetOnly] = useState(false);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,9 +27,9 @@ export default function SearchProducts({ refresh }: Props) {
     setAdded(new Set());
     setHasSearched(true);
     try {
-      const res = await searchTarget(keyword.trim());
+      const res = await searchTarget(keyword.trim(), { soldByTargetOnly: targetOnly });
       setResults(res);
-      if (res.length === 0) setError('No products found');
+      if (res.length === 0) setError(targetOnly ? 'No products found sold by Target' : 'No products found');
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -75,6 +76,15 @@ export default function SearchProducts({ refresh }: Props) {
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
         />
+        <label className="target-only-label">
+          <input
+            type="checkbox"
+            checked={targetOnly}
+            onChange={(e) => setTargetOnly(e.target.checked)}
+          />
+          <Store size={13} />
+          Sold by Target
+        </label>
         <button type="submit" className="search-btn" disabled={searching || !keyword.trim()}>
           {searching ? <Loader size={14} className="spinner" /> : <Search size={14} />}
           {searching ? 'Searching...' : 'Search'}
@@ -101,6 +111,9 @@ export default function SearchProducts({ refresh }: Props) {
                   <span className="search-result-price">{r.price || 'No price'}</span>
                   <span className={`search-result-status status-${statusClass(r)}`}>
                     {statusLabel(r)}
+                  </span>
+                  <span className={`search-result-seller ${r.sold_by === 'Target' ? 'seller-target' : 'seller-3p'}`}>
+                    {r.sold_by || 'Unknown seller'}
                   </span>
                   <span className="search-result-tcin">TCIN {r.tcin}</span>
                 </div>
