@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import sqlite3
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,50 +36,17 @@ def _default_db_path() -> Path:
 DB_PATH = _default_db_path()
 
 _conn: sqlite3.Connection | None = None
-_db_lock = threading.RLock()
 
 
-class _ThreadSafeConnection:
-    """Wraps a sqlite3.Connection so every execute/commit is serialized."""
-
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
-
-    def execute(self, sql: str, parameters: tuple | list = ()) -> sqlite3.Cursor:
-        with _db_lock:
-            return self._conn.execute(sql, parameters)
-
-    def executemany(self, sql: str, seq_of_params) -> sqlite3.Cursor:
-        with _db_lock:
-            return self._conn.executemany(sql, seq_of_params)
-
-    def commit(self):
-        with _db_lock:
-            self._conn.commit()
-
-    def rollback(self):
-        with _db_lock:
-            self._conn.rollback()
-
-    @property
-    def row_factory(self):
-        return self._conn.row_factory
-
-    @row_factory.setter
-    def row_factory(self, value):
-        self._conn.row_factory = value
-
-
-def get_db() -> _ThreadSafeConnection:
+def get_db() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        raw = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        raw.row_factory = sqlite3.Row
-        raw.execute("PRAGMA journal_mode=WAL")
-        raw.execute("PRAGMA foreign_keys=ON")
-        _init_tables(raw)
-        _conn = _ThreadSafeConnection(raw)
+        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA foreign_keys=ON")
+        _init_tables(_conn)
     return _conn
 
 
@@ -567,12 +533,7 @@ def get_user_by_api_key(api_key: str) -> dict | None:
 # --- OTP relay operations ---
 
 def create_otp_request(user_id: int, retailer: str, context: str = "") -> int:
-    """Create a pending OTP request. Returns the request id.
-
-    If a pre-submitted OTP code exists (user sent the code before the request
-    was created), the new request is created with that code already attached
-    so the polling loop picks it up immediately.
-    """
+    """Create a pending OTP request. Returns the request id."""
     db = get_db()
     # Expire any stale pending requests for this user+retailer
     db.execute(
@@ -580,20 +541,10 @@ def create_otp_request(user_id: int, retailer: str, context: str = "") -> int:
         "WHERE user_id = ? AND retailer = ? AND status = 'pending'",
         (user_id, retailer),
     )
-
-    # Check for a pre-submitted code (user sent the OTP before we asked)
-    pre_code = consume_presubmitted_otp(user_id)
-    if pre_code:
-        cursor = db.execute(
-            "INSERT INTO otp_requests (user_id, retailer, context, code, status, resolved_at) "
-            "VALUES (?, ?, ?, ?, 'submitted', datetime('now'))",
-            (user_id, retailer, context, pre_code),
-        )
-    else:
-        cursor = db.execute(
-            "INSERT INTO otp_requests (user_id, retailer, context) VALUES (?, ?, ?)",
-            (user_id, retailer, context),
-        )
+    cursor = db.execute(
+        "INSERT INTO otp_requests (user_id, retailer, context) VALUES (?, ?, ?)",
+        (user_id, retailer, context),
+    )
     db.commit()
     return cursor.lastrowid
 
@@ -648,48 +599,6 @@ def expire_otp_request(otp_id: int):
         (otp_id,),
     )
     db.commit()
-
-
-def store_presubmitted_otp(user_id: int, code: str):
-    """Store an OTP code that arrived before the request was created.
-
-    Uses a special retailer='_presubmit' row. Only the most recent code is
-    kept (older ones are expired). Codes older than 5 minutes are ignored
-    by consume_presubmitted_otp.
-    """
-    db = get_db()
-    # Expire any existing pre-submitted codes for this user
-    db.execute(
-        "UPDATE otp_requests SET status = 'expired' "
-        "WHERE user_id = ? AND retailer = '_presubmit' AND status = 'submitted'",
-        (user_id,),
-    )
-    db.execute(
-        "INSERT INTO otp_requests (user_id, retailer, context, code, status, resolved_at) "
-        "VALUES (?, '_presubmit', 'early_submit', ?, 'submitted', datetime('now'))",
-        (user_id, code),
-    )
-    db.commit()
-
-
-def consume_presubmitted_otp(user_id: int) -> str | None:
-    """Retrieve and expire a pre-submitted OTP code (if any, within 5 minutes)."""
-    db = get_db()
-    row = db.execute(
-        "SELECT id, code FROM otp_requests "
-        "WHERE user_id = ? AND retailer = '_presubmit' AND status = 'submitted' "
-        "AND created_at >= datetime('now', '-5 minutes') "
-        "ORDER BY created_at DESC LIMIT 1",
-        (user_id,),
-    ).fetchone()
-    if row and row["code"]:
-        db.execute(
-            "UPDATE otp_requests SET status = 'expired' WHERE id = ?",
-            (row["id"],),
-        )
-        db.commit()
-        return row["code"]
-    return None
 
 
 def get_error_log(user_id: int | None = None, limit: int = 100) -> list[dict]:

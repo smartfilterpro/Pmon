@@ -474,31 +474,15 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         and last name before showing the password field.
         """
         from pmon.checkout.human_behavior import (
-            human_click_element, human_type, random_delay, try_recaptcha_and_force_submit, wait_for_button_enabled, wait_for_page_ready,
+            human_click_element, human_type, random_delay, wait_for_button_enabled, wait_for_page_ready,
         )
 
-        # Early exit: if the auth picker ("Choose a sign-in method") is visible,
-        # this is NOT a verification page.
-        try:
-            picker_heading = page.locator('text=/choose.*sign.?in/i')
-            if await picker_heading.first.is_visible(timeout=1500):
-                logger.info("Best Buy test: auth picker heading visible, skipping verification")
-                return
-        except Exception:
-            pass
-
-        # Check if verification fields are visible.
-        # IMPORTANT: exclude radio inputs — Best Buy's auth picker has radio
-        # buttons with "phone" in their id which are NOT verification fields.
+        # Check if verification fields are visible
         phone_selectors = (
-            'input[id*="phone" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="phone" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[id*="last4" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="last4" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[id*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[id*="phoneLast" i]:not([type="radio"]):not([type="hidden"]), '
-            'input[name*="phoneLast" i]:not([type="radio"]):not([type="hidden"])'
+            'input[id*="phone" i], input[name*="phone" i], '
+            'input[id*="last4" i], input[name*="last4" i], '
+            'input[id*="lastDigits" i], input[name*="lastDigits" i], '
+            'input[id*="phoneLast" i], input[name*="phoneLast" i]'
         )
         last_name_selectors = (
             'input[id*="lastName" i], input[name*="lastName" i], '
@@ -673,7 +657,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             random_delay,
             random_mouse_jitter,
             sweep_popups,
-            try_recaptcha_and_force_submit,
             wait_for_button_enabled,
             wait_for_page_ready,
             wait_for_url_change,
@@ -1200,7 +1183,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     except Exception:
                         pass
                     # Wait for submit button to be enabled (grayed-out fix)
-                    btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                     await random_delay(page, 100, 300)
                     # Try selector click, then get_by_role, then vision
                     single_submit_clicked = await click_visible_button(page, submit_sel)
@@ -1214,10 +1197,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     break
                             except Exception:
                                 continue
-                    if not single_submit_clicked and not btn_enabled:
-                        # reCAPTCHA Enterprise may be blocking — try to trigger and force-submit
-                        logger.info("Test login %s: submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
-                        single_submit_clicked = await try_recaptcha_and_force_submit(page)
                     if not single_submit_clicked:
                         await vision_click(page, "Sign In / Continue / Verify button")
                 else:
@@ -1243,20 +1222,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # Multi-step: submit email/phone first (unless auth picker already showing)
                     if not auth_picker_already_visible:
                         # Wait for submit button to be enabled (grayed-out fix)
-                        email_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)
-
-                        submit_clicked = False
-                        if not email_btn_enabled:
-                            # Button stayed disabled — try reCAPTCHA trigger + force-submit first
-                            logger.info("Test login %s: email submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
-                            submit_clicked = await try_recaptcha_and_force_submit(page)
-
                         # Use multiple strategies to find and click the submit/continue button
-                        if not submit_clicked:
-                            submit_clicked = await click_visible_button(page, submit_sel)
-                            if submit_clicked:
-                                logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
+                        submit_clicked = await click_visible_button(page, submit_sel)
+                        if submit_clicked:
+                            logger.info("Test login %s: clicked submit via CSS selector", retailer_name)
                         if not submit_clicked:
                             # Try Playwright's get_by_role which handles text matching much better
                             for btn_text in ["Continue with email", "Continue", "Sign in", "Next"]:
@@ -1398,338 +1369,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # - Target: links/buttons "Enter your password", "Use a passkey", "Get a code"
                     # - Walmart: radio buttons "Text me a verification code", "Email me a verification code", "Password"
                     # - Best Buy: tabs/options for text code, email code, Google, password
-                    #   Best Buy reCAPTCHA Enterprise blocks password submit in headless, so use OTP text instead.
                     pw_option_clicked = False
-                    bb_otp_completed = False
 
                     # Re-dismiss overlays (Target's consent modal can reappear after email submit)
                     await sweep_popups(page)
-
-                    # --- Best Buy: choose OTP text option instead of password ---
-                    # reCAPTCHA Enterprise consistently blocks password submit in headless mode,
-                    # so go straight to OTP text verification which is more reliable.
-                    if retailer == "bestbuy":
-                        bb_otp_option_clicked = False
-                        bb_otp_auto_sent = False
-
-                        # Wait for the auth picker or OTP page to fully render
-                        await random_delay(page, 1000, 2000)
-                        try:
-                            await page.locator(
-                                'text=/choose.*sign.?in/i, text=/one-time code/i, '
-                                'text=/verification code/i, text=/enter.*code/i, '
-                                'text=/use password/i, input[type="radio"], '
-                                'input[type="password"]'
-                            ).first.wait_for(state="visible", timeout=8000)
-                        except Exception:
-                            # Page may not have any recognizable element yet — continue anyway
-                            pass
-
-                        # Check if Best Buy auto-sent OTP (no picker, directly on code entry page)
-                        try:
-                            auto_otp = await page.locator(
-                                'text=/one-time code/i, text=/enter your code/i, '
-                                'text=/enter the code/i, text=/verification code/i, '
-                                'text=/code sent/i, text=/we sent/i, text=/we texted/i'
-                            ).first.is_visible(timeout=2000)
-                            if auto_otp:
-                                bb_otp_auto_sent = True
-                                logger.info("Test login %s: OTP was auto-sent (landed on code entry page directly)", retailer_name)
-                        except Exception:
-                            pass
-
-                        if not bb_otp_auto_sent:
-                            # Log what's on the auth picker page before clicking
-                            try:
-                                page_desc = await vision_read_page(page)
-                                logger.info("Test login %s: auth picker page: %s", retailer_name, page_desc)
-                            except Exception:
-                                pass
-
-                            # Dump interactive elements for diagnostics
-                            try:
-                                diag = await page.evaluate("""() => {
-                                    const els = document.querySelectorAll(
-                                        'label, a, button, [role="radio"], [role="tab"], [role="option"], '
-                                        + '[role="button"], input[type="radio"], [tabindex]'
-                                    );
-                                    const items = [];
-                                    for (const el of els) {
-                                        const text = (el.textContent || '').trim().substring(0, 80);
-                                        if (!text) continue;
-                                        items.push({
-                                            tag: el.tagName, role: el.getAttribute('role'),
-                                            type: el.type || null, id: el.id || null,
-                                            text: text, visible: el.offsetParent !== null,
-                                        });
-                                    }
-                                    return {url: location.href, title: document.title, elements: items};
-                                }""")
-                                logger.info("Test login %s: auth picker diagnostics: %s", retailer_name, diag)
-                            except Exception:
-                                pass
-
-                            # Strategy 1: Use JS to FIND the best element, mark it, then
-                            # use Playwright's native click (which fires real mouse events).
-                            # JS .click() doesn't work on Best Buy's React radio buttons.
-                            try:
-                                marked = await page.evaluate("""() => {
-                                    const phrases = ['text me', 'send a text', 'text message',
-                                        'text code', 'send code to', 'send me a text',
-                                        'text verification', 'one-time code', 'one time code',
-                                        'verification code', 'send.*code', 'get a code',
-                                        'code via text', 'code to your phone', 'sms',
-                                        'text a code', 'code via sms'];
-                                    const allEls = document.querySelectorAll(
-                                        'label, span, div, a, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]'
-                                    );
-                                    let bestMatch = null;
-                                    let bestLen = Infinity;
-                                    for (const el of allEls) {
-                                        if (el.offsetParent === null) continue;
-                                        const text = (el.textContent || '').trim().toLowerCase();
-                                        if (text.length > 80) continue;
-                                        // Skip "use password" and similar non-OTP options
-                                        if (text.includes('password')) continue;
-                                        for (const phrase of phrases) {
-                                            if (text.includes(phrase)) {
-                                                if (text.length < bestLen) {
-                                                    bestMatch = el;
-                                                    bestLen = text.length;
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if (bestMatch) {
-                                        bestMatch.setAttribute('data-pmon-otp-target', 'true');
-                                        return bestMatch.tagName + ': ' + (bestMatch.textContent || '').trim().substring(0, 80);
-                                    }
-                                    return null;
-                                }""")
-                                if marked:
-                                    logger.info("Test login %s: found OTP element via JS: %s", retailer_name, marked)
-                                    otp_target = page.locator('[data-pmon-otp-target="true"]')
-                                    if await otp_target.first.is_visible(timeout=2000):
-                                        await otp_target.first.click()
-                                        bb_otp_option_clicked = marked
-                                        logger.info("Test login %s: Playwright-clicked OTP target", retailer_name)
-                                    # Clean up marker
-                                    await page.evaluate("""() => {
-                                        const el = document.querySelector('[data-pmon-otp-target]');
-                                        if (el) el.removeAttribute('data-pmon-otp-target');
-                                    }""")
-                            except Exception as e:
-                                logger.debug("Test login %s: BB OTP JS+Playwright click failed: %s", retailer_name, e)
-
-                            # Strategy 2: Playwright get_by_text with common OTP phrases
-                            if not bb_otp_option_clicked:
-                                for otp_text in [
-                                    "one-time code", "One-time code", "Text me",
-                                    "Send a text", "Text message", "Send code",
-                                    "verification code", "Get a code", "Send a code",
-                                    "code via text", "code to your phone",
-                                ]:
-                                    try:
-                                        otp_btn = page.get_by_text(otp_text, exact=False)
-                                        if await otp_btn.first.is_visible(timeout=500):
-                                            await otp_btn.first.click()
-                                            bb_otp_option_clicked = otp_text
-                                            logger.info("Test login %s: clicked OTP option via get_by_text: %s", retailer_name, otp_text)
-                                            break
-                                    except Exception:
-                                        continue
-
-                            # Strategy 2b: Try clicking labels for radio buttons (Best Buy pattern)
-                            if not bb_otp_option_clicked:
-                                try:
-                                    labels = page.locator("label")
-                                    label_count = await labels.count()
-                                    for i in range(min(label_count, 10)):
-                                        label_el = labels.nth(i)
-                                        try:
-                                            label_text = (await label_el.inner_text(timeout=500)).strip().lower()
-                                            # Click the first label that looks like an OTP/text option (not password)
-                                            if ("password" not in label_text and
-                                                any(kw in label_text for kw in [
-                                                    "text", "code", "sms", "one-time", "otp",
-                                                    "verification", "phone", "mobile",
-                                                ])):
-                                                await label_el.click()
-                                                bb_otp_option_clicked = f"label: {label_text[:60]}"
-                                                logger.info("Test login %s: clicked OTP label: %s", retailer_name, label_text[:60])
-                                                break
-                                        except Exception:
-                                            continue
-                                except Exception as e:
-                                    logger.debug("Test login %s: label scan failed: %s", retailer_name, e)
-
-                            # Strategy 3: Vision fallback — ask Claude to click the text/SMS option
-                            if not bb_otp_option_clicked:
-                                try:
-                                    vision_result = await vision_click(
-                                        page,
-                                        "Click the option to receive a verification code via text message or SMS. "
-                                        "Look for options like 'one-time code', 'Text me a code', 'Send a text', "
-                                        "'Verification code', or similar. Do NOT click 'Use password'. "
-                                        "Click the TEXT/SMS/code option."
-                                    )
-                                    if vision_result:
-                                        bb_otp_option_clicked = "vision"
-                                        logger.info("Test login %s: clicked OTP option via vision", retailer_name)
-                                except Exception as e:
-                                    logger.debug("Test login %s: BB OTP vision click failed: %s", retailer_name, e)
-
-                        if bb_otp_option_clicked or bb_otp_auto_sent:
-                            if bb_otp_option_clicked:
-                                logger.info("Test login %s: clicked OTP text option: %s", retailer_name, bb_otp_option_clicked)
-                            await random_delay(page, 500, 1000)
-
-                            otp_send_clicked = bb_otp_auto_sent  # Already sent if auto
-
-                            if not bb_otp_auto_sent:
-                                # Log screenshot after selecting OTP option (before submit)
-                                try:
-                                    pre_submit_desc = await vision_read_page(page)
-                                    logger.info("Test login %s: page after OTP selection (pre-submit): %s", retailer_name, pre_submit_desc)
-                                except Exception:
-                                    pass
-
-                                # Capture URL before submit to detect page navigation
-                                url_before_submit = page.url
-
-                                # Monitor network responses around OTP submit to detect rejections
-                                otp_network_responses = []
-                                async def _capture_response(response):
-                                    try:
-                                        url_str = response.url
-                                        if any(kw in url_str.lower() for kw in ["otp", "code", "verify", "identity", "signin", "token", "auth", "challenge"]):
-                                            otp_network_responses.append({
-                                                "url": url_str[:200],
-                                                "status": response.status,
-                                            })
-                                    except Exception:
-                                        pass
-                                page.on("response", _capture_response)
-
-                                # Click submit to send the OTP text
-
-                                # Strategy A: wait for submit button to be enabled, then click it
-                                otp_send_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
-                                if otp_send_btn_enabled:
-                                    # Button is enabled — click it directly
-                                    try:
-                                        await page.locator('button[type="submit"]').first.click(timeout=3000)
-                                        otp_send_clicked = True
-                                        logger.info("Test login %s: clicked enabled submit button", retailer_name)
-                                    except Exception as e:
-                                        logger.debug("Test login %s: enabled submit click failed: %s", retailer_name, e)
-
-                                # Strategy B: reCAPTCHA force-submit if button stayed disabled
-                                if not otp_send_clicked and not otp_send_btn_enabled:
-                                    otp_send_clicked = await try_recaptcha_and_force_submit(page)
-                                    if otp_send_clicked:
-                                        logger.info("Test login %s: reCAPTCHA force-submit succeeded", retailer_name)
-
-                                # Strategy C: try broader submit selectors
-                                if not otp_send_clicked:
-                                    otp_send_clicked = await click_visible_button(page, submit_sel)
-                                    if otp_send_clicked:
-                                        logger.info("Test login %s: clicked submit via submit_sel", retailer_name)
-
-                                # Strategy D: try common button text
-                                if not otp_send_clicked:
-                                    for btn_text in ["Continue", "Send", "Send code", "Submit", "Verify", "Send Code"]:
-                                        try:
-                                            btn = page.get_by_role("button", name=btn_text, exact=False)
-                                            if await btn.first.is_visible(timeout=500):
-                                                await btn.first.click()
-                                                otp_send_clicked = True
-                                                logger.info("Test login %s: clicked '%s' button", retailer_name, btn_text)
-                                                break
-                                        except Exception:
-                                            continue
-
-                                # Strategy E: press Enter as last resort (some forms submit on Enter)
-                                if not otp_send_clicked:
-                                    try:
-                                        await page.keyboard.press("Enter")
-                                        otp_send_clicked = True
-                                        logger.info("Test login %s: pressed Enter to submit OTP request", retailer_name)
-                                    except Exception:
-                                        pass
-
-                                if otp_send_clicked:
-                                    await wait_for_page_ready(page, timeout=10000)
-
-                                    # Stop capturing network responses and log them
-                                    try:
-                                        page.remove_listener("response", _capture_response)
-                                    except Exception:
-                                        pass
-                                    if otp_network_responses:
-                                        logger.info("Test login %s: network responses after OTP submit: %s", retailer_name, otp_network_responses)
-                                    else:
-                                        logger.info("Test login %s: no relevant network responses captured after OTP submit", retailer_name)
-
-                                    # Log page state after submit to see if OTP was sent or if there's an error
-                                    try:
-                                        post_submit_desc = await vision_read_page(page)
-                                        logger.info("Test login %s: page after OTP submit: %s", retailer_name, post_submit_desc)
-                                    except Exception:
-                                        pass
-
-                                    # Check if we're on a new page (OTP input page) or still on auth picker
-                                    url_after_submit = page.url
-                                    if url_after_submit != url_before_submit:
-                                        logger.info("Test login %s: page navigated after OTP submit: %s → %s", retailer_name, url_before_submit, url_after_submit)
-
-                                    # Check for error messages that might indicate the OTP send failed
-                                    error_detected = False
-                                    try:
-                                        error_loc = page.locator('.c-alert, .error-message, [class*="error" i], [role="alert"]')
-                                        if await error_loc.first.is_visible(timeout=2000):
-                                            error_text = await error_loc.first.inner_text(timeout=1000)
-                                            logger.warning("Test login %s: error after OTP submit: %s", retailer_name, error_text)
-                                            error_detected = True
-                                    except Exception:
-                                        pass
-
-                                    if error_detected:
-                                        logger.warning("Test login %s: OTP send may have failed — error detected on page", retailer_name)
-
-                            # Whether auto-sent or manually submitted, check for OTP entry page
-                            if otp_send_clicked:
-                                # Look for indicators that we're now on the OTP code entry page
-                                otp_entry_visible = False
-                                try:
-                                    otp_entry_visible = await page.locator(
-                                        'input[type="text"], input[type="tel"], input[type="number"], '
-                                        'input[inputmode="numeric"], input[autocomplete="one-time-code"], '
-                                        'text=/enter.*code/i, text=/verification code/i, text=/code sent/i'
-                                    ).first.is_visible(timeout=5000)
-                                except Exception:
-                                    pass
-
-                                if otp_entry_visible:
-                                    logger.info("Test login %s: OTP entry page detected — code should be sent", retailer_name)
-
-                                otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
-                                logger.info("Test login %s: OTP text submitted, waiting for code (otp_id=%d)", retailer_name, otp_id)
-                                code = await _poll_for_otp_code(otp_id, timeout_seconds=300)
-                                if code:
-                                    await _enter_otp_code(page, code)
-                                    logger.info("Test login %s: OTP code entered", retailer_name)
-                                    # Skip password entry — go straight to post-login checks
-                                    pw_option_clicked = True
-                                    bb_otp_completed = True  # Signal to skip password flow entirely
-                                else:
-                                    db.expire_otp_request(otp_id)
-                                    return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
-                            else:
-                                logger.warning("Test login %s: could not click submit after OTP option", retailer_name)
-                        else:
-                            logger.info("Test login %s: OTP text option not found, falling back to password", retailer_name)
 
                     # Check if password field is already visible (no picker needed)
                     try:
@@ -1837,9 +1480,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             except Exception:
                                 continue
 
-                    # Strategy 3: get_by_role("radio") for radio-button pickers
+                    # Strategy 3: get_by_role("radio") for radio-button pickers (Walmart)
                     if not pw_option_clicked:
-                        for option_text in ["Use password", "Password"]:
+                        for option_text in ["Password"]:
                             try:
                                 opt = page.get_by_role("radio", name=option_text, exact=False)
                                 if await opt.first.is_visible(timeout=500):
@@ -1971,71 +1614,41 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
 
                     # Wait for password field — selectors first, then vision
-                    # Skip if Best Buy OTP text flow already completed login
                     pass_found = False
-                    if not bb_otp_completed:
-                        try:
-                            await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
-                            pass_found = True
-                        except Exception:
-                            # Password field didn't appear — verification may show after auth picker
-                            if retailer == "bestbuy":
-                                await _bestbuy_test_verification(page, user, email_sel, pass_sel, vision_fill, vision_click, vision_read_page)
-                                try:
-                                    await page.locator(pass_sel).first.wait_for(state="visible", timeout=5000)
-                                    pass_found = True
-                                except Exception:
-                                    pass
+                    try:
+                        await page.locator(pass_sel).first.wait_for(state="visible", timeout=10000)
+                        pass_found = True
+                    except Exception:
+                        # Password field didn't appear — verification may show after auth picker
+                        if retailer == "bestbuy":
+                            await _bestbuy_test_verification(page, user, email_sel, pass_sel, vision_fill, vision_click, vision_read_page)
+                            try:
+                                await page.locator(pass_sel).first.wait_for(state="visible", timeout=5000)
+                                pass_found = True
+                            except Exception:
+                                pass
 
                     if pass_found:
-                        # Fill password — try human-like typing first, then fill() fallback
+                        # Click the password field to focus it, then type — human-like
                         pw_locator = page.locator(pass_sel).first
                         await human_click_element(page, pw_locator)
                         await random_delay(page, 150, 300)
                         await human_type(page, password)
                         await random_delay(page, 200, 500)
-
                         # Verify password was entered; if empty, fall back to fill()
-                        # then dispatch input events so Best Buy's JS enables the button
                         try:
                             pw_value = await pw_locator.input_value(timeout=1000)
                             if not pw_value:
                                 logger.info("Test login %s: human_type() did not fill password, falling back to fill()", retailer_name)
-                                await pw_locator.focus(timeout=2000)
                                 await pw_locator.fill(password)
                                 await random_delay(page, 200, 400)
-                            else:
-                                logger.info("Test login %s: password entered (%d chars)", retailer_name, len(pw_value))
-                        except Exception as pw_err:
-                            logger.warning("Test login %s: password verification failed: %s — trying direct fill", retailer_name, pw_err)
-                            try:
-                                await pw_locator.focus(timeout=2000)
-                                await pw_locator.fill(password)
-                            except Exception:
-                                pass
-
-                        # Dispatch input/change events to ensure Best Buy's JS picks up the value
-                        try:
-                            await pw_locator.dispatch_event("input")
-                            await pw_locator.dispatch_event("change")
                         except Exception:
                             pass
-
                         # Wait for submit button to be enabled (grayed-out fix)
-                        pw_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)
-
-                        pw_submit_clicked = False
-                        if not pw_btn_enabled:
-                            # Button stayed disabled — reCAPTCHA Enterprise is likely blocking.
-                            # Go straight to reCAPTCHA trigger + force-submit instead of
-                            # clicking the disabled button (which just gives "something went wrong").
-                            logger.info("Test login %s: password submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
-                            pw_submit_clicked = await try_recaptcha_and_force_submit(page)
-
-                        # Multi-strategy submit (only if button was enabled or reCAPTCHA didn't click)
-                        if not pw_submit_clicked:
-                            pw_submit_clicked = await click_visible_button(page, submit_sel)
+                        # Multi-strategy submit after password entry
+                        pw_submit_clicked = await click_visible_button(page, submit_sel)
                         if not pw_submit_clicked:
                             for btn_text in ["Sign In", "Sign in", "Verify", "Continue", "Log In", "Submit"]:
                                 try:
@@ -2474,23 +2087,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         if not code:
             return JSONResponse({"error": "code is required"}, 400)
-
-        # Strip spaces, dashes, and any trailing whitespace from code
-        code = code.replace(" ", "").replace("-", "").strip()
-
         if not otp_id:
-            # No pending request yet — store the code for when the engine
-            # creates the request (user submitted OTP before the app was ready)
-            db.store_presubmitted_otp(user["id"], code)
-            logger.info("OTP code pre-submitted for user %d (no pending request yet)", user["id"])
-            return {"ok": True, "code": code, "message": "Code stored — it will be used when the login is ready."}
+            return JSONResponse({"error": "No pending OTP request found"}, 404)
+
+        # Strip spaces/dashes from code
+        code = code.replace(" ", "").replace("-", "")
 
         ok = db.submit_otp_code(int(otp_id), code)
         if not ok:
             return JSONResponse({"error": "OTP request not found or already resolved"}, 404)
 
         logger.info("OTP code submitted for request %s", otp_id)
-        return {"ok": True, "code": code, "message": "Code received, entering it now..."}
+        return {"ok": True, "message": "Code received, entering it now..."}
 
     # --- Monitor control ---
 
