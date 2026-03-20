@@ -2620,13 +2620,9 @@ class CheckoutEngine:
                     await otp_input.fill(code)
                     await asyncio.sleep(0.5)
                     # Try clicking submit/verify/continue
-                    clicked = await self._multi_strategy_click(page, "Verify Code", [
-                        "Continue", "Verify", "Verify Code", "Submit", "Sign In",
-                    ], 'button[type="submit"], input[type="submit"], button:has-text("Continue"), button:has-text("Verify"), button:has-text("Sign In")')
-                    if not clicked:
-                        # Fallback: press Enter on the OTP input to submit the form
-                        logger.info("%s: OTP submit button not found — pressing Enter as fallback", retailer)
-                        await otp_input.press("Enter")
+                    await self._multi_strategy_click(page, "Verify Code", [
+                        "Continue", "Verify", "Submit", "Sign In",
+                    ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Verify")')
                     await wait_for_page_ready(page, timeout=10000)
                     logger.info("%s: OTP code entered and submitted successfully", retailer)
                     return None  # Success — continue checkout
