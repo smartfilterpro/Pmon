@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -36,17 +37,50 @@ def _default_db_path() -> Path:
 DB_PATH = _default_db_path()
 
 _conn: sqlite3.Connection | None = None
+_db_lock = threading.RLock()
 
 
-def get_db() -> sqlite3.Connection:
+class _ThreadSafeConnection:
+    """Wraps a sqlite3.Connection so every execute/commit is serialized."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def execute(self, sql: str, parameters: tuple | list = ()) -> sqlite3.Cursor:
+        with _db_lock:
+            return self._conn.execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_params) -> sqlite3.Cursor:
+        with _db_lock:
+            return self._conn.executemany(sql, seq_of_params)
+
+    def commit(self):
+        with _db_lock:
+            self._conn.commit()
+
+    def rollback(self):
+        with _db_lock:
+            self._conn.rollback()
+
+    @property
+    def row_factory(self):
+        return self._conn.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value):
+        self._conn.row_factory = value
+
+
+def get_db() -> _ThreadSafeConnection:
     global _conn
     if _conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA foreign_keys=ON")
-        _init_tables(_conn)
+        raw = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        raw.row_factory = sqlite3.Row
+        raw.execute("PRAGMA journal_mode=WAL")
+        raw.execute("PRAGMA foreign_keys=ON")
+        _init_tables(raw)
+        _conn = _ThreadSafeConnection(raw)
     return _conn
 
 
