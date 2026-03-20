@@ -77,6 +77,7 @@ from pmon.checkout.human_behavior import (
     random_delay,
     random_mouse_jitter,
     sweep_popups,
+    try_recaptcha_and_force_submit,
     wait_for_button_enabled,
     wait_for_page_ready,
     wait_for_url_change,
@@ -2753,7 +2754,10 @@ class CheckoutEngine:
                     pass
 
                 # Submit email first (Best Buy uses multi-step sign-in)
-                await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                email_btn_ok = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                if not email_btn_ok:
+                    logger.info("Best Buy sign-in: email submit button still disabled, trying reCAPTCHA force-submit")
+                    await try_recaptcha_and_force_submit(page)
                 await self._multi_strategy_click(page, "Continue", [
                     "Continue", "Sign In", "Next",
                 ], 'button[type="submit"], button:has-text("Continue"), button:has-text("Sign In")')
@@ -3045,7 +3049,11 @@ class CheckoutEngine:
                     except Exception:
                         pass
 
-                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                    pw_btn_ok = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                    if not pw_btn_ok:
+                        # reCAPTCHA Enterprise may be keeping the button disabled
+                        logger.info("Best Buy sign-in: submit button still disabled, trying reCAPTCHA force-submit")
+                        await try_recaptcha_and_force_submit(page)
 
                     pre_url = page.url
                     await self._multi_strategy_click(page, "Sign In", [

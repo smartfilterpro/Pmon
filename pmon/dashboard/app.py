@@ -474,7 +474,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         and last name before showing the password field.
         """
         from pmon.checkout.human_behavior import (
-            human_click_element, human_type, random_delay, wait_for_button_enabled, wait_for_page_ready,
+            human_click_element, human_type, random_delay, try_recaptcha_and_force_submit, wait_for_button_enabled, wait_for_page_ready,
         )
 
         # Check if verification fields are visible
@@ -657,6 +657,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             random_delay,
             random_mouse_jitter,
             sweep_popups,
+            try_recaptcha_and_force_submit,
             wait_for_button_enabled,
             wait_for_page_ready,
             wait_for_url_change,
@@ -1183,7 +1184,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     except Exception:
                         pass
                     # Wait for submit button to be enabled (grayed-out fix)
-                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                    btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                     await random_delay(page, 100, 300)
                     # Try selector click, then get_by_role, then vision
                     single_submit_clicked = await click_visible_button(page, submit_sel)
@@ -1197,6 +1198,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                     break
                             except Exception:
                                 continue
+                    if not single_submit_clicked and not btn_enabled:
+                        # reCAPTCHA Enterprise may be blocking — try to trigger and force-submit
+                        logger.info("Test login %s: submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
+                        single_submit_clicked = await try_recaptcha_and_force_submit(page)
                     if not single_submit_clicked:
                         await vision_click(page, "Sign In / Continue / Verify button")
                 else:
@@ -1222,7 +1227,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # Multi-step: submit email/phone first (unless auth picker already showing)
                     if not auth_picker_already_visible:
                         # Wait for submit button to be enabled (grayed-out fix)
-                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        email_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)
                         # Use multiple strategies to find and click the submit/continue button
                         submit_clicked = await click_visible_button(page, submit_sel)
@@ -1252,6 +1257,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         break
                                 except Exception:
                                     continue
+                        if not submit_clicked and not email_btn_enabled:
+                            # reCAPTCHA Enterprise may be blocking — try to trigger and force-submit
+                            logger.info("Test login %s: email submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
+                            submit_clicked = await try_recaptcha_and_force_submit(page)
                         if not submit_clicked:
                             # Last resort: vision
                             logger.info("Test login %s: all selectors failed, trying vision click for submit button", retailer_name)
@@ -1645,7 +1654,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         except Exception:
                             pass
                         # Wait for submit button to be enabled (grayed-out fix)
-                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        pw_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
                         await random_delay(page, 100, 300)
                         # Multi-strategy submit after password entry
                         pw_submit_clicked = await click_visible_button(page, submit_sel)
@@ -1660,6 +1669,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         break
                                 except Exception:
                                     continue
+                        if not pw_submit_clicked and not pw_btn_enabled:
+                            # reCAPTCHA Enterprise may be blocking — try to trigger and force-submit
+                            logger.info("Test login %s: password submit button stayed disabled, trying reCAPTCHA force-submit", retailer_name)
+                            pw_submit_clicked = await try_recaptcha_and_force_submit(page)
                         if not pw_submit_clicked:
                             logger.info("Test login %s: trying vision for post-password submit", retailer_name)
                             await vision_click(page, "Sign In / Continue / Verify button")
