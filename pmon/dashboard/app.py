@@ -1474,14 +1474,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             # JS .click() doesn't work on Best Buy's React radio buttons.
                             try:
                                 marked = await page.evaluate("""() => {
-                                    const phrases = ['text me', 'send a text', 'text message',
-                                        'text code', 'send code to', 'send me a text',
-                                        'text verification', 'one-time code', 'one time code',
-                                        'verification code', 'send.*code', 'get a code',
-                                        'code via text', 'code to your phone', 'sms',
-                                        'text a code', 'code via sms'];
+                                    const phrases = ['text a code', 'text me a code',
+                                        'text me', 'send a text', 'send code to',
+                                        'send me a text', 'one-time code', 'one time code',
+                                        'verification code', 'get a code',
+                                        'code via text', 'code to my phone',
+                                        'code to your phone', 'text a code'];
+                                    // Skip elements containing these terms (footer links, etc.)
+                                    const skipTerms = ['password', 'terms', 'policy', 'condition',
+                                        'privacy', 'interest-based', 'mobile site'];
                                     const allEls = document.querySelectorAll(
-                                        'label, span, div, a, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]'
+                                        'label, span, div, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]'
                                     );
                                     let bestMatch = null;
                                     let bestLen = Infinity;
@@ -1489,13 +1492,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         if (el.offsetParent === null) continue;
                                         const text = (el.textContent || '').trim().toLowerCase();
                                         if (text.length > 80) continue;
-                                        // Skip "use password" and similar non-OTP options
-                                        if (text.includes('password')) continue;
+                                        // Skip non-OTP elements
+                                        if (skipTerms.some(t => text.includes(t))) continue;
+                                        // Prefer labels (Best Buy uses label for radio options)
+                                        const isLabel = el.tagName === 'LABEL';
                                         for (const phrase of phrases) {
                                             if (text.includes(phrase)) {
-                                                if (text.length < bestLen) {
+                                                // Prefer labels over other elements; among same type, prefer shorter text
+                                                const effectiveLen = isLabel ? text.length - 100 : text.length;
+                                                if (effectiveLen < bestLen) {
                                                     bestMatch = el;
-                                                    bestLen = text.length;
+                                                    bestLen = effectiveLen;
                                                 }
                                                 break;
                                             }
@@ -1525,10 +1532,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             # Strategy 2: Playwright get_by_text with common OTP phrases
                             if not bb_otp_option_clicked:
                                 for otp_text in [
-                                    "one-time code", "One-time code", "Text me",
-                                    "Send a text", "Text message", "Send code",
-                                    "verification code", "Get a code", "Send a code",
-                                    "code via text", "code to your phone",
+                                    "Text a code", "Text a code to my phone",
+                                    "one-time code", "Text me a code", "Text me",
+                                    "Send a text", "Send code", "Send a code",
+                                    "verification code", "Get a code",
+                                    "code via text", "code to my phone",
+                                    "code to your phone",
                                 ]:
                                     try:
                                         otp_btn = page.get_by_text(otp_text, exact=False)
@@ -1549,12 +1558,16 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         label_el = labels.nth(i)
                                         try:
                                             label_text = (await label_el.inner_text(timeout=500)).strip().lower()
-                                            # Click the first label that looks like an OTP/text option (not password)
-                                            if ("password" not in label_text and
-                                                any(kw in label_text for kw in [
-                                                    "text", "code", "sms", "one-time", "otp",
-                                                    "verification", "phone", "mobile",
-                                                ])):
+                                            # Skip non-OTP labels (password, form field labels, footer links)
+                                            skip_words = ["password", "terms", "policy", "last 4",
+                                                          "last name", "email", "google", "sign-in link"]
+                                            if any(sw in label_text for sw in skip_words):
+                                                continue
+                                            # Click the first label that looks like an OTP/text option
+                                            if any(kw in label_text for kw in [
+                                                "text", "code", "sms", "one-time", "otp",
+                                                "verification",
+                                            ]):
                                                 await label_el.click()
                                                 bb_otp_option_clicked = f"label: {label_text[:60]}"
                                                 logger.info("Test login %s: clicked OTP label: %s", retailer_name, label_text[:60])
@@ -1588,10 +1601,79 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             otp_send_clicked = bb_otp_auto_sent  # Already sent if auto
 
                             if not bb_otp_auto_sent:
-                                # Log screenshot after selecting OTP option (before submit)
+                                # --- Fill phone last 4 + last name if visible on auth picker ---
+                                # Best Buy's "Text a code" option shows these fields on the same page.
+                                accounts = db.get_retailer_accounts(user["id"])
+                                bb_acc = accounts.get("bestbuy", {})
+                                bb_phone_last4 = bb_acc.get("phone_last4", "")
+                                bb_last_name = bb_acc.get("account_last_name", "")
+
+                                phone_selectors = (
+                                    'input[id*="phone" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[name*="phone" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[id*="last4" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[name*="last4" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[id*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[name*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[id*="phoneLast" i]:not([type="radio"]):not([type="hidden"]), '
+                                    'input[name*="phoneLast" i]:not([type="radio"]):not([type="hidden"])'
+                                )
+                                last_name_selectors = (
+                                    'input[id*="lastName" i], input[name*="lastName" i], '
+                                    'input[id*="last_name" i], input[name*="last_name" i], '
+                                    'input[id*="familyName" i], input[name*="familyName" i]'
+                                )
+
+                                # Fill phone last 4
+                                if bb_phone_last4:
+                                    try:
+                                        phone_loc = page.locator(phone_selectors).first
+                                        if await phone_loc.is_visible(timeout=2000):
+                                            await human_click_element(page, phone_loc)
+                                            await random_delay(page, 100, 250)
+                                            await human_type(page, bb_phone_last4)
+                                            logger.info("Test login %s: filled phone last 4 on auth picker", retailer_name)
+                                        else:
+                                            logger.debug("Test login %s: phone last 4 field not visible on auth picker", retailer_name)
+                                    except Exception as e:
+                                        logger.debug("Test login %s: phone last 4 fill failed: %s", retailer_name, e)
+                                        # Vision fallback
+                                        try:
+                                            await vision_fill(page, "last 4 digits of phone number input", bb_phone_last4)
+                                        except Exception:
+                                            pass
+                                else:
+                                    logger.warning("Test login %s: phone_last4 not configured — OTP text may fail", retailer_name)
+
+                                await random_delay(page, 200, 400)
+
+                                # Fill last name
+                                if bb_last_name:
+                                    try:
+                                        name_loc = page.locator(last_name_selectors).first
+                                        if await name_loc.is_visible(timeout=2000):
+                                            await human_click_element(page, name_loc)
+                                            await random_delay(page, 100, 250)
+                                            await human_type(page, bb_last_name)
+                                            logger.info("Test login %s: filled last name on auth picker", retailer_name)
+                                        else:
+                                            logger.debug("Test login %s: last name field not visible on auth picker", retailer_name)
+                                    except Exception as e:
+                                        logger.debug("Test login %s: last name fill failed: %s", retailer_name, e)
+                                        # Vision fallback
+                                        try:
+                                            await vision_fill(page, "last name input", bb_last_name)
+                                        except Exception:
+                                            pass
+                                else:
+                                    logger.warning("Test login %s: account_last_name not configured — OTP text may fail", retailer_name)
+
+                                await random_delay(page, 300, 600)
+
+                                # Log screenshot after selecting OTP option and filling fields (before submit)
                                 try:
                                     pre_submit_desc = await vision_read_page(page)
-                                    logger.info("Test login %s: page after OTP selection (pre-submit): %s", retailer_name, pre_submit_desc)
+                                    logger.info("Test login %s: page after OTP selection + field fill (pre-submit): %s", retailer_name, pre_submit_desc)
                                 except Exception:
                                     pass
 
