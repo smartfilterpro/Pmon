@@ -477,12 +477,28 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             human_click_element, human_type, random_delay, wait_for_button_enabled, wait_for_page_ready,
         )
 
-        # Check if verification fields are visible
+        # Early exit: if the auth picker ("Choose a sign-in method") is visible,
+        # this is NOT a verification page.
+        try:
+            picker_heading = page.locator('text=/choose.*sign.?in/i')
+            if await picker_heading.first.is_visible(timeout=1500):
+                logger.info("Best Buy test: auth picker heading visible, skipping verification")
+                return
+        except Exception:
+            pass
+
+        # Check if verification fields are visible.
+        # IMPORTANT: exclude radio inputs — Best Buy's auth picker has radio
+        # buttons with "phone" in their id which are NOT verification fields.
         phone_selectors = (
-            'input[id*="phone" i], input[name*="phone" i], '
-            'input[id*="last4" i], input[name*="last4" i], '
-            'input[id*="lastDigits" i], input[name*="lastDigits" i], '
-            'input[id*="phoneLast" i], input[name*="phoneLast" i]'
+            'input[id*="phone" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="phone" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[id*="last4" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="last4" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[id*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="lastDigits" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[id*="phoneLast" i]:not([type="radio"]):not([type="hidden"]), '
+            'input[name*="phoneLast" i]:not([type="radio"]):not([type="hidden"])'
         )
         last_name_selectors = (
             'input[id*="lastName" i], input[name*="lastName" i], '
@@ -1480,9 +1496,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             except Exception:
                                 continue
 
-                    # Strategy 3: get_by_role("radio") for radio-button pickers (Walmart)
+                    # Strategy 3: get_by_role("radio") for radio-button pickers
                     if not pw_option_clicked:
-                        for option_text in ["Password"]:
+                        for option_text in ["Use password", "Password"]:
                             try:
                                 opt = page.get_by_role("radio", name=option_text, exact=False)
                                 if await opt.first.is_visible(timeout=500):
@@ -2088,22 +2104,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if not code:
             return JSONResponse({"error": "code is required"}, 400)
 
-        # Strip spaces/dashes from code
-        code = code.replace(" ", "").replace("-", "")
+        # Strip spaces, dashes, and any trailing whitespace from code
+        code = code.replace(" ", "").replace("-", "").strip()
 
         if not otp_id:
             # No pending request yet — store the code for when the engine
             # creates the request (user submitted OTP before the app was ready)
             db.store_presubmitted_otp(user["id"], code)
             logger.info("OTP code pre-submitted for user %d (no pending request yet)", user["id"])
-            return {"ok": True, "message": "Code stored — it will be used when the login is ready."}
+            return {"ok": True, "code": code, "message": "Code stored — it will be used when the login is ready."}
 
         ok = db.submit_otp_code(int(otp_id), code)
         if not ok:
             return JSONResponse({"error": "OTP request not found or already resolved"}, 404)
 
         logger.info("OTP code submitted for request %s", otp_id)
-        return {"ok": True, "message": "Code received, entering it now..."}
+        return {"ok": True, "code": code, "message": "Code received, entering it now..."}
 
     # --- Monitor control ---
 
