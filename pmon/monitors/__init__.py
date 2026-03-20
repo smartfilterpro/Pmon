@@ -5,6 +5,7 @@ from .pokemoncenter import PokemonCenterMonitor
 from .target import TargetMonitor
 from .bestbuy import BestBuyMonitor
 from .walmart import WalmartMonitor
+from .redsky_poller import RedSkyPoller, RedSkyProductData
 
 MONITORS: dict[str, type[BaseMonitor]] = {
     "pokemoncenter": PokemonCenterMonitor,
