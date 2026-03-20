@@ -14,8 +14,7 @@ WORKDIR /app
 # Install Python deps first (cached layer — only re-runs when requirements change)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir playwright \
-    && playwright install chromium
+    && playwright install chromium --with-deps
 
 # Copy project files (changes here don't invalidate the pip install layer)
 COPY . .
