@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
 import random
+import subprocess
 import time
 from abc import ABC, abstractmethod
 
@@ -14,19 +16,82 @@ from pmon.models import StockResult, StockStatus
 
 logger = logging.getLogger(__name__)
 
-# Current Chrome version — MUST match the actual Playwright Chromium binary.
+# Chrome version — auto-detected from the installed Playwright Chromium binary.
 # Mismatch between UA string and real browser version is a top bot signal.
-# Run: ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome --version
-_CHROME_MAJOR = "141"
-_CHROME_FULL = "141.0.7390.37"
+# Falls back to current stable Chrome (146) for HTTP-only paths when no binary found.
+_FALLBACK_CHROME_MAJOR = "146"
+_FALLBACK_CHROME_FULL = "146.0.7680.80"
 
-# Realistic browser headers that match the actual Playwright Chromium version.
+
+def _detect_chromium_version() -> tuple[str, str]:
+    """Auto-detect Chrome version from the installed Playwright Chromium binary.
+
+    Returns (major, full) version strings.  Falls back to _FALLBACK values
+    if the binary is not found or cannot be queried.
+    """
+    # Check standard Playwright cache locations
+    search_paths = [
+        # Linux
+        "~/.cache/ms-playwright/chromium-*/chrome-linux/chrome",
+        "~/.cache/ms-playwright/chrome-*/chrome-linux/chrome",
+        # macOS
+        "~/Library/Caches/ms-playwright/chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    ]
+
+    import os
+    for pattern in search_paths:
+        expanded = glob.glob(os.path.expanduser(pattern))
+        if expanded:
+            binary = expanded[-1]  # Use the latest revision
+            try:
+                result = subprocess.run(
+                    [binary, "--version"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                # Output like "Chromium 141.0.7390.37" or "Google Chrome 146.0.6794.0"
+                version_line = result.stdout.strip()
+                parts = version_line.split()
+                if parts:
+                    version = parts[-1]  # Last token is the version number
+                    major = version.split(".")[0]
+                    if major.isdigit():
+                        return major, version
+            except Exception:
+                pass
+
+    return _FALLBACK_CHROME_MAJOR, _FALLBACK_CHROME_FULL
+
+
+# Browser automation version — matches actual Playwright Chromium binary.
+# Used by Playwright browser context to ensure JS fingerprint consistency.
+_CHROME_MAJOR, _CHROME_FULL = _detect_chromium_version()
+
+# HTTP-only version — use the latest stable Chrome for pure HTTP requests
+# (monitors, API checkout) where there's no browser fingerprint to cross-check.
+# This prevents PerimeterX from flagging HTTP requests with an outdated UA.
+_HTTP_CHROME_MAJOR = max(_CHROME_MAJOR, _FALLBACK_CHROME_MAJOR, key=lambda v: int(v))
+_HTTP_CHROME_FULL = _CHROME_FULL if _HTTP_CHROME_MAJOR == _CHROME_MAJOR else _FALLBACK_CHROME_FULL
+
+# Warn if the detected version is more than 2 major versions behind current stable
+try:
+    if int(_CHROME_MAJOR) < int(_FALLBACK_CHROME_MAJOR) - 2:
+        logger.warning(
+            "Playwright Chromium is outdated (v%s, current stable is %s). "
+            "PerimeterX may flag this as a bot. "
+            "Run: pip install --upgrade playwright && playwright install chromium",
+            _CHROME_FULL, _FALLBACK_CHROME_FULL,
+        )
+except (ValueError, TypeError):
+    pass
+
+# Realistic browser headers using latest Chrome version.
+# Used for HTTP-only requests (monitors, API checkout) — no browser binary involved.
 # Includes Sec-Ch-Ua and Sec-Fetch-* headers that modern browsers always send.
 DEFAULT_HEADERS = {
     "User-Agent": (
         f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) "
-        f"Chrome/{_CHROME_FULL} Safari/537.36"
+        f"Chrome/{_HTTP_CHROME_FULL} Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -34,7 +99,7 @@ DEFAULT_HEADERS = {
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     # Client-hint headers — Chrome sends these on every navigation request.
-    "Sec-Ch-Ua": f'"Chromium";v="{_CHROME_MAJOR}", "Google Chrome";v="{_CHROME_MAJOR}", "Not?A_Brand";v="24"',
+    "Sec-Ch-Ua": f'"Chromium";v="{_HTTP_CHROME_MAJOR}", "Google Chrome";v="{_HTTP_CHROME_MAJOR}", "Not?A_Brand";v="24"',
     "Sec-Ch-Ua-Mobile": "?0",
     "Sec-Ch-Ua-Platform": '"Windows"',
     # Sec-Fetch headers — their absence is the #1 bot signal for PerimeterX.
