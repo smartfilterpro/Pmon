@@ -1,13 +1,16 @@
-"""Dedicated RedSky API poller for a single Target TCIN.
+"""Dedicated RedSky API poller and keyword search for Target products.
 
-Unlike TargetMonitor (which checks stock once per engine cycle across many
-products), RedSkyPoller runs its own tight polling loop for a single product
-and fires an async callback the moment availability is detected.  This lets
-the checkout orchestrator subscribe and trigger immediately:
+RedSkyPoller — tight polling loop for a single TCIN:
 
     poller = RedSkyPoller(tcin="12345678", interval_ms=5000)
     poller.on("available", my_async_handler)
     await poller.start()
+
+RedSkySearch — keyword → TCIN discovery + optional auto-poll:
+
+    search = RedSkySearch(store_id="2845")
+    results = await search.find("PS5 console")        # list of SearchResult
+    pollers = await search.find_and_poll("PS5 console", on_available=handler)
 
 Design notes:
 - Uses httpx (consistent with the rest of Pmon — NOT axios/Node).
@@ -365,3 +368,224 @@ class RedSkyPoller:
             "RedSkyPoller rate-limited (429) for TCIN %s — backing off %.0fs",
             self.tcin, backoff,
         )
+
+
+# ======================================================================
+# RedSkySearch — keyword → TCIN discovery
+# ======================================================================
+
+
+@dataclass
+class SearchResult:
+    """A single product returned from Target's search API."""
+
+    tcin: str
+    title: str = ""
+    price: str = ""
+    url: str = ""
+    image_url: str = ""
+    availability_status: str = ""
+    is_purchasable: bool = False
+
+
+class RedSkySearch:
+    """Search Target's RedSky API by keyword and resolve to TCINs.
+
+    Parameters
+    ----------
+    store_id : str
+        Target store ID for location-aware results.
+    max_results : int
+        Cap on how many search results to return (default 10).
+    api_key : str | None
+        Override the default RedSky API key.
+    """
+
+    SEARCH_URL = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2"
+
+    _API_KEYS = RedSkyPoller._API_KEYS
+
+    def __init__(
+        self,
+        store_id: str = "2845",
+        max_results: int = 10,
+        api_key: str | None = None,
+    ) -> None:
+        self.store_id = store_id
+        self.max_results = max_results
+        self._api_keys = [api_key] if api_key else list(self._API_KEYS)
+        self._visitor_id = uuid.uuid4().hex
+
+    async def find(self, keyword: str) -> list[SearchResult]:
+        """Search Target for *keyword* and return matching products."""
+        async with httpx.AsyncClient(
+            headers=API_HEADERS,
+            follow_redirects=True,
+            timeout=httpx.Timeout(15.0),
+            http2=True,
+        ) as client:
+            for i, api_key in enumerate(self._api_keys):
+                params = {
+                    "key": api_key,
+                    "keyword": keyword,
+                    "channel": "WEB",
+                    "count": str(self.max_results),
+                    "default_purchasability_filter": "true",
+                    "is_bot": "false",
+                    "offset": "0",
+                    "page": f"/s/{keyword}",
+                    "pricing_store_id": self.store_id,
+                    "store_ids": self.store_id,
+                    "visitor_id": self._visitor_id,
+                }
+                headers = {
+                    **API_HEADERS,
+                    "Referer": f"https://www.target.com/s?searchTerm={keyword}",
+                    "Origin": "https://www.target.com",
+                    "x-application-name": "web",
+                }
+
+                try:
+                    resp = await client.get(
+                        self.SEARCH_URL, params=params, headers=headers,
+                    )
+                except httpx.HTTPError as exc:
+                    logger.warning("RedSkySearch network error: %s", exc)
+                    continue
+
+                if resp.status_code == 403:
+                    logger.warning(
+                        "RedSkySearch: 403 with key ...%s — trying next",
+                        api_key[-6:],
+                    )
+                    self._visitor_id = uuid.uuid4().hex
+                    continue
+
+                if resp.status_code == 429:
+                    logger.warning("RedSkySearch: rate-limited (429)")
+                    return []
+
+                if resp.status_code != 200:
+                    logger.warning(
+                        "RedSkySearch: HTTP %d for '%s'", resp.status_code, keyword,
+                    )
+                    continue
+
+                return self._parse_search(resp.json())
+
+        logger.error("RedSkySearch: all API keys exhausted for '%s'", keyword)
+        return []
+
+    def _parse_search(self, data: dict) -> list[SearchResult]:
+        """Extract products from the plp_search_v2 response."""
+        results: list[SearchResult] = []
+        try:
+            products = (
+                data.get("data", {})
+                .get("search", {})
+                .get("products", [])
+            )
+        except (AttributeError, TypeError):
+            logger.warning("RedSkySearch: unexpected response structure")
+            return results
+
+        for item in products[: self.max_results]:
+            try:
+                tcin = item.get("tcin", "")
+                if not tcin:
+                    continue
+
+                # Title
+                title = ""
+                item_data = item.get("item", {})
+                if isinstance(item_data, dict):
+                    desc = item_data.get("product_description", {})
+                    if isinstance(desc, dict):
+                        title = desc.get("title", "")
+
+                # Price
+                price = ""
+                price_info = item.get("price", {})
+                if isinstance(price_info, dict):
+                    price = price_info.get("formatted_current_price", "")
+
+                # URL
+                url = f"https://www.target.com/p/-/A-{tcin}"
+
+                # Image
+                image_url = ""
+                enrichment = item.get("item", {}).get("enrichment", {})
+                if isinstance(enrichment, dict):
+                    images = enrichment.get("images", {})
+                    if isinstance(images, dict):
+                        image_url = images.get("primary_image_url", "")
+
+                # Availability
+                avail_status = ""
+                is_purchasable = False
+                fulfillment = item.get("fulfillment", {})
+                if isinstance(fulfillment, dict):
+                    shipping = fulfillment.get("shipping_options", {})
+                    if isinstance(shipping, dict):
+                        avail_status = shipping.get("availability_status", "")
+                product_avail = item.get("availability", {})
+                if isinstance(product_avail, dict):
+                    pa = product_avail.get("availability_status", "")
+                    if pa:
+                        avail_status = pa
+                    is_purchasable = bool(
+                        product_avail.get("is_purchasable", False)
+                    )
+
+                results.append(SearchResult(
+                    tcin=tcin,
+                    title=title,
+                    price=price,
+                    url=url,
+                    image_url=image_url,
+                    availability_status=avail_status,
+                    is_purchasable=is_purchasable,
+                ))
+            except Exception:
+                logger.debug("RedSkySearch: skipping unparseable item", exc_info=True)
+                continue
+
+        logger.info(
+            "RedSkySearch: found %d products for keyword query", len(results),
+        )
+        return results
+
+    async def find_and_poll(
+        self,
+        keyword: str,
+        on_available: _Handler,
+        interval_ms: int = 5_000,
+    ) -> list[RedSkyPoller]:
+        """Search for *keyword*, spawn a RedSkyPoller for each result.
+
+        Returns the list of started pollers (caller is responsible for
+        stopping them via ``poller.stop()``).
+        """
+        results = await self.find(keyword)
+        if not results:
+            logger.warning(
+                "RedSkySearch: no results for '%s' — nothing to poll", keyword,
+            )
+            return []
+
+        pollers: list[RedSkyPoller] = []
+        for sr in results:
+            poller = RedSkyPoller(
+                tcin=sr.tcin,
+                interval_ms=interval_ms,
+                store_id=self.store_id,
+            )
+            poller.on("available", on_available)
+            await poller.start()
+            pollers.append(poller)
+            logger.info(
+                "RedSkySearch: polling TCIN %s — %s (%s)",
+                sr.tcin, sr.title, sr.price,
+            )
+
+        return pollers
