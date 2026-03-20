@@ -224,6 +224,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "availability_status": r.availability_status,
                     "is_purchasable": r.is_purchasable,
                     "sold_by": r.sold_by,
+                    "street_date": r.street_date,
+                    "release_label": r.release_label,
                 }
                 for r in results
             ],

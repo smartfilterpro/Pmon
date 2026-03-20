@@ -150,6 +150,8 @@ export interface TargetSearchResult {
   availability_status: string;
   is_purchasable: boolean;
   sold_by: string;
+  street_date: string;
+  release_label: string;
 }
 
 export async function searchTarget(

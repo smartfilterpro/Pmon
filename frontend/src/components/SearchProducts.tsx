@@ -55,12 +55,16 @@ export default function SearchProducts({ refresh }: Props) {
   };
 
   const statusLabel = (r: TargetSearchResult) => {
+    if (r.release_label) return r.release_label;
     if (r.availability_status === 'IN_STOCK' || r.is_purchasable) return 'In Stock';
     if (r.availability_status === 'OUT_OF_STOCK') return 'Out of Stock';
+    if (r.availability_status === 'PRE_ORDER') return 'Pre-order';
+    if (r.availability_status === 'COMING_SOON') return 'Coming Soon';
     return r.availability_status || 'Unknown';
   };
 
   const statusClass = (r: TargetSearchResult) => {
+    if (r.release_label || r.availability_status === 'PRE_ORDER' || r.availability_status === 'COMING_SOON') return 'upcoming';
     if (r.availability_status === 'IN_STOCK' || r.is_purchasable) return 'in-stock';
     if (r.availability_status === 'OUT_OF_STOCK') return 'out-of-stock';
     return 'unknown';
