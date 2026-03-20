@@ -1889,6 +1889,114 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             db.expire_otp_request(otp_id)
                             return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
 
+                    # --- Best Buy OTP text fallback when password submit fails ---
+                    # If password submit failed with a generic error (e.g. reCAPTCHA blocked),
+                    # go back to the auth picker and try OTP text verification instead.
+                    bb_pw_fail_keywords = ["something went wrong", "try again", "unable to sign"]
+                    if (retailer == "bestbuy"
+                            and any(kw in error_text.lower() for kw in bb_pw_fail_keywords)):
+                        logger.warning("Test login %s: password submit failed (%s), attempting OTP text fallback",
+                                       retailer_name, error_text[:80])
+
+                        otp_fallback_ok = False
+                        try:
+                            # Navigate back to the auth picker
+                            await page.go_back(wait_until="domcontentloaded", timeout=10000)
+                            await wait_for_page_ready(page, timeout=5000)
+
+                            # Click the text/SMS OTP option via JS (Best Buy uses styled labels)
+                            otp_option_clicked = await page.evaluate("""() => {
+                                const phrases = ['text me', 'send a text', 'text message',
+                                    'text code', 'send code to', 'sms', 'one-time code',
+                                    'send me a text', 'text verification'];
+                                const allEls = document.querySelectorAll(
+                                    'label, span, div, a, button, li, p, [role="radio"], [role="option"], [role="tab"], [tabindex]'
+                                );
+                                for (const el of allEls) {
+                                    const text = (el.textContent || '').trim().toLowerCase();
+                                    if (el.offsetParent === null) continue;
+                                    for (const phrase of phrases) {
+                                        if (text.includes(phrase)) {
+                                            el.click();
+                                            return el.tagName + ': ' + (el.textContent || '').trim().substring(0, 80);
+                                        }
+                                    }
+                                }
+                                return null;
+                            }""")
+                            if otp_option_clicked:
+                                logger.info("Test login %s: clicked OTP text option: %s", retailer_name, otp_option_clicked)
+                            else:
+                                for otp_text in ["Text me", "Send a text", "Text message", "Send code"]:
+                                    try:
+                                        otp_btn = page.get_by_text(otp_text, exact=False)
+                                        if await otp_btn.first.is_visible(timeout=500):
+                                            await otp_btn.first.click()
+                                            otp_option_clicked = otp_text
+                                            logger.info("Test login %s: clicked OTP text option via get_by_text('%s')", retailer_name, otp_text)
+                                            break
+                                    except Exception:
+                                        continue
+
+                            if otp_option_clicked:
+                                await random_delay(page, 300, 600)
+
+                                # Click submit to send the OTP text
+                                otp_send_clicked = False
+                                otp_send_btn_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                                if not otp_send_btn_enabled:
+                                    otp_send_clicked = await try_recaptcha_and_force_submit(page)
+                                if not otp_send_clicked:
+                                    otp_send_clicked = await click_visible_button(page, submit_sel)
+                                if not otp_send_clicked:
+                                    for btn_text in ["Continue", "Send", "Submit", "Verify"]:
+                                        try:
+                                            btn = page.get_by_role("button", name=btn_text, exact=False)
+                                            if await btn.first.is_visible(timeout=500):
+                                                await btn.first.click()
+                                                otp_send_clicked = True
+                                                break
+                                        except Exception:
+                                            continue
+
+                                if otp_send_clicked or otp_send_btn_enabled:
+                                    await wait_for_page_ready(page, timeout=10000)
+                                    otp_id = db.create_otp_request(user["id"], retailer, context="test_login")
+                                    logger.info("Test login %s: OTP text sent, waiting for code (otp_id=%d)", retailer_name, otp_id)
+                                    code = await _poll_for_otp_code(otp_id, timeout_seconds=300)
+                                    if code:
+                                        await _enter_otp_code(page, code)
+                                        logger.info("Test login %s: OTP code entered via text fallback", retailer_name)
+                                        await wait_for_page_ready(page, timeout=10000)
+                                        final_url3 = page.url
+                                        still_on_login3 = any(s in final_url3 for s in ["/login", "/signin", "/sign-in", "/identity"])
+                                        if not still_on_login3:
+                                            logger.info("Test login successful for %s after OTP text fallback (navigated to %s)", retailer_name, final_url3)
+                                            try:
+                                                browser_cookies = await context.cookies()
+                                                cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
+                                                if cookies_dict:
+                                                    import json as _json
+                                                    db.set_retailer_session(
+                                                        user["id"], retailer,
+                                                        cookies_json=_json.dumps(cookies_dict),
+                                                    )
+                                                    if engine.checkout_engine:
+                                                        engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
+                                                        engine.checkout_engine._api.reset_client(retailer)
+                                                    logger.info("Auto-saved %d session cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
+                                            except Exception as cookie_err:
+                                                logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
+                                            otp_fallback_ok = True
+                                            return {"ok": True, "message": f"{retailer_name} login successful via OTP text — session cookies saved"}
+                                        else:
+                                            logger.warning("Test login %s: OTP text code entered but still on login page", retailer_name)
+                                    else:
+                                        db.expire_otp_request(otp_id)
+                                        return {"ok": False, "message": f"{retailer_name} verification code was not entered within 5 minutes."}
+                        except Exception as otp_fallback_err:
+                            logger.warning("Test login %s: OTP text fallback failed: %s", retailer_name, otp_fallback_err)
+
                     msg = f"{retailer_name} login failed: {error_text[:200]}"
                     logger.warning("Test login failed for %s user=%s: %s", retailer_name, email, error_text)
                     db.add_error_log(user["id"], "WARNING", "test-login", msg, "")
