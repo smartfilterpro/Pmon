@@ -190,47 +190,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "spend_limit": settings.get("spend_limit", 0),
         }
 
-    @app.post("/api/search")
-    async def api_search(request: Request, user: dict = Depends(get_current_user)):
-        """Search Target's RedSky API by keyword and return matching products."""
-        from pmon.monitors.redsky_poller import RedSkySearch
-        data = await request.json()
-        keyword = data.get("keyword", "").strip()
-        if not keyword:
-            return JSONResponse({"error": "Keyword required"}, 400)
-        max_results = min(int(data.get("max_results", 10)), 20)
-        sold_by_target_only = bool(data.get("sold_by_target_only", False))
-        include_out_of_stock = bool(data.get("include_out_of_stock", False))
-        search = RedSkySearch(max_results=max_results)
-        try:
-            results = await search.find(
-                keyword,
-                sold_by_target_only=sold_by_target_only,
-                include_out_of_stock=include_out_of_stock,
-            )
-        except Exception as e:
-            logger.error("Search failed for '%s': %s", keyword, e)
-            return JSONResponse({"error": f"Search failed: {e}"}, 500)
-        return {
-            "ok": True,
-            "keyword": keyword,
-            "results": [
-                {
-                    "tcin": r.tcin,
-                    "title": r.title,
-                    "price": r.price,
-                    "url": r.url,
-                    "image_url": r.image_url,
-                    "availability_status": r.availability_status,
-                    "is_purchasable": r.is_purchasable,
-                    "sold_by": r.sold_by,
-                    "street_date": r.street_date,
-                    "release_label": r.release_label,
-                }
-                for r in results
-            ],
-        }
-
     @app.post("/api/products")
     async def api_add_product(request: Request, user: dict = Depends(get_current_user)):
         data = await request.json()

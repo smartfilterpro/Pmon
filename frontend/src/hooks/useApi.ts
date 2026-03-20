@@ -139,39 +139,6 @@ export async function checkoutNow(url: string) {
   })).json();
 }
 
-// --- Search ---
-
-export interface TargetSearchResult {
-  tcin: string;
-  title: string;
-  price: string;
-  url: string;
-  image_url: string;
-  availability_status: string;
-  is_purchasable: boolean;
-  sold_by: string;
-  street_date: string;
-  release_label: string;
-}
-
-export async function searchTarget(
-  keyword: string,
-  opts: { maxResults?: number; soldByTargetOnly?: boolean; includeOutOfStock?: boolean } = {},
-): Promise<TargetSearchResult[]> {
-  const resp = await apiFetch('/search', {
-    method: 'POST',
-    body: JSON.stringify({
-      keyword,
-      max_results: opts.maxResults ?? 10,
-      sold_by_target_only: opts.soldByTargetOnly ?? false,
-      include_out_of_stock: opts.includeOutOfStock ?? false,
-    }),
-  });
-  const data = await resp.json();
-  if (!resp.ok || data.error) throw new Error(data.error || 'Search failed');
-  return data.results;
-}
-
 // --- Monitor ---
 
 export async function controlMonitor(action: 'start' | 'stop') {
