@@ -5,12 +5,14 @@ from .pokemoncenter import PokemonCenterMonitor
 from .target import TargetMonitor
 from .bestbuy import BestBuyMonitor
 from .walmart import WalmartMonitor
+from .costco import CostcoMonitor
 
 MONITORS: dict[str, type[BaseMonitor]] = {
     "pokemoncenter": PokemonCenterMonitor,
     "target": TargetMonitor,
     "bestbuy": BestBuyMonitor,
     "walmart": WalmartMonitor,
+    "costco": CostcoMonitor,
 }
 
 
