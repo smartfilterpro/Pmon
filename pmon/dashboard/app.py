@@ -190,6 +190,47 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "spend_limit": settings.get("spend_limit", 0),
         }
 
+    @app.post("/api/search")
+    async def api_search(request: Request, user: dict = Depends(get_current_user)):
+        """Search Target's RedSky API by keyword and return matching products."""
+        from pmon.monitors.redsky_poller import RedSkySearch
+        data = await request.json()
+        keyword = data.get("keyword", "").strip()
+        if not keyword:
+            return JSONResponse({"error": "Keyword required"}, 400)
+        max_results = min(int(data.get("max_results", 10)), 20)
+        sold_by_target_only = bool(data.get("sold_by_target_only", False))
+        include_out_of_stock = bool(data.get("include_out_of_stock", False))
+        search = RedSkySearch(max_results=max_results)
+        try:
+            results = await search.find(
+                keyword,
+                sold_by_target_only=sold_by_target_only,
+                include_out_of_stock=include_out_of_stock,
+            )
+        except Exception as e:
+            logger.error("Search failed for '%s': %s", keyword, e)
+            return JSONResponse({"error": f"Search failed: {e}"}, 500)
+        return {
+            "ok": True,
+            "keyword": keyword,
+            "results": [
+                {
+                    "tcin": r.tcin,
+                    "title": r.title,
+                    "price": r.price,
+                    "url": r.url,
+                    "image_url": r.image_url,
+                    "availability_status": r.availability_status,
+                    "is_purchasable": r.is_purchasable,
+                    "sold_by": r.sold_by,
+                    "street_date": r.street_date,
+                    "release_label": r.release_label,
+                }
+                for r in results
+            ],
+        }
+
     @app.post("/api/products")
     async def api_add_product(request: Request, user: dict = Depends(get_current_user)):
         data = await request.json()
@@ -299,7 +340,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         card_cvv = data.get("card_cvv", "").strip()
         phone_last4 = data.get("phone_last4", "").strip()
         account_last_name = data.get("account_last_name", "").strip()
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv,
                                 phone_last4=phone_last4, account_last_name=account_last_name)
@@ -314,7 +355,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         data = await request.json()
         retailer = data.get("retailer", "").strip()
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
 
         accounts = db.get_retailer_accounts(user["id"])
@@ -1956,7 +1997,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     async def api_get_sessions(user: dict = Depends(get_current_user)):
         """List which retailers have imported session cookies."""
         result = {}
-        for retailer in ("target", "walmart", "bestbuy", "pokemoncenter"):
+        for retailer in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
             session = db.get_retailer_session(user["id"], retailer)
             if session:
                 import json as _json
@@ -1991,7 +2032,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         retailer = data.get("retailer", "").strip()
         cookies_raw = data.get("cookies")
 
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
 
         if not cookies_raw:
@@ -2034,7 +2075,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.delete("/api/sessions/{retailer}")
     async def api_delete_session(retailer: str, user: dict = Depends(get_current_user)):
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.delete_retailer_session(user["id"], retailer)
         return {"ok": True}

@@ -20,6 +20,7 @@ const RETAILERS = [
   { id: 'walmart', name: 'Walmart' },
   { id: 'bestbuy', name: 'Best Buy' },
   { id: 'pokemoncenter', name: 'Pokemon Center' },
+  { id: 'costco', name: 'Costco' },
 ];
 
 export default function Settings({ user, onOtpRequired }: Props) {
@@ -297,7 +298,7 @@ export default function Settings({ user, onOtpRequired }: Props) {
                 <div className="retailer-info">
                   <strong>{r.name}</strong>
                   {acc?.email ? (
-                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}{acc.has_password && !acc.has_cvv && (r.id === 'target' || r.id === 'walmart' || r.id === 'bestbuy') ? ' — missing CVV' : ''}{r.id === 'bestbuy' && acc.has_password && (!acc.has_phone_last4 || !acc.has_account_last_name) ? ' — missing verification info' : ''}</span>
+                    <span className="retailer-email">{acc.email} {acc.has_password ? '(configured)' : '(no password)'}{acc.has_password && !acc.has_cvv && (r.id === 'target' || r.id === 'walmart' || r.id === 'bestbuy' || r.id === 'costco') ? ' — missing CVV' : ''}{r.id === 'bestbuy' && acc.has_password && (!acc.has_phone_last4 || !acc.has_account_last_name) ? ' — missing verification info' : ''}</span>
                   ) : (
                     <span className="retailer-none">Not configured</span>
                   )}
@@ -342,7 +343,7 @@ export default function Settings({ user, onOtpRequired }: Props) {
                 onChange={e => setRetailerPassword(e.target.value)}
                 placeholder={accounts[editRetailer]?.has_password ? 'Leave blank to keep current password' : 'Enter password'} />
             </div>
-            {(editRetailer === 'target' || editRetailer === 'walmart' || editRetailer === 'bestbuy') && (
+            {(editRetailer === 'target' || editRetailer === 'walmart' || editRetailer === 'bestbuy' || editRetailer === 'costco') && (
               <div className="setting-field">
                 <label>Card CVV {accounts[editRetailer]?.has_cvv ? '(saved — leave blank to keep current)' : '(required for checkout)'}</label>
                 <input type="password" value={retailerCvv}
