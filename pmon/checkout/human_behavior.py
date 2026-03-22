@@ -370,10 +370,11 @@ async def wait_for_url_change(page, current_url: str, *, timeout: int = 15_000) 
 
 # Selectors for known Target popups/overlays, ordered by likelihood.
 _POPUP_DISMISS_SELECTORS = [
-    # Cookie / privacy consent (floating-ui portal)
-    ('[data-floating-ui-portal] button:has-text("Accept")', "cookie consent (Accept)"),
-    ('[data-floating-ui-portal] button:has-text("Close")', "cookie consent (Close)"),
-    ('[data-floating-ui-portal] button:has-text("Got it")', "cookie consent (Got it)"),
+    # Cookie / privacy consent (floating-ui portal) — use :not() to avoid
+    # matching buttons inside the login/account side panel.
+    ('[data-floating-ui-portal]:not(:has(input[type="password"])):not(:has(input[type="email"])):not(:has(#username)):not(:has(form)) button:has-text("Accept")', "cookie consent (Accept)"),
+    ('[data-floating-ui-portal]:not(:has(input[type="password"])):not(:has(input[type="email"])):not(:has(#username)):not(:has(form)) button:has-text("Close")', "cookie consent (Close)"),
+    ('[data-floating-ui-portal]:not(:has(input[type="password"])):not(:has(input[type="email"])):not(:has(#username)):not(:has(form)) button:has-text("Got it")', "cookie consent (Got it)"),
     ('#onetrust-accept-btn-handler', "OneTrust cookie banner"),
     # Generic close buttons on dialogs/modals
     ('[role="dialog"] button[aria-label="close"]', "dialog close (aria-label)"),
@@ -419,8 +420,11 @@ _POPUP_DISMISS_SELECTORS = [
 # JS to remove stubborn overlays that can't be clicked away.
 _OVERLAY_REMOVAL_JS = """() => {
     let removed = 0;
-    // Remove floating-ui portal overlays
+    // Remove floating-ui portal overlays — but skip login/account panels
     document.querySelectorAll('[data-floating-ui-portal]').forEach(el => {
+        const hasForm = el.querySelector('form, input[type="password"], input[type="email"], #username');
+        const hasSignIn = (el.textContent || '').includes('Sign in');
+        if (hasForm || hasSignIn) return;  // Don't remove login panels
         el.remove();
         removed++;
     });

@@ -660,10 +660,11 @@ class CheckoutEngine:
             # Check if we need to sign in
             if not await self._is_signed_in_target(page):
                 await self._sign_in_target(page, creds)
-                # Vision fallback if selector-based sign-in didn't work
+                # Navigate back to product page — login flow leaves us on homepage
+                await page.goto(url, wait_until="domcontentloaded")
+                await wait_for_page_ready(page, timeout=15000)
                 if not await self._is_signed_in_target(page):
-                    await page.goto(url, wait_until="domcontentloaded")
-                    await wait_for_page_ready(page, timeout=15000)
+                    logger.warning("Target: sign-in may have failed — proceeding anyway")
 
             # Sweep popups again after sign-in (welcome back, promos)
             await sweep_popups(page)
@@ -812,12 +813,25 @@ class CheckoutEngine:
             await context.close()
 
     async def _is_signed_in_target(self, page) -> bool:
+        # Check 1: account nav text (works on most Target pages)
         try:
             account = page.locator('#account, [data-test="accountNav"]')
             text = await account.inner_text(timeout=3000)
-            return "sign in" not in text.lower()
+            if "sign in" not in text.lower():
+                return True
         except Exception:
-            return False
+            pass
+
+        # Check 2: auth cookies — Target sets accessToken/refreshToken on login
+        try:
+            cookies = await page.context.cookies("https://www.target.com")
+            cookie_names = {c["name"] for c in cookies}
+            if "accessToken" in cookie_names or "refreshToken" in cookie_names:
+                return True
+        except Exception:
+            pass
+
+        return False
 
     async def _dismiss_health_consent_modal(self, page) -> bool:
         """Dismiss Target's Health Data Consent modal if present.
