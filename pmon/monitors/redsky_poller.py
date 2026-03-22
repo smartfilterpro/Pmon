@@ -869,8 +869,8 @@ class RedSkySearch:
                     ]
                 return results
 
-        logger.error("RedSkySearch: all API keys exhausted for '%s'", keyword)
-        return []
+        logger.warning("RedSkySearch: all API keys exhausted for '%s' — falling back to HTML scrape", keyword)
+        return await self._scrape_search_page(keyword, sold_by_target_only)
 
     def _parse_search(self, data: dict) -> list[SearchResult]:
         """Extract products from the plp_search_v2 response."""
@@ -994,6 +994,88 @@ class RedSkySearch:
             "RedSkySearch: found %d products for keyword query", len(results),
         )
         return results
+
+    async def _scrape_search_page(
+        self, keyword: str, sold_by_target_only: bool = False,
+    ) -> list[SearchResult]:
+        """Fallback: scrape Target's search HTML page for product listings.
+
+        When the Redsky search API is gone (410), we load the HTML search
+        page and parse __PRELOADED_QUERIES__ for product data.
+        """
+        search_url = f"https://www.target.com/s?searchTerm={keyword}"
+        try:
+            async with self._get_client() as client:
+                await self._warm_up(client)
+                resp = await client.get(
+                    search_url,
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Referer": "https://www.target.com/",
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning("RedSkySearch: HTML scrape returned %d for '%s'", resp.status_code, keyword)
+                    return []
+
+                html = resp.text
+
+                # Try to find __PRELOADED_QUERIES__ which contains the search results
+                preloaded_match = re.search(
+                    r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>',
+                    html, re.S,
+                )
+                if preloaded_match:
+                    try:
+                        preloaded = json.loads(preloaded_match.group(1))
+                        # Walk preloaded data to find search results
+                        for _key, value in preloaded.items():
+                            if not isinstance(value, dict):
+                                continue
+                            result = value.get("result") or value.get("data") or value
+                            if isinstance(result, dict):
+                                search_data = result.get("data", {}).get("search") or result.get("search")
+                                if isinstance(search_data, dict) and "products" in search_data:
+                                    results = self._parse_search({"data": {"search": search_data}})
+                                    if results:
+                                        logger.info("RedSkySearch: HTML scrape found %d results for '%s'", len(results), keyword)
+                                        if sold_by_target_only:
+                                            results = [
+                                                r for r in results
+                                                if r.sold_by.lower() in ("target", "target corporation")
+                                            ]
+                                        return results
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # Fallback: extract TCINs from product links
+                tcin_matches = re.findall(r'/p/[^/]*/A-(\d{6,10})', html)
+                tcins = list(dict.fromkeys(tcin_matches))[:self.max_results]
+                if tcins:
+                    logger.info("RedSkySearch: HTML scrape extracted %d TCINs from links for '%s'", len(tcins), keyword)
+                    results = []
+                    for tcin in tcins:
+                        # Extract title from link text if possible
+                        title_match = re.search(
+                            rf'href="[^"]*A-{tcin}[^"]*"[^>]*>([^<]+)',
+                            html,
+                        )
+                        title = title_match.group(1).strip() if title_match else f"TCIN {tcin}"
+                        results.append(SearchResult(
+                            tcin=tcin,
+                            title=title,
+                            url=f"https://www.target.com/p/-/A-{tcin}",
+                            retailer="target",
+                        ))
+                    return results
+
+                logger.warning("RedSkySearch: HTML scrape found no products for '%s'", keyword)
+                return []
+        except Exception as exc:
+            logger.warning("RedSkySearch: HTML scrape failed for '%s': %s", keyword, exc)
+            return []
 
     async def find_and_poll(
         self,
