@@ -225,7 +225,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         errors = []
 
         async def _search_target():
-            search = RedSkySearch(max_results=max_results)
+            # Reuse the engine's TargetMonitor client/keys so we get
+            # its PerimeterX cookies and any refreshed API keys.
+            target_monitor = engine._monitors.get("target")
+            client = None
+            api_keys = None
+            if target_monitor:
+                try:
+                    client = await target_monitor.get_client()
+                    api_keys = target_monitor._active_keys
+                except Exception:
+                    pass
+            search = RedSkySearch(
+                max_results=max_results,
+                client=client,
+                api_keys=api_keys,
+            )
             return await search.find(
                 keyword,
                 sold_by_target_only=sold_by_target_only,

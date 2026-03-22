@@ -284,9 +284,10 @@ class TargetMonitor(BaseMonitor):
                             fulfillment_result = result
                     break
                 elif resp.status_code == 403:
-                    logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id", tcin)
+                    logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id and re-warming", tcin)
                     self._visitor_id = uuid.uuid4().hex
                     self._warmed_up = False
+                    await self._warm_up(client)
                 else:
                     logger.debug("Target: fulfillment API returned %d for %s", resp.status_code, tcin)
                     break
@@ -340,9 +341,10 @@ class TargetMonitor(BaseMonitor):
                     else:
                         logger.debug("Target: pdp_client_v1 returned 200 but parse returned UNKNOWN for %s", tcin)
                 elif resp.status_code == 403:
-                    logger.warning("Target: pdp_client_v1 403 for %s with key ...%s", tcin, api_key[-6:])
+                    logger.warning("Target: pdp_client_v1 403 for %s with key ...%s — re-warming", tcin, api_key[-6:])
                     self._visitor_id = uuid.uuid4().hex
                     self._warmed_up = False
+                    await self._warm_up(client)
                 elif resp.status_code == 410:
                     api_all_blocked = False
                     logger.debug("Target: pdp_client_v1 returned 410 for %s", tcin)
@@ -354,6 +356,9 @@ class TargetMonitor(BaseMonitor):
 
         if api_attempted and api_all_blocked:
             logger.warning("Target: ALL API keys blocked for %s — falling back to scrape", tcin)
+            # Clear stale keys so browser refresh can trigger
+            self._refreshed_keys = None
+            self._warmed_up = False
 
         # If fulfillment got a definitive status but PDP couldn't add price, return it anyway
         if fulfillment_result:
@@ -419,6 +424,25 @@ class TargetMonitor(BaseMonitor):
                 product_name=product_name, status=StockStatus.UNKNOWN,
                 error_message=f"Could not parse fulfillment data: {e}",
             )
+
+    @staticmethod
+    def _find_primary_product_in_preloaded(preloaded: dict) -> dict | None:
+        """Extract the primary product dict from __PRELOADED_QUERIES__.
+
+        Target's preloaded data contains queries keyed by endpoint path.
+        The primary product is under a product_fulfillment or pdp_client key.
+        We avoid matching recommended/carousel products which also appear.
+        """
+        for key, value in preloaded.items():
+            if not isinstance(value, dict):
+                continue
+            # Look for the query result containing product data
+            result = value.get("result") or value.get("data") or value
+            if isinstance(result, dict):
+                product = result.get("data", {}).get("product") or result.get("product")
+                if isinstance(product, dict) and "fulfillment" in product:
+                    return product
+        return None
 
     @staticmethod
     def _extract_price_from_product(product: dict) -> str:
@@ -506,28 +530,13 @@ class TargetMonitor(BaseMonitor):
                     if sub.get("availability_status") == "IN_STOCK":
                         return _in_stock(f"store_options.{sub_key}=IN_STOCK")
 
-        # 5. Product-level availability (sometimes present outside fulfillment)
-        product_avail = product.get("availability", {})
-        if isinstance(product_avail, dict):
-            avail_status = product_avail.get("availability_status", "")
-            if avail_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
-                return _in_stock(f"product.availability.availability_status={avail_status}")
-
-        # 6. shipping reason_code for online-only items
-        reason_code = shipping.get("reason_code", "")
-        if reason_code in ("SHIP_ELIGIBLE", "SHIPPING_ELIGIBLE"):
-            return _in_stock(f"shipping_options.reason_code={reason_code}")
-
-        # 7. Broad string search across fulfillment JSON
-        fulfillment_str = json.dumps(fulfillment)
-        if '"IN_STOCK"' in fulfillment_str or '"AVAILABLE"' in fulfillment_str:
-            return _in_stock("broad fulfillment string search")
-
-        # 8. Broad string search across entire product JSON
-        product_str = json.dumps(product)
-        positive_signals = ['"IN_STOCK"', '"LIMITED_STOCK"', '"SHIP_ELIGIBLE"', '"SHIPPING_ELIGIBLE"']
-        if any(signal in product_str for signal in positive_signals):
-            return _in_stock("broad product string search")
+        # NOTE: Previously checks 5-8 used catalog-level availability_status,
+        # shipping reason_code (SHIP_ELIGIBLE), and broad JSON string searches.
+        # These caused false IN_STOCK results because:
+        #   - product.availability.availability_status is catalog-level, not inventory
+        #   - SHIP_ELIGIBLE means the product type is shippable, not in stock
+        #   - Broad string searches matched unrelated fields
+        # Only the fulfillment-specific checks above (1-4) are reliable.
 
         # Nothing found → OUT_OF_STOCK
         logger.debug(
@@ -596,32 +605,20 @@ class TargetMonitor(BaseMonitor):
             except (json.JSONDecodeError, TypeError, AttributeError):
                 continue
 
-        # Strategy 2: Regex for availability_status in embedded JS data
-        if re.search(r'"availability_status"\s*:\s*"IN_STOCK"', html):
-            price = ""
-            price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', html)
-            if price_match:
-                price = price_match.group(1)
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.IN_STOCK, price=price,
-            )
-
-        # Strategy 3: __PRELOADED_QUERIES__ data
+        # Strategy 2: __PRELOADED_QUERIES__ data — parse the primary product's
+        # fulfillment block only (not recommended products, carousels, etc.)
         preloaded_match = re.search(r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>', html, re.S)
         if preloaded_match:
             try:
                 preloaded = json.loads(preloaded_match.group(1))
-                preloaded_str = json.dumps(preloaded)
-                if '"IN_STOCK"' in preloaded_str:
-                    price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', preloaded_str)
-                    price = price_match.group(1) if price_match else ""
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
+                # Walk the preloaded data to find the primary product fulfillment
+                product_data = self._find_primary_product_in_preloaded(preloaded)
+                if product_data:
+                    fulfillment = product_data.get("fulfillment", {})
+                    price = self._extract_price_from_product(product_data)
+                    result = self._check_fulfillment_availability(url, product_name, product_data, fulfillment, price)
+                    if result.status != StockStatus.UNKNOWN:
+                        return result
             except (json.JSONDecodeError, TypeError):
                 pass
 
