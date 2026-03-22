@@ -835,10 +835,12 @@ class RedSkySearch:
 
                 if resp.status_code == 403:
                     logger.warning(
-                        "RedSkySearch: 403 with key ...%s — trying next",
+                        "RedSkySearch: 403 with key ...%s — rotating session and re-warming",
                         api_key[-6:],
                     )
                     self._visitor_id = uuid.uuid4().hex
+                    self._warmed_up = False
+                    await self._warm_up(client)
                     continue
 
                 if resp.status_code == 429:
