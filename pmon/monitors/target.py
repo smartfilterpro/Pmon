@@ -12,9 +12,11 @@ real frontend sends, including is_bot=false, store_id, and location data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 
 from bs4 import BeautifulSoup
@@ -56,6 +58,8 @@ class TargetMonitor(BaseMonitor):
         self._visitor_id: str = uuid.uuid4().hex
         self._warmed_up: bool = False
         self._refreshed_keys: list[str] | None = None  # keys discovered at runtime
+        self._key_refresh_attempted: float = 0  # timestamp of last browser key refresh
+        self._KEY_REFRESH_COOLDOWN = 3600  # don't retry browser refresh more than once per hour
 
     def _extract_tcin(self, url: str) -> str | None:
         """Extract TCIN (Target product ID) from URL."""
@@ -68,11 +72,7 @@ class TargetMonitor(BaseMonitor):
         return self._refreshed_keys if self._refreshed_keys else self.API_KEYS
 
     async def _warm_up(self, client):
-        """Visit Target homepage to establish PerimeterX session cookies.
-
-        Also attempts to extract current API keys from the page HTML/JS.
-        Target embeds Redsky API keys in inline scripts and __NEXT_DATA__.
-        """
+        """Visit Target homepage to establish PerimeterX session cookies."""
         if self._warmed_up:
             return
         try:
@@ -89,35 +89,108 @@ class TargetMonitor(BaseMonitor):
             if resp.status_code == 200:
                 self._warmed_up = True
                 logger.debug("Target: warm-up visit OK, cookies established")
-                # Try to extract API keys from the page
-                self._extract_api_keys(resp.text)
+                # Try to extract API keys from inline HTML/JS
+                self._extract_api_keys_from_html(resp.text)
         except Exception as e:
             logger.debug("Target: warm-up visit failed: %s", e)
 
-    def _extract_api_keys(self, html: str):
-        """Extract Redsky API keys from Target page HTML.
-
-        Target embeds the API key in several places:
-        - Inline <script> tags with fetch() calls to redsky.target.com
-        - __NEXT_DATA__ JSON blob
-        - webpack chunk config objects with apiKey properties
-        """
-        # Pattern 1: key= parameter in redsky URLs
+    def _extract_api_keys_from_html(self, html: str):
+        """Extract Redsky API keys from Target page HTML (best-effort)."""
         url_keys = re.findall(
             r'redsky\.target\.com/[^"\']*[?&]key=([a-f0-9]{30,50})', html
         )
-        # Pattern 2: "apiKey":"<hex>" or apiKey: "<hex>" in JS
         js_keys = re.findall(
             r'["\']?apiKey["\']?\s*[:=]\s*["\']([a-f0-9]{30,50})["\']', html
         )
-        # Pattern 3: Standalone 40-char hex near "redsky" context
-        # (more aggressive — only use if others found nothing)
-        all_keys = list(dict.fromkeys(url_keys + js_keys))  # dedupe, preserve order
+        all_keys = list(dict.fromkeys(url_keys + js_keys))
         if all_keys:
-            logger.info("Target: extracted %d API key(s) from page", len(all_keys))
+            logger.info("Target: extracted %d API key(s) from HTML", len(all_keys))
             self._refreshed_keys = all_keys
-        else:
-            logger.debug("Target: could not extract API keys from page HTML")
+
+    async def _refresh_api_keys_via_browser(self):
+        """Use Playwright to visit Target and intercept Redsky API keys.
+
+        Opens a real browser (with stealth), navigates to a product page,
+        waits for the frontend to make Redsky API calls, and captures the
+        key= parameter from the request URLs.
+
+        Respects a cooldown to avoid hammering Target with browser sessions.
+        """
+        now = time.monotonic()
+        if now - self._key_refresh_attempted < self._KEY_REFRESH_COOLDOWN:
+            logger.debug("Target: key refresh on cooldown, skipping")
+            return
+        self._key_refresh_attempted = now
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.debug("Target: playwright not installed — cannot refresh API keys via browser")
+            return
+
+        logger.info("Target: refreshing API keys via browser (intercepting Redsky requests)...")
+        captured_keys: list[str] = []
+
+        try:
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
+            )
+            page = await context.new_page()
+
+            # Remove webdriver flag
+            await page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """)
+
+            # Intercept requests to redsky.target.com and capture API keys
+            def on_request(request):
+                url = request.url
+                if "redsky.target.com" in url:
+                    match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
+                    if match and match.group(1) not in captured_keys:
+                        captured_keys.append(match.group(1))
+
+            page.on("request", on_request)
+
+            # Visit a known product page to trigger Redsky calls
+            await page.goto(
+                "https://www.target.com/p/-/A-89315228",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+
+            # Wait for Redsky requests to fire (they happen after DOM load)
+            for _ in range(10):
+                if captured_keys:
+                    break
+                await asyncio.sleep(1)
+
+            await browser.close()
+            await pw.stop()
+
+            if captured_keys:
+                logger.info("Target: captured %d fresh API key(s) via browser: ...%s",
+                            len(captured_keys), captured_keys[0][-8:])
+                self._refreshed_keys = captured_keys
+            else:
+                logger.warning("Target: browser key refresh found no Redsky requests")
+
+        except Exception as exc:
+            logger.warning("Target: browser key refresh failed: %s", exc)
 
     def _redsky_headers(self, url: str) -> dict:
         """Build headers matching Target's real frontend Redsky requests."""
@@ -286,7 +359,46 @@ class TargetMonitor(BaseMonitor):
         if fulfillment_result:
             return fulfillment_result
 
-        # --- Strategy 3: HTML scrape ---
+        # --- Strategy 3: Browser key refresh ---
+        # All API calls failed. If we haven't recently tried, use Playwright
+        # to visit Target and intercept fresh API keys from network requests.
+        if not self._refreshed_keys:
+            await self._refresh_api_keys_via_browser()
+            if self._refreshed_keys:
+                # Got fresh keys — retry the primary endpoint once
+                api_key = self._refreshed_keys[0]
+                try:
+                    resp = await client.get(
+                        self.FULFILLMENT_URL,
+                        params={
+                            "key": api_key,
+                            "tcin": tcin,
+                            "is_bot": "false",
+                            "store_id": store_id,
+                            "store_positions_store_id": store_id,
+                            "pricing_store_id": store_id,
+                            "has_pricing_store_id": "true",
+                            "has_store_positions_store_id": "true",
+                            "latitude": self.DEFAULT_LAT,
+                            "longitude": self.DEFAULT_LNG,
+                            "state": self.DEFAULT_STATE,
+                            "zip": self.DEFAULT_ZIP,
+                            "visitor_id": self._visitor_id,
+                            "channel": "WEB",
+                            "page": f"/p/A-{tcin}",
+                        },
+                        headers=self._redsky_headers(url),
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        result = self._parse_fulfillment(url, product_name, data)
+                        if result.status != StockStatus.UNKNOWN:
+                            logger.info("Target stock for %s: %s (via refreshed key)", product_name, result.status.value)
+                            return result
+                except Exception as e:
+                    logger.debug("Target: retry with refreshed key failed: %s", e)
+
+        # --- Strategy 4: HTML scrape ---
         logger.debug("Target stock for %s: falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
 
