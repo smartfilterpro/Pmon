@@ -1032,7 +1032,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "walmart": 'a[href*="/account/login"], a[href*="/account"], button:has-text("Sign In"), a:has-text("Sign In")',
             "bestbuy": 'a[href*="/signin"], a[href*="/identity"], a:has-text("Sign In"), .account-button',
             "pokemoncenter": 'a[href*="/account/login"], a[href*="/account"], a:has-text("Sign In"), a:has-text("Log In")',
-            "costco": 'a[href*="/LogonForm"], a[href*="/login"], a:has-text("Account"), a:has-text("Sign In"), a:has-text("Sign In / Register")',
+            "costco": '#header_sign_in, #header-sign-in, a[href*="/LogonForm"], a[href*="/login"], a[href*="/AccountManagementView"], a[href*="/myaccount"], [id*="header" i][id*="sign" i], [id*="header" i][id*="account" i], button:has-text("Account"), [role="button"]:has-text("Account"), a:has-text("Account"), a:has-text("Sign In"), a:has-text("Sign In / Register")',
         }
 
         # Selectors for each retailer's login form
@@ -1312,7 +1312,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                     if not signin_clicked:
                         # Vision fallback: find and click sign-in link on homepage
-                        if await vision_click(page, "Sign in or Account link/icon in the top navigation"):
+                        vision_prompt = (
+                            'the "Account" link/button in the top navigation bar (between Warehouses and Cart)'
+                            if retailer == "costco"
+                            else "Sign in or Account link/icon in the top navigation"
+                        )
+                        if await vision_click(page, vision_prompt):
                             signin_clicked = True
                             await wait_for_page_ready(page, timeout=10000)
                             await random_delay(page, 1000, 2000)
