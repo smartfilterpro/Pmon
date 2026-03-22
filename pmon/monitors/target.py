@@ -142,7 +142,7 @@ class TargetMonitor(BaseMonitor):
                     data = resp.json()
                     result = self._parse_fulfillment(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
-                        logger.info(
+                        logger.debug(
                             "Target stock for %s: %s (via fulfillment API)",
                             product_name, result.status.value,
                         )
@@ -197,7 +197,7 @@ class TargetMonitor(BaseMonitor):
                     data = resp.json()
                     result = self._parse_pdp(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
-                        logger.info("Target stock for %s: %s (via pdp_client_v1)", product_name, result.status.value)
+                        logger.debug("Target stock for %s: %s (via pdp_client_v1)", product_name, result.status.value)
                         # If we had a fulfillment result with status but no price,
                         # use the fulfillment status with the PDP price
                         if fulfillment_result and not fulfillment_result.price and result.price:
@@ -231,7 +231,7 @@ class TargetMonitor(BaseMonitor):
             return fulfillment_result
 
         # --- Strategy 3: HTML scrape ---
-        logger.info("Target stock for %s: falling back to page scrape", product_name)
+        logger.debug("Target stock for %s: falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
 
     def _parse_fulfillment(self, url: str, product_name: str, data: dict) -> StockResult:

@@ -143,7 +143,7 @@ class BaseMonitor(ABC):
         # If we're in a cooldown from a previous 429, skip this check entirely
         if self.is_rate_limited():
             remaining = self.rate_limit_remaining()
-            logger.info(
+            logger.debug(
                 "Skipping %s check for %s — rate-limit cooldown (%.0fs left)",
                 self.retailer_name, product_name, remaining,
             )

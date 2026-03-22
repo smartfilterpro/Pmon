@@ -272,7 +272,7 @@ class BestBuySearch:
             logger.debug("BestBuySearch: typeahead parse error: %s", e)
 
         if results:
-            logger.info("BestBuySearch: typeahead found %d products", len(results))
+            logger.debug("BestBuySearch: typeahead found %d products", len(results))
         return results
 
     def _parse_search(self, data: dict, include_out_of_stock: bool) -> list[SearchResult]:
@@ -336,7 +336,7 @@ class BestBuySearch:
         if not results:
             results = self._parse_flat_response(data, include_out_of_stock)
 
-        logger.info("BestBuySearch: found %d products for keyword query", len(results))
+        logger.debug("BestBuySearch: found %d products for keyword query", len(results))
         return results
 
     def _parse_sku_entry(self, sku_id: str, entry: dict) -> SearchResult | None:
