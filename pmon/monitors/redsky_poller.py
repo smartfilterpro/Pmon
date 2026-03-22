@@ -587,6 +587,43 @@ class RedSkySearch:
         self.max_results = max_results
         self._api_keys = [api_key] if api_key else list(self._API_KEYS)
         self._visitor_id = uuid.uuid4().hex
+        self._warmed_up = False
+
+    async def _warm_up(self, client: httpx.AsyncClient) -> None:
+        """Visit Target homepage to establish PerimeterX session cookies.
+
+        Without this, the search API returns 403 for all keys.
+        Also attempts to extract fresh API keys from the page HTML.
+        """
+        if self._warmed_up:
+            return
+        try:
+            resp = await client.get(
+                "https://www.target.com/",
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                },
+            )
+            if resp.status_code == 200:
+                self._warmed_up = True
+                logger.debug("RedSkySearch: warm-up visit OK, cookies established")
+                # Try to extract fresh API keys from page HTML/JS
+                url_keys = re.findall(
+                    r'redsky\.target\.com/[^"\']*[?&]key=([a-f0-9]{30,50})', resp.text
+                )
+                js_keys = re.findall(
+                    r'["\']?apiKey["\']?\s*[:=]\s*["\']([a-f0-9]{30,50})["\']', resp.text
+                )
+                fresh_keys = list(dict.fromkeys(url_keys + js_keys))
+                if fresh_keys:
+                    logger.info("RedSkySearch: extracted %d fresh API key(s) from HTML", len(fresh_keys))
+                    self._api_keys = fresh_keys
+        except Exception as e:
+            logger.debug("RedSkySearch: warm-up visit failed: %s", e)
 
     @staticmethod
     def _extract_tcin(text: str) -> str | None:
@@ -752,6 +789,10 @@ class RedSkySearch:
             timeout=httpx.Timeout(15.0),
             http2=True,
         ) as client:
+            # Warm up to establish PerimeterX cookies — without this,
+            # Target returns 403 on all API keys.
+            await self._warm_up(client)
+
             for i, api_key in enumerate(self._api_keys):
                 params = {
                     "key": api_key,
