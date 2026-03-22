@@ -564,6 +564,9 @@ def _extract_seller(product: dict) -> str:
 class RedSkySearch:
     """Search Target's RedSky API by keyword and resolve to TCINs.
 
+    Tries multiple endpoint/domain combinations in order and extracts
+    fresh API keys from Target's bootstrap payload on warm-up.
+
     Parameters
     ----------
     store_id : str
@@ -574,7 +577,17 @@ class RedSkySearch:
         Override the default RedSky API key.
     """
 
-    SEARCH_URL = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2"
+    # Endpoints to try in order — v2 first (confirmed working), then v1 on
+    # both redsky.target.com and api.target.com.
+    _SEARCH_URLS = [
+        "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2",
+        "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v1",
+        "https://api.target.com/redsky_aggregations/v1/web/plp_search_v2",
+        "https://api.target.com/redsky_aggregations/v1/web/plp_search_v1",
+    ]
+    # Keep a class attr for the last URL that actually worked, so subsequent
+    # searches skip straight to it.
+    SEARCH_URL = _SEARCH_URLS[0]
 
     _API_KEYS = RedSkyPoller._API_KEYS
 
@@ -603,7 +616,7 @@ class RedSkySearch:
         """Visit Target homepage to establish PerimeterX session cookies.
 
         Without this, the search API returns 403 for all keys.
-        Also attempts to extract fresh API keys from the page HTML.
+        Extracts fresh API keys from the page HTML/JS bootstrap payload.
         """
         if self._warmed_up:
             return
@@ -611,7 +624,7 @@ class RedSkySearch:
             resp = await client.get(
                 "https://www.target.com/",
                 headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    **DEFAULT_HEADERS,
                     "Sec-Fetch-Dest": "document",
                     "Sec-Fetch-Mode": "navigate",
                     "Sec-Fetch-Site": "none",
@@ -621,19 +634,69 @@ class RedSkySearch:
             if resp.status_code == 200:
                 self._warmed_up = True
                 logger.debug("RedSkySearch: warm-up visit OK, cookies established")
-                # Try to extract fresh API keys from page HTML/JS
-                url_keys = re.findall(
-                    r'redsky\.target\.com/[^"\']*[?&]key=([a-f0-9]{30,50})', resp.text
-                )
-                js_keys = re.findall(
-                    r'["\']?apiKey["\']?\s*[:=]\s*["\']([a-f0-9]{30,50})["\']', resp.text
-                )
-                fresh_keys = list(dict.fromkeys(url_keys + js_keys))
-                if fresh_keys:
-                    logger.info("RedSkySearch: extracted %d fresh API key(s) from HTML", len(fresh_keys))
-                    self._api_keys = fresh_keys
+                self._extract_keys_from_html(resp.text)
         except Exception as e:
             logger.debug("RedSkySearch: warm-up visit failed: %s", e)
+
+        # Second warm-up: visit a search page to prime PX cookies for the
+        # search flow specifically (some PX profiles gate by page type).
+        if self._warmed_up:
+            try:
+                resp2 = await client.get(
+                    "https://www.target.com/s?searchTerm=test",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Referer": "https://www.target.com/",
+                    },
+                )
+                if resp2.status_code == 200:
+                    logger.debug("RedSkySearch: search-page warm-up OK")
+                    self._extract_keys_from_html(resp2.text)
+            except Exception:
+                pass
+
+    def _extract_keys_from_html(self, html: str) -> None:
+        """Extract fresh API keys from Target page HTML using multiple strategies."""
+        fresh_keys: list[str] = []
+
+        # Strategy 1: Keys in redsky URLs
+        url_keys = re.findall(
+            r'(?:redsky|api)\.target\.com/[^"\']*[?&]key=([a-f0-9]{30,50})', html
+        )
+        fresh_keys.extend(url_keys)
+
+        # Strategy 2: JS config / apiKey assignments
+        js_keys = re.findall(
+            r'["\']?apiKey["\']?\s*[:=]\s*["\']([a-f0-9]{30,50})["\']', html
+        )
+        fresh_keys.extend(js_keys)
+
+        # Strategy 3: __TGT_DATA__ / __PRELOADED_QUERIES__ bootstrap
+        tgt_keys = re.findall(
+            r'key["\']?\s*[:=]\s*["\']([a-f0-9]{38,42})["\']', html
+        )
+        fresh_keys.extend(tgt_keys)
+
+        # Strategy 4: Look for key in inline script JSON configs
+        config_keys = re.findall(
+            r'"redsky[Kk]ey"\s*:\s*"([a-f0-9]{30,50})"', html
+        )
+        fresh_keys.extend(config_keys)
+
+        # Dedupe, preserving order
+        fresh_keys = list(dict.fromkeys(fresh_keys))
+        if fresh_keys:
+            logger.info(
+                "RedSkySearch: extracted %d fresh API key(s) from HTML: ...%s",
+                len(fresh_keys), fresh_keys[0][-8:],
+            )
+            # Prepend fresh keys but keep hardcoded ones as fallback
+            self._api_keys = fresh_keys + [
+                k for k in self._api_keys if k not in fresh_keys
+            ]
 
     @staticmethod
     def _extract_tcin(text: str) -> str | None:
@@ -804,72 +867,94 @@ class RedSkySearch:
             return []
 
         async with self._get_client() as client:
-            for i, api_key in enumerate(self._api_keys):
-                params = {
-                    "key": api_key,
-                    "keyword": keyword,
-                    "channel": "WEB",
-                    "count": str(self.max_results),
-                    "default_purchasability_filter": "false" if include_out_of_stock else "true",
-                    "is_bot": "false",
-                    "offset": str(offset),
-                    "page": f"/s/{keyword}",
-                    "pricing_store_id": self.store_id,
-                    "store_ids": self.store_id,
-                    "visitor_id": self._visitor_id,
-                }
-                headers = {
-                    **API_HEADERS,
-                    "Referer": f"https://www.target.com/s?searchTerm={keyword}",
-                    "Origin": "https://www.target.com",
-                    "x-application-name": "web",
-                }
+            # Build ordered list of URLs to try: last-known-good first, then all others
+            urls_to_try = [RedSkySearch.SEARCH_URL] + [
+                u for u in self._SEARCH_URLS if u != RedSkySearch.SEARCH_URL
+            ]
 
-                try:
-                    resp = await client.get(
-                        self.SEARCH_URL, params=params, headers=headers,
-                    )
-                except httpx.HTTPError as exc:
-                    logger.warning("RedSkySearch network error: %s", exc)
-                    continue
+            for search_url in urls_to_try:
+                for api_key in self._api_keys:
+                    params = {
+                        "key": api_key,
+                        "keyword": keyword,
+                        "channel": "WEB",
+                        "count": str(self.max_results),
+                        "default_purchasability_filter": "false" if include_out_of_stock else "true",
+                        "include_sponsored": "true",
+                        "is_bot": "false",
+                        "offset": str(offset),
+                        "page": f"/s/{keyword}",
+                        "pageNumber": "1",
+                        "platform": "desktop",
+                        "pricing_store_id": self.store_id,
+                        "sortBy": "relevance",
+                        "store_ids": self.store_id,
+                        "visitor_id": self._visitor_id,
+                    }
+                    headers = {
+                        **API_HEADERS,
+                        "Referer": f"https://www.target.com/s?searchTerm={keyword}",
+                        "Origin": "https://www.target.com",
+                        "x-application-name": "web",
+                    }
 
-                if resp.status_code == 403:
-                    logger.warning(
-                        "RedSkySearch: 403 with key ...%s — rotating session and re-warming",
-                        api_key[-6:],
-                    )
-                    self._visitor_id = uuid.uuid4().hex
-                    self._warmed_up = False
-                    await self._warm_up(client)
-                    continue
+                    try:
+                        resp = await client.get(
+                            search_url, params=params, headers=headers,
+                        )
+                    except httpx.HTTPError as exc:
+                        logger.warning("RedSkySearch network error on %s: %s", search_url, exc)
+                        break  # network error — try next URL, not next key
 
-                if resp.status_code == 429:
-                    logger.warning("RedSkySearch: rate-limited (429)")
-                    return []
+                    if resp.status_code == 403:
+                        logger.warning(
+                            "RedSkySearch: 403 on %s key ...%s — rotating session",
+                            search_url.split("/")[-1], api_key[-6:],
+                        )
+                        self._visitor_id = uuid.uuid4().hex
+                        self._warmed_up = False
+                        await self._warm_up(client)
+                        continue
 
-                if resp.status_code != 200:
-                    logger.warning(
-                        "RedSkySearch: HTTP %d for '%s'", resp.status_code, keyword,
-                    )
-                    continue
+                    if resp.status_code == 429:
+                        logger.warning("RedSkySearch: rate-limited (429)")
+                        return []
 
-                resp_data = resp.json()
-                results = self._parse_search(resp_data)
-                if not results:
-                    # Log response structure for debugging
-                    search_keys = list(resp_data.get("data", {}).get("search", {}).keys()) if isinstance(resp_data.get("data", {}).get("search"), dict) else "N/A"
-                    logger.warning(
-                        "RedSkySearch: 0 results parsed for '%s'. Response search keys: %s",
-                        keyword, search_keys,
-                    )
-                if sold_by_target_only:
-                    results = [
-                        r for r in results
-                        if r.sold_by.lower() in ("target", "target corporation")
-                    ]
-                return results
+                    if resp.status_code in (404, 410):
+                        logger.warning(
+                            "RedSkySearch: %d on %s — trying next endpoint",
+                            resp.status_code, search_url,
+                        )
+                        break  # this endpoint is dead, try next URL
 
-        logger.warning("RedSkySearch: all API keys exhausted for '%s' — falling back to HTML scrape", keyword)
+                    if resp.status_code != 200:
+                        logger.warning(
+                            "RedSkySearch: HTTP %d on %s for '%s'",
+                            resp.status_code, search_url, keyword,
+                        )
+                        continue
+
+                    resp_data = resp.json()
+                    results = self._parse_search(resp_data)
+                    if not results:
+                        search_keys = list(resp_data.get("data", {}).get("search", {}).keys()) if isinstance(resp_data.get("data", {}).get("search"), dict) else "N/A"
+                        logger.warning(
+                            "RedSkySearch: 0 results parsed for '%s'. Response search keys: %s",
+                            keyword, search_keys,
+                        )
+                    else:
+                        # Remember which URL worked
+                        if search_url != RedSkySearch.SEARCH_URL:
+                            logger.info("RedSkySearch: endpoint %s works — remembering it", search_url)
+                            RedSkySearch.SEARCH_URL = search_url
+                    if sold_by_target_only:
+                        results = [
+                            r for r in results
+                            if r.sold_by.lower() in ("target", "target corporation")
+                        ]
+                    return results
+
+        logger.warning("RedSkySearch: all endpoints/keys exhausted for '%s' — falling back to browser", keyword)
         return await self._scrape_search_page(keyword, sold_by_target_only)
 
     def _parse_search(self, data: dict) -> list[SearchResult]:
@@ -1046,7 +1131,7 @@ class RedSkySearch:
             async def on_response(response):
                 nonlocal captured_search_url
                 url = response.url
-                # Capture any redsky response that looks like search results
+                # Capture any redsky/api.target response that looks like search
                 if ("redsky.target.com" in url or "api.target.com" in url) and ("search" in url or "plp" in url):
                     try:
                         body = await response.json()
@@ -1054,6 +1139,13 @@ class RedSkySearch:
                             captured_responses.append(body)
                             captured_search_url = url.split("?")[0]
                             logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
+                            # Extract the API key the browser used
+                            key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
+                            if key_match:
+                                fresh_key = key_match.group(1)
+                                if fresh_key not in self._api_keys:
+                                    self._api_keys.insert(0, fresh_key)
+                                    logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
                     except Exception:
                         pass
 
@@ -1073,8 +1165,9 @@ class RedSkySearch:
                 if results:
                     logger.info("RedSkySearch: browser intercepted %d results for '%s'", len(results), keyword)
                     # Update the class search URL if we discovered a new endpoint
-                    if captured_search_url and captured_search_url != self.SEARCH_URL:
+                    if captured_search_url and captured_search_url != RedSkySearch.SEARCH_URL:
                         logger.info("RedSkySearch: discovered new search endpoint: %s", captured_search_url)
+                        RedSkySearch.SEARCH_URL = captured_search_url
                     await browser.close()
                     await pw.stop()
                     if sold_by_target_only:
