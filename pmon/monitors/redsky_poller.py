@@ -974,6 +974,8 @@ class RedSkySearch:
         # Typeahead fallback — returns TCIN suggestions without full search.
         typeahead_results = await self._typeahead_search(keyword, client)
         if typeahead_results:
+            # Typeahead returns bare results — enrich with PDP data.
+            typeahead_results = await self._enrich_results(typeahead_results)
             if sold_by_target_only:
                 typeahead_results = [
                     r for r in typeahead_results
@@ -982,7 +984,9 @@ class RedSkySearch:
             return typeahead_results
 
         logger.warning("RedSkySearch: typeahead also failed — falling back to browser")
-        return await self._scrape_search_page(keyword, sold_by_target_only)
+        browser_results = await self._scrape_search_page(keyword, sold_by_target_only)
+        # Browser fallback often returns bare TCINs — enrich with PDP data.
+        return await self._enrich_results(browser_results)
 
     def _parse_search(self, data: dict) -> list[SearchResult]:
         """Extract products from a Target search API response."""
@@ -1106,6 +1110,41 @@ class RedSkySearch:
             "RedSkySearch: found %d products for keyword query", len(results),
         )
         return results
+
+    async def _enrich_results(self, results: list[SearchResult]) -> list[SearchResult]:
+        """Enrich bare SearchResults (TCIN-only) with title, price, availability.
+
+        Uses lookup_tcin to hydrate each result via the PDP/fulfillment
+        endpoints.  Results that fail enrichment are kept as-is.
+        """
+        if not results:
+            return results
+        # Only enrich results that look bare (no title or "TCIN ..." placeholder)
+        needs_enrichment = [
+            r for r in results
+            if not r.title or r.title.startswith("TCIN ")
+        ]
+        if not needs_enrichment:
+            return results
+
+        logger.info("RedSkySearch: enriching %d bare results via PDP lookup", len(needs_enrichment))
+        enriched_map: dict[str, SearchResult] = {}
+        for bare in needs_enrichment:
+            enriched = await self.lookup_tcin(bare.tcin)
+            if enriched:
+                enriched_map[bare.tcin] = enriched
+
+        if enriched_map:
+            logger.info("RedSkySearch: enriched %d/%d results", len(enriched_map), len(needs_enrichment))
+
+        # Merge: replace bare results with enriched ones where available
+        final: list[SearchResult] = []
+        for r in results:
+            if r.tcin in enriched_map:
+                final.append(enriched_map[r.tcin])
+            else:
+                final.append(r)
+        return final
 
     async def _typeahead_search(
         self, keyword: str, client: httpx.AsyncClient,
