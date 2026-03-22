@@ -641,14 +641,26 @@ class CheckoutEngine:
         api_key = "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14"
 
         try:
+            import uuid as _uuid
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.get(
-                    "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1",
+                    "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1",
                     params={
                         "key": api_key,
                         "tcin": tcin,
-                        "channel": "WEB",
+                        "store_id": "2845",
+                        "zip": "21224",
+                        "state": "MD",
+                        "latitude": "39.282024",
+                        "longitude": "-76.569695",
+                        "pricing_store_id": "2845",
+                        "has_pricing_store_id": "true",
+                        "has_store_positions_store_id": "true",
+                        "store_positions_store_id": "2845",
                         "is_bot": "false",
+                        "visitor_id": _uuid.uuid4().hex,
+                        "channel": "WEB",
+                        "page": f"/p/A-{tcin}",
                     },
                     headers={
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
