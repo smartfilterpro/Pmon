@@ -192,8 +192,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.post("/api/search")
     async def api_search(request: Request, user: dict = Depends(get_current_user)):
-        """Search Target's RedSky API by keyword and return matching products."""
+        """Search one or more retailers by keyword and return matching products.
+
+        Accepts:
+            keyword: str — search term, product URL, or product ID
+            max_results: int — per-retailer cap (default 10, max 20)
+            retailers: list[str] — which retailers to search (default ["target"])
+            sold_by_target_only: bool — filter Target results to 1P only
+            include_out_of_stock: bool — include OOS products
+        """
         from pmon.monitors.redsky_poller import RedSkySearch
+        from pmon.monitors.bestbuy_search import BestBuySearch
+
         data = await request.json()
         keyword = data.get("keyword", "").strip()
         if not keyword:
@@ -201,19 +211,60 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         max_results = min(int(data.get("max_results", 10)), 20)
         sold_by_target_only = bool(data.get("sold_by_target_only", False))
         include_out_of_stock = bool(data.get("include_out_of_stock", False))
-        search = RedSkySearch(max_results=max_results)
-        try:
-            results = await search.find(
+        retailers = data.get("retailers", ["target"])
+        if isinstance(retailers, str):
+            retailers = [retailers]
+
+        VALID_RETAILERS = {"target", "bestbuy"}
+        retailers = [r for r in retailers if r in VALID_RETAILERS]
+        if not retailers:
+            retailers = ["target"]
+
+        all_results = []
+        errors = []
+
+        async def _search_target():
+            search = RedSkySearch(max_results=max_results)
+            return await search.find(
                 keyword,
                 sold_by_target_only=sold_by_target_only,
                 include_out_of_stock=include_out_of_stock,
             )
-        except Exception as e:
-            logger.error("Search failed for '%s': %s", keyword, e)
-            return JSONResponse({"error": f"Search failed: {e}"}, 500)
+
+        async def _search_bestbuy():
+            search = BestBuySearch(max_results=max_results)
+            return await search.find(
+                keyword,
+                include_out_of_stock=include_out_of_stock,
+            )
+
+        search_map = {
+            "target": _search_target,
+            "bestbuy": _search_bestbuy,
+        }
+
+        # Run all selected retailer searches in parallel
+        tasks = []
+        task_retailers = []
+        for r in retailers:
+            if r in search_map:
+                tasks.append(search_map[r]())
+                task_retailers.append(r)
+
+        if tasks:
+            results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            for r_name, r_results in zip(task_retailers, results_list):
+                if isinstance(r_results, Exception):
+                    logger.error("Search failed for %s '%s': %s", r_name, keyword, r_results)
+                    errors.append(f"{r_name}: {r_results}")
+                else:
+                    all_results.extend(r_results)
+
         return {
             "ok": True,
             "keyword": keyword,
+            "retailers": retailers,
+            "errors": errors,
             "results": [
                 {
                     "tcin": r.tcin,
@@ -226,8 +277,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     "sold_by": r.sold_by,
                     "street_date": r.street_date,
                     "release_label": r.release_label,
+                    "retailer": r.retailer,
                 }
-                for r in results
+                for r in all_results
             ],
         }
 

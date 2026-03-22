@@ -378,9 +378,9 @@ class RedSkyPoller:
 
 @dataclass
 class SearchResult:
-    """A single product returned from Target's search API."""
+    """A single product returned from a retailer search API."""
 
-    tcin: str
+    tcin: str  # product ID (TCIN for Target, SKU for Best Buy, etc.)
     title: str = ""
     price: str = ""
     url: str = ""
@@ -390,6 +390,7 @@ class SearchResult:
     sold_by: str = ""  # e.g. "Target" or marketplace seller name
     street_date: str = ""  # release/launch date if upcoming (YYYY-MM-DD)
     release_label: str = ""  # e.g. "Pre-order", "Coming soon", "Launches Apr 25"
+    retailer: str = "target"  # which retailer this result came from
 
 
 def _extract_release_info(product: dict) -> tuple[str, str]:

@@ -10,6 +10,7 @@
   border-radius: 12px;
   border: 1px solid var(--border);
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .search-icon {
@@ -22,7 +23,36 @@
   min-width: 200px;
 }
 
-.target-only-label {
+/* Retailer toggle buttons */
+.retailer-toggles {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.retailer-toggle {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.retailer-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+.retailer-toggle.active {
+  background: color-mix(in srgb, var(--retailer-color) 20%, transparent);
+  color: var(--retailer-color);
+  border-color: color-mix(in srgb, var(--retailer-color) 40%, transparent);
+}
+
+.filter-label {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -31,10 +61,10 @@
   cursor: pointer;
   white-space: nowrap;
 }
-.target-only-label input[type="checkbox"] {
+.filter-label input[type="checkbox"] {
   width: 15px;
   height: 15px;
-  accent-color: #cc0000;
+  accent-color: var(--accent-yellow);
 }
 
 .search-btn {
@@ -130,6 +160,24 @@
   flex-wrap: wrap;
 }
 
+/* Retailer badge */
+.search-result-retailer {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.search-result-retailer.retailer-target {
+  background: rgba(204, 0, 0, 0.15);
+  color: #ff4444;
+}
+.search-result-retailer.retailer-bestbuy {
+  background: rgba(0, 70, 190, 0.15);
+  color: #4d8fec;
+}
+
 .search-result-price {
   font-size: 13px;
   font-weight: 600;
@@ -166,9 +214,9 @@
   padding: 2px 8px;
   border-radius: 4px;
 }
-.search-result-seller.seller-target {
-  background: rgba(204, 0, 0, 0.15);
-  color: #ff4444;
+.search-result-seller.seller-1p {
+  background: rgba(76, 175, 80, 0.1);
+  color: var(--green);
 }
 .search-result-seller.seller-3p {
   background: rgba(255, 255, 255, 0.08);
@@ -219,11 +267,11 @@
 /* Mobile */
 @media (max-width: 600px) {
   .search-form {
-    flex-wrap: wrap;
     padding: 14px;
   }
   .search-icon { display: none; }
   .search-input { min-width: 100%; flex: 1 1 100%; }
+  .retailer-toggles { width: 100%; }
   .search-btn { width: 100%; justify-content: center; }
 
   .search-result-card {
