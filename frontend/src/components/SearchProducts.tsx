@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { searchProducts, addProduct, type SearchResult, type Retailer } from '../hooks/useApi';
-import { Search, Plus, Loader, ShoppingCart, Check, Store } from 'lucide-react';
+import { Search, Plus, Loader, ShoppingCart, Check, Store, ExternalLink, ChevronDown } from 'lucide-react';
 import './SearchProducts.css';
 
 interface Props {
@@ -22,6 +22,9 @@ export default function SearchProducts({ refresh }: Props) {
   const [hasSearched, setHasSearched] = useState(false);
   const [targetOnly, setTargetOnly] = useState(false);
   const [includeOos, setIncludeOos] = useState(false);
+  const [maxResults, setMaxResults] = useState(10);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [selectedRetailers, setSelectedRetailers] = useState<Set<Retailer>>(new Set(['target']));
 
   const toggleRetailer = (r: Retailer) => {
@@ -45,19 +48,51 @@ export default function SearchProducts({ refresh }: Props) {
     setResults([]);
     setAdded(new Set());
     setHasSearched(true);
+    setHasMore(false);
     try {
       const retailers = Array.from(selectedRetailers);
-      const res = await searchProducts(keyword.trim(), {
+      const { results: res, errors: searchErrors } = await searchProducts(keyword.trim(), {
         retailers,
+        maxResults,
         soldByTargetOnly: targetOnly,
         includeOutOfStock: includeOos,
       });
       setResults(res);
-      if (res.length === 0) setError('No products found');
+      setHasMore(res.length >= maxResults);
+      if (searchErrors.length > 0) {
+        setError(searchErrors.join('; '));
+      } else if (res.length === 0) {
+        setError('No products found');
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setSearching(false);
+    }
+  };
+
+  const handleLoadMore = async () => {
+    if (loadingMore || !keyword.trim()) return;
+    setLoadingMore(true);
+    try {
+      const retailers = Array.from(selectedRetailers);
+      const { results: res } = await searchProducts(keyword.trim(), {
+        retailers,
+        maxResults,
+        offset: results.length,
+        soldByTargetOnly: targetOnly,
+        includeOutOfStock: includeOos,
+      });
+      if (res.length === 0) {
+        setHasMore(false);
+      } else {
+        setResults(prev => [...prev, ...res]);
+        setHasMore(res.length >= maxResults);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -147,6 +182,16 @@ export default function SearchProducts({ refresh }: Props) {
           />
           Include OOS
         </label>
+        <select
+          className="results-limit-select"
+          value={maxResults}
+          onChange={(e) => setMaxResults(Number(e.target.value))}
+          title="Results per retailer"
+        >
+          <option value={10}>10 results</option>
+          <option value={20}>20 results</option>
+          <option value={50}>50 results</option>
+        </select>
         <button type="submit" className="search-btn" disabled={searching || !keyword.trim()}>
           {searching ? <Loader size={14} className="spinner" /> : <Search size={14} />}
           {searching ? 'Searching...' : 'Search'}
@@ -170,7 +215,16 @@ export default function SearchProducts({ refresh }: Props) {
                   />
                 )}
                 <div className="search-result-info">
-                  <p className="search-result-title">{r.title || `ID ${r.tcin}`}</p>
+                  <a
+                    href={r.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="search-result-title"
+                    title="Open product page"
+                  >
+                    {r.title || `ID ${r.tcin}`}
+                    <ExternalLink size={12} className="search-result-link-icon" />
+                  </a>
                   <div className="search-result-meta">
                     <span className={`search-result-retailer retailer-${r.retailer}`}>
                       {retailerLabel(r)}
@@ -214,6 +268,16 @@ export default function SearchProducts({ refresh }: Props) {
               </div>
             );
           })}
+          {hasMore && (
+            <button
+              className="load-more-btn"
+              onClick={handleLoadMore}
+              disabled={loadingMore}
+            >
+              {loadingMore ? <Loader size={14} className="spinner" /> : <ChevronDown size={14} />}
+              {loadingMore ? 'Loading...' : 'Load More'}
+            </button>
+          )}
         </div>
       )}
 

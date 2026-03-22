@@ -165,23 +165,25 @@ export async function searchProducts(
   opts: {
     retailers?: Retailer[];
     maxResults?: number;
+    offset?: number;
     soldByTargetOnly?: boolean;
     includeOutOfStock?: boolean;
   } = {},
-): Promise<SearchResult[]> {
+): Promise<{ results: SearchResult[]; errors: string[] }> {
   const resp = await apiFetch('/search', {
     method: 'POST',
     body: JSON.stringify({
       keyword,
       retailers: opts.retailers ?? ['target'],
       max_results: opts.maxResults ?? 10,
+      offset: opts.offset ?? 0,
       sold_by_target_only: opts.soldByTargetOnly ?? false,
       include_out_of_stock: opts.includeOutOfStock ?? false,
     }),
   });
   const data = await resp.json();
   if (!resp.ok || data.error) throw new Error(data.error || 'Search failed');
-  return data.results;
+  return { results: data.results, errors: data.errors || [] };
 }
 
 /** @deprecated Use searchProducts instead */
