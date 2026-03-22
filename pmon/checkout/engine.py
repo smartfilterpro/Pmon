@@ -2619,17 +2619,65 @@ class CheckoutEngine:
                     await otp_input.click()
                     await otp_input.fill(code)
                     await asyncio.sleep(0.5)
-                    # Try clicking submit/verify/continue
-                    clicked = await self._multi_strategy_click(page, "Verify Code", [
-                        "Continue", "Verify", "Verify Code", "Submit", "Sign In",
-                    ], 'button[type="submit"], input[type="submit"], button:has-text("Continue"), button:has-text("Verify"), button:has-text("Sign In")')
-                    if not clicked:
-                        # Fallback: press Enter on the OTP input to submit the form
-                        logger.info("%s: OTP submit button not found — pressing Enter as fallback", retailer)
+
+                    # Verify the code was actually filled (Best Buy can clear it)
+                    try:
+                        filled_value = await otp_input.input_value(timeout=1000)
+                        if not filled_value:
+                            logger.warning("%s: OTP input empty after fill — retrying with type()", retailer)
+                            await otp_input.click()
+                            await otp_input.type(code, delay=80)
+                            await asyncio.sleep(0.3)
+                    except Exception:
+                        pass
+
+                    # Submit the OTP — try button click first, then Enter, then Tab+Enter
+                    otp_page_indicators = (
+                        'text=/one-time code/i, text=/enter your code/i, '
+                        'text=/enter the code/i, text=/verification code/i, '
+                        'text=/enter your one-time/i'
+                    )
+
+                    async def _otp_submit_button():
+                        return await self._multi_strategy_click(page, "Verify Code", [
+                            "Continue", "Verify", "Verify Code", "Submit", "Sign In",
+                        ], 'button[type="submit"], input[type="submit"], button:has-text("Continue"), button:has-text("Verify"), button:has-text("Sign In")')
+
+                    async def _otp_submit_enter():
                         await otp_input.press("Enter")
-                    await wait_for_page_ready(page, timeout=10000)
-                    logger.info("%s: OTP code entered and submitted successfully", retailer)
-                    return None  # Success — continue checkout
+
+                    async def _otp_submit_tab_enter():
+                        await otp_input.press("Tab")
+                        await asyncio.sleep(0.2)
+                        await page.keyboard.press("Enter")
+
+                    submitted = False
+                    for attempt_label, submit_action in [
+                        ("button click", _otp_submit_button),
+                        ("Enter key", _otp_submit_enter),
+                        ("Tab+Enter", _otp_submit_tab_enter),
+                    ]:
+                        try:
+                            await submit_action()
+                        except Exception:
+                            pass
+                        await wait_for_page_ready(page, timeout=8000)
+
+                        # Check if we left the OTP page
+                        try:
+                            still_on_otp = await page.locator(otp_page_indicators).first.is_visible(timeout=2000)
+                        except Exception:
+                            still_on_otp = False
+
+                        if not still_on_otp:
+                            submitted = True
+                            logger.info("%s: OTP submitted successfully via %s", retailer, attempt_label)
+                            break
+                        logger.warning("%s: still on OTP page after %s — trying next method", retailer, attempt_label)
+
+                    if not submitted:
+                        logger.warning("%s: OTP may not have submitted — all methods tried, proceeding anyway", retailer)
+                    return None  # Continue checkout
                 except Exception as e:
                     logger.error("%s: failed to enter OTP code: %s", retailer, e)
                     db.expire_otp_request(otp_id)
