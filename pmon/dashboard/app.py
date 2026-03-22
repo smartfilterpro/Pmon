@@ -1622,7 +1622,24 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             if page_desc:
                                 desc_lower = page_desc.lower()
                                 error_phrases = ["error", "incorrect", "invalid", "denied", "blocked", "failed"]
-                                if not any(phrase in desc_lower for phrase in error_phrases):
+                                # Use word-boundary matching and skip negated phrases like
+                                # "not an error page" or "no login failure" that the vision
+                                # model tends to produce for normal pages.
+                                import re as _re
+                                negation_pattern = r'\b(?:not?|without|neither|never|isn.t|aren.t|wasn.t|weren.t|doesn.t|don.t|didn.t|no\s+sign\s+of)\b'
+                                has_real_error = False
+                                for phrase in error_phrases:
+                                    # Find all occurrences of the phrase as a whole word
+                                    for m in _re.finditer(r'\b' + _re.escape(phrase) + r'\b', desc_lower):
+                                        # Check the 40 chars before the match for negation words
+                                        prefix = desc_lower[max(0, m.start() - 40):m.start()]
+                                        if not _re.search(negation_pattern, prefix):
+                                            has_real_error = True
+                                            logger.info("Test login %s: vision flagged error phrase '%s' in: ...%s%s...", retailer_name, phrase, prefix[-20:], desc_lower[m.start():m.end()+20])
+                                            break
+                                    if has_real_error:
+                                        break
+                                if not has_real_error:
                                     logger.info("Test login %s: on homepage with no errors — treating as success (page: %s)", retailer_name, page_desc[:100])
                                     try:
                                         browser_cookies = await context.cookies()
@@ -1638,6 +1655,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         logger.warning("Failed to auto-save cookies for %s: %s", retailer_name, cookie_err)
                                     return {"ok": True, "message": f"{retailer_name} login successful — redirected to homepage, session cookies saved"}
                                 else:
+                                    logger.warning("Test login %s: vision error detection triggered. Full description: %s", retailer_name, page_desc)
                                     msg = f"{retailer_name} login may have failed — redirected to: {page_desc[:200]}"
                                     return {"ok": False, "message": msg}
 
