@@ -799,7 +799,15 @@ class RedSkySearch:
                     )
                     continue
 
-                results = self._parse_search(resp.json())
+                resp_data = resp.json()
+                results = self._parse_search(resp_data)
+                if not results:
+                    # Log response structure for debugging
+                    search_keys = list(resp_data.get("data", {}).get("search", {}).keys()) if isinstance(resp_data.get("data", {}).get("search"), dict) else "N/A"
+                    logger.warning(
+                        "RedSkySearch: 0 results parsed for '%s'. Response search keys: %s",
+                        keyword, search_keys,
+                    )
                 if sold_by_target_only:
                     results = [
                         r for r in results
@@ -814,11 +822,28 @@ class RedSkySearch:
         """Extract products from the plp_search_v2 response."""
         results: list[SearchResult] = []
         try:
-            products = (
-                data.get("data", {})
-                .get("search", {})
-                .get("products", [])
-            )
+            search = data.get("data", {}).get("search", {})
+            products = search.get("products", [])
+
+            # Fallback: Target sometimes nests results under search_response
+            if not products:
+                search_resp = search.get("search_response", {})
+                if isinstance(search_resp, dict):
+                    items = search_resp.get("items", {})
+                    if isinstance(items, dict):
+                        products = items.get("Item", [])
+                    elif isinstance(items, list):
+                        products = items
+
+            # Fallback: typed_search_items (newer Target API structure)
+            if not products:
+                typed = search.get("typed_search_items", [])
+                if isinstance(typed, list):
+                    for group in typed:
+                        if isinstance(group, dict):
+                            items = group.get("items", [])
+                            if isinstance(items, list):
+                                products.extend(items)
         except (AttributeError, TypeError):
             logger.warning("RedSkySearch: unexpected response structure")
             return results
@@ -854,7 +879,9 @@ class RedSkySearch:
                     if isinstance(images, dict):
                         image_url = images.get("primary_image_url", "")
 
-                # Availability
+                # Availability — use fulfillment-level status only.
+                # product.availability.availability_status is catalog-level
+                # (active listing) and does NOT reflect actual inventory.
                 avail_status = ""
                 is_purchasable = False
                 fulfillment = item.get("fulfillment", {})
@@ -862,11 +889,19 @@ class RedSkySearch:
                     shipping = fulfillment.get("shipping_options", {})
                     if isinstance(shipping, dict):
                         avail_status = shipping.get("availability_status", "")
+                    # Check store pickup availability as fallback
+                    if not avail_status:
+                        store_options = fulfillment.get("store_options", [])
+                        if isinstance(store_options, list):
+                            for opt in store_options:
+                                pickup = opt.get("order_pickup", {})
+                                if isinstance(pickup, dict):
+                                    ps = pickup.get("availability_status", "")
+                                    if ps:
+                                        avail_status = ps
+                                        break
                 product_avail = item.get("availability", {})
                 if isinstance(product_avail, dict):
-                    pa = product_avail.get("availability_status", "")
-                    if pa:
-                        avail_status = pa
                     is_purchasable = bool(
                         product_avail.get("is_purchasable", False)
                     )
