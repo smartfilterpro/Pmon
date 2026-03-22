@@ -574,7 +574,7 @@ class RedSkySearch:
         Override the default RedSky API key.
     """
 
-    SEARCH_URL = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2"
+    SEARCH_URL = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v1"
 
     _API_KEYS = RedSkyPoller._API_KEYS
 
