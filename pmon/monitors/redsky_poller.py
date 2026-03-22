@@ -73,7 +73,8 @@ class RedSkyPoller:
         Override the default RedSky API key.
     """
 
-    REDSKY_PDP = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
+    REDSKY_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1"
+    REDSKY_PDP_LEGACY = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
 
     # Observed from Target's real frontend — rotated on 403.
     _API_KEYS = [
@@ -237,7 +238,10 @@ class RedSkyPoller:
     # ------------------------------------------------------------------
 
     async def _fetch(self) -> RedSkyProductData | None:
-        """Hit the RedSky pdp_client_v1 endpoint and parse the response."""
+        """Hit the RedSky product_fulfillment_v1 endpoint and parse the response.
+
+        Falls back to legacy pdp_client_v1 on 404/410.
+        """
         assert self._client is not None
 
         api_key = self._api_keys[self._key_index % len(self._api_keys)]
@@ -246,15 +250,17 @@ class RedSkyPoller:
             "tcin": self.tcin,
             "is_bot": "false",
             "store_id": self.store_id,
+            "store_positions_store_id": self.store_id,
             "pricing_store_id": self.store_id,
             "has_pricing_store_id": "true",
-            "has_financing_options": "true",
-            "include_obsolete": "true",
-            "skip_personalized": "true",
-            "skip_variation_hierarchy": "true",
+            "has_store_positions_store_id": "true",
+            "latitude": "39.282024",
+            "longitude": "-76.569695",
+            "state": "MD",
+            "zip": "21224",
             "visitor_id": self._visitor_id,
             "channel": "WEB",
-            "page": f"/p/{self.tcin}",
+            "page": f"/p/A-{self.tcin}",
         }
 
         headers = {
@@ -264,7 +270,27 @@ class RedSkyPoller:
             "x-application-name": "web",
         }
 
-        resp = await self._client.get(self.REDSKY_PDP, params=params, headers=headers)
+        resp = await self._client.get(self.REDSKY_FULFILLMENT, params=params, headers=headers)
+
+        # Fall back to legacy endpoint on 404/410
+        if resp.status_code in (404, 410):
+            logger.debug("RedSkyPoller: product_fulfillment_v1 returned %d, trying legacy pdp_client_v1", resp.status_code)
+            legacy_params = {
+                "key": api_key,
+                "tcin": self.tcin,
+                "is_bot": "false",
+                "store_id": self.store_id,
+                "pricing_store_id": self.store_id,
+                "has_pricing_store_id": "true",
+                "has_financing_options": "true",
+                "include_obsolete": "true",
+                "skip_personalized": "true",
+                "skip_variation_hierarchy": "true",
+                "visitor_id": self._visitor_id,
+                "channel": "WEB",
+                "page": f"/p/A-{self.tcin}",
+            }
+            resp = await self._client.get(self.REDSKY_PDP_LEGACY, params=legacy_params, headers=headers)
 
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")

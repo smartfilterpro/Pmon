@@ -644,7 +644,7 @@ class CheckoutEngine:
             import uuid as _uuid
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                 resp = await client.get(
-                    "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1",
+                    "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1",
                     params={
                         "key": api_key,
                         "tcin": tcin,

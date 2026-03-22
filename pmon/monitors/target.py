@@ -31,7 +31,7 @@ class TargetMonitor(BaseMonitor):
     # Target's Redsky API endpoints (same base, different aggregation paths)
     REDSKY_BASE = "https://redsky.target.com/redsky_aggregations/v1/web"
     # Current endpoint (as of 2026-03) — Target renamed from pdp_client_v1
-    FULFILLMENT_URL = f"{REDSKY_BASE}/pdp_fulfillment_v1"
+    FULFILLMENT_URL = f"{REDSKY_BASE}/product_fulfillment_v1"
     # Fallback: older endpoint names that may still work on some products
     FULFILLMENT_URL_LEGACY = f"{REDSKY_BASE}/product_fulfillment_and_variation_hierarchy_v1"
     PDP_URL = f"{REDSKY_BASE}/pdp_client_v1"
@@ -55,14 +55,24 @@ class TargetMonitor(BaseMonitor):
         super().__init__()
         self._visitor_id: str = uuid.uuid4().hex
         self._warmed_up: bool = False
+        self._refreshed_keys: list[str] | None = None  # keys discovered at runtime
 
     def _extract_tcin(self, url: str) -> str | None:
         """Extract TCIN (Target product ID) from URL."""
         match = re.search(r"A-(\d+)", url)
         return match.group(1) if match else None
 
+    @property
+    def _active_keys(self) -> list[str]:
+        """Return refreshed keys if available, otherwise hardcoded defaults."""
+        return self._refreshed_keys if self._refreshed_keys else self.API_KEYS
+
     async def _warm_up(self, client):
-        """Visit Target homepage to establish PerimeterX session cookies."""
+        """Visit Target homepage to establish PerimeterX session cookies.
+
+        Also attempts to extract current API keys from the page HTML/JS.
+        Target embeds Redsky API keys in inline scripts and __NEXT_DATA__.
+        """
         if self._warmed_up:
             return
         try:
@@ -79,8 +89,35 @@ class TargetMonitor(BaseMonitor):
             if resp.status_code == 200:
                 self._warmed_up = True
                 logger.debug("Target: warm-up visit OK, cookies established")
+                # Try to extract API keys from the page
+                self._extract_api_keys(resp.text)
         except Exception as e:
             logger.debug("Target: warm-up visit failed: %s", e)
+
+    def _extract_api_keys(self, html: str):
+        """Extract Redsky API keys from Target page HTML.
+
+        Target embeds the API key in several places:
+        - Inline <script> tags with fetch() calls to redsky.target.com
+        - __NEXT_DATA__ JSON blob
+        - webpack chunk config objects with apiKey properties
+        """
+        # Pattern 1: key= parameter in redsky URLs
+        url_keys = re.findall(
+            r'redsky\.target\.com/[^"\']*[?&]key=([a-f0-9]{30,50})', html
+        )
+        # Pattern 2: "apiKey":"<hex>" or apiKey: "<hex>" in JS
+        js_keys = re.findall(
+            r'["\']?apiKey["\']?\s*[:=]\s*["\']([a-f0-9]{30,50})["\']', html
+        )
+        # Pattern 3: Standalone 40-char hex near "redsky" context
+        # (more aggressive — only use if others found nothing)
+        all_keys = list(dict.fromkeys(url_keys + js_keys))  # dedupe, preserve order
+        if all_keys:
+            logger.info("Target: extracted %d API key(s) from page", len(all_keys))
+            self._refreshed_keys = all_keys
+        else:
+            logger.debug("Target: could not extract API keys from page HTML")
 
     def _redsky_headers(self, url: str) -> dict:
         """Build headers matching Target's real frontend Redsky requests."""
@@ -108,11 +145,11 @@ class TargetMonitor(BaseMonitor):
 
         store_id = self.DEFAULT_STORE_ID
 
-        # --- Strategy 1: pdp_fulfillment_v1 (current endpoint) ---
+        # --- Strategy 1: product_fulfillment_v1 (current endpoint) ---
         # Target renamed their fulfillment endpoint ~2026-03. This is the
         # primary endpoint that the frontend now calls for fulfillment data.
         fulfillment_result: StockResult | None = None
-        for api_key in self.API_KEYS:
+        for api_key in self._active_keys:
             fulfillment_params = {
                 "key": api_key,
                 "tcin": tcin,
@@ -141,18 +178,19 @@ class TargetMonitor(BaseMonitor):
                     result = self._parse_fulfillment(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
                         logger.debug(
-                            "Target stock for %s: %s (via pdp_fulfillment_v1)",
+                            "Target stock for %s: %s (via product_fulfillment_v1)",
                             product_name, result.status.value,
                         )
                         if result.price:
                             return result
                         fulfillment_result = result
                     else:
-                        logger.debug("Target: pdp_fulfillment_v1 returned UNKNOWN for %s", tcin)
+                        logger.debug("Target: product_fulfillment_v1 returned UNKNOWN for %s", tcin)
                     break
-                elif resp.status_code == 404:
-                    # Try legacy endpoint name as fallback
-                    logger.debug("Target: pdp_fulfillment_v1 returned 404, trying legacy endpoint for %s", tcin)
+                elif resp.status_code in (404, 410):
+                    # 404 = endpoint not found, 410 = gone/deprecated key
+                    # Either way, try legacy endpoint as fallback
+                    logger.debug("Target: product_fulfillment_v1 returned %d, trying legacy endpoint for %s", resp.status_code, tcin)
                     legacy_resp = await client.get(
                         self.FULFILLMENT_URL_LEGACY,
                         params={**fulfillment_params,
@@ -186,7 +224,7 @@ class TargetMonitor(BaseMonitor):
         # --- Strategy 2: pdp_client_v1 (full product data, may be deprecated) ---
         api_attempted = False
         api_all_blocked = True
-        for api_key in self.API_KEYS:
+        for api_key in self._active_keys:
             pdp_params = {
                 "key": api_key,
                 "tcin": tcin,
