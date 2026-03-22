@@ -426,6 +426,25 @@ class TargetMonitor(BaseMonitor):
             )
 
     @staticmethod
+    def _find_primary_product_in_preloaded(preloaded: dict) -> dict | None:
+        """Extract the primary product dict from __PRELOADED_QUERIES__.
+
+        Target's preloaded data contains queries keyed by endpoint path.
+        The primary product is under a product_fulfillment or pdp_client key.
+        We avoid matching recommended/carousel products which also appear.
+        """
+        for key, value in preloaded.items():
+            if not isinstance(value, dict):
+                continue
+            # Look for the query result containing product data
+            result = value.get("result") or value.get("data") or value
+            if isinstance(result, dict):
+                product = result.get("data", {}).get("product") or result.get("product")
+                if isinstance(product, dict) and "fulfillment" in product:
+                    return product
+        return None
+
+    @staticmethod
     def _extract_price_from_product(product: dict) -> str:
         """Extract price from a Target product dict, trying multiple paths."""
         price_info = product.get("price", {})
@@ -586,32 +605,20 @@ class TargetMonitor(BaseMonitor):
             except (json.JSONDecodeError, TypeError, AttributeError):
                 continue
 
-        # Strategy 2: Regex for availability_status in embedded JS data
-        if re.search(r'"availability_status"\s*:\s*"IN_STOCK"', html):
-            price = ""
-            price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', html)
-            if price_match:
-                price = price_match.group(1)
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.IN_STOCK, price=price,
-            )
-
-        # Strategy 3: __PRELOADED_QUERIES__ data
+        # Strategy 2: __PRELOADED_QUERIES__ data — parse the primary product's
+        # fulfillment block only (not recommended products, carousels, etc.)
         preloaded_match = re.search(r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>', html, re.S)
         if preloaded_match:
             try:
                 preloaded = json.loads(preloaded_match.group(1))
-                preloaded_str = json.dumps(preloaded)
-                if '"IN_STOCK"' in preloaded_str:
-                    price_match = re.search(r'"formatted_current_price"\s*:\s*"([^"]+)"', preloaded_str)
-                    price = price_match.group(1) if price_match else ""
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
+                # Walk the preloaded data to find the primary product fulfillment
+                product_data = self._find_primary_product_in_preloaded(preloaded)
+                if product_data:
+                    fulfillment = product_data.get("fulfillment", {})
+                    price = self._extract_price_from_product(product_data)
+                    result = self._check_fulfillment_availability(url, product_name, product_data, fulfillment, price)
+                    if result.status != StockStatus.UNKNOWN:
+                        return result
             except (json.JSONDecodeError, TypeError):
                 pass
 
