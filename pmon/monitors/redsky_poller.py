@@ -574,7 +574,7 @@ class RedSkySearch:
         Override the default RedSky API key.
     """
 
-    SEARCH_URL = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v1"
+    SEARCH_URL = "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2"
 
     _API_KEYS = RedSkyPoller._API_KEYS
 
@@ -1047,7 +1047,7 @@ class RedSkySearch:
                 nonlocal captured_search_url
                 url = response.url
                 # Capture any redsky response that looks like search results
-                if "redsky.target.com" in url and ("search" in url or "plp" in url):
+                if ("redsky.target.com" in url or "api.target.com" in url) and ("search" in url or "plp" in url):
                     try:
                         body = await response.json()
                         if isinstance(body, dict):
