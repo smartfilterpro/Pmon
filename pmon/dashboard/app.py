@@ -915,7 +915,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             # page.  Navigating to /account/login triggers the WAF block page.
             # Use None to force the homepage → click-sign-in-link approach.
             "pokemoncenter": None,
-            "costco": "https://www.costco.com/LogonForm",
+            # Costco: direct navigation to /LogonForm or signin.costco.com
+            # gets blocked. Must go to homepage and click the account link.
+            "costco": None,
         }
 
         # Fallback: navigate to homepage and click sign-in link if direct URL fails
@@ -1108,7 +1110,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 current_url = page.url
 
                 # Determine if we actually landed on a login page
-                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com", "/logonform"]
+                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com", "/logonform", "signin.costco.com"]
                 landed_on_login = any(ind in current_url.lower() for ind in login_indicators)
 
                 # Walmart: verifyToken means OAuth completed — NOT a login page
