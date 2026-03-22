@@ -751,6 +751,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     async def _enter_otp_code(page, code: str):
         """Enter an OTP code into the current page's input field and submit."""
         from pmon.checkout.human_behavior import wait_for_page_ready
+        import asyncio
         try:
             otp_input = page.locator(
                 'input[type="text"], input[type="tel"], input[type="number"], '
@@ -758,24 +759,66 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             ).first
             await otp_input.click()
             await otp_input.fill(code)
-            import asyncio
             await asyncio.sleep(0.5)
-            # Try clicking submit/verify/continue
-            for btn_text in ["Continue", "Verify", "Submit", "Sign In"]:
-                try:
-                    btn = page.get_by_role("button", name=btn_text, exact=False)
-                    if await btn.first.is_visible(timeout=500):
-                        await btn.first.click()
-                        break
-                except Exception:
-                    continue
-            else:
+
+            # Verify the code was actually filled
+            try:
+                filled_value = await otp_input.input_value(timeout=1000)
+                if not filled_value:
+                    logger.warning("OTP input empty after fill — retrying with type()")
+                    await otp_input.click()
+                    await otp_input.type(code, delay=80)
+                    await asyncio.sleep(0.3)
+            except Exception:
+                pass
+
+            otp_page_indicators = (
+                'text=/one-time code/i, text=/enter your code/i, '
+                'text=/enter the code/i, text=/verification code/i, '
+                'text=/enter your one-time/i'
+            )
+
+            # Try multiple submit strategies until we leave the OTP page
+            async def _click_button():
+                for btn_text in ["Continue", "Verify", "Submit", "Sign In"]:
+                    try:
+                        btn = page.get_by_role("button", name=btn_text, exact=False)
+                        if await btn.first.is_visible(timeout=500):
+                            await btn.first.click()
+                            return
+                    except Exception:
+                        continue
                 # Fallback: click any submit button
+                await page.locator('button[type="submit"]').first.click()
+
+            async def _press_enter():
+                await otp_input.press("Enter")
+
+            async def _tab_enter():
+                await otp_input.press("Tab")
+                await asyncio.sleep(0.2)
+                await page.keyboard.press("Enter")
+
+            for attempt_label, submit_action in [
+                ("button click", _click_button),
+                ("Enter key", _press_enter),
+                ("Tab+Enter", _tab_enter),
+            ]:
                 try:
-                    await page.locator('button[type="submit"]').first.click()
+                    await submit_action()
                 except Exception:
                     pass
-            await wait_for_page_ready(page, timeout=10000)
+                await wait_for_page_ready(page, timeout=8000)
+
+                try:
+                    still_on_otp = await page.locator(otp_page_indicators).first.is_visible(timeout=2000)
+                except Exception:
+                    still_on_otp = False
+
+                if not still_on_otp:
+                    logger.info("OTP submitted successfully via %s", attempt_label)
+                    break
+                logger.warning("Still on OTP page after %s — trying next method", attempt_label)
         except Exception as e:
             logger.error("Failed to enter OTP code on page: %s", e)
 
