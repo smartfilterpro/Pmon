@@ -1066,11 +1066,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "error": '.error-message, [class*="error" i], .alert, [data-testid*="error"], [role="alert"]',
             },
             "costco": {
-                "email": 'input[name="logonId"], #logonId, input[type="email"], input[name="email"], input[id*="email" i]',
-                "password": 'input[name="logonPassword"], #logonPassword, input[type="password"], input[name="password"]',
-                "submit": 'input[type="submit"], button[type="submit"], button:has-text("Sign In"), button:has-text("Sign In / Register")',
+                "email": 'input[name="signInName"], #signInName, input[name="logonId"], #logonId, input[type="email"], input[name="email"], input[id*="email" i]',
+                "password": 'input[name="password"], #password, input[name="logonPassword"], #logonPassword, input[type="password"]',
+                "submit": '#next, button[type="submit"], input[type="submit"], button:has-text("Sign In"), button:has-text("Sign in"), button:has-text("Sign In / Register")',
                 "success": 'a[href*="/myaccount"], a[href*="/AccountStatusView"], [id*="myaccount" i], a:has-text("My Account"), a:has-text("Account"), a:has-text("My Orders")',
-                "error": '.error-message, [class*="error" i], [role="alert"], .field-error',
+                "error": '.error-message, [class*="error" i], [role="alert"], .field-error, #claimVerificationServerError, .pageLevel-error',
             },
         }
 
@@ -1344,6 +1344,48 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
                     if not signin_clicked:
                         page_desc = await vision_read_page(page)
+                        # Costco SSO fallback: construct the Azure AD B2C login URL
+                        if retailer == "costco":
+                            logger.info("Test login %s: CSS + vision failed — trying direct SSO URL", retailer_name)
+                            try:
+                                # Extract the SSO authorize URL from the Account link's JS or page source
+                                sso_url = await page.evaluate("""() => {
+                                    // Check all links for signin.costco.com hrefs
+                                    for (const a of document.querySelectorAll('a[href*="signin.costco.com"]')) {
+                                        return a.href;
+                                    }
+                                    // Check for embedded SSO config in scripts
+                                    for (const s of document.querySelectorAll('script')) {
+                                        const text = s.textContent || '';
+                                        const match = text.match(/(https:\\/\\/signin\\.costco\\.com[^"'\\s]+authorize[^"'\\s]*)/);
+                                        if (match) return match[1];
+                                    }
+                                    return null;
+                                }""")
+                                if not sso_url:
+                                    # Construct the SSO URL using Costco's known Azure AD B2C parameters
+                                    sso_url = (
+                                        "https://signin.costco.com/e0714dd4-784d-46d6-a278-3e29553483eb/"
+                                        "B2C_1A_SSO_WCS_signup_signin_201/oauth2/v2.0/authorize"
+                                        "?ClientName=USBC"
+                                        "&ui_locales=en-US"
+                                        "&scope=openid+offline_access"
+                                        "&response_type=code+id_token"
+                                        "&redirect_uri=https%3A%2F%2Fwww.costco.com%2FOAuthLogonCmd"
+                                        "&state=guestUserId%3D-1002%26URL%3D%5BSSO%5D%2F%5BSSO%5D"
+                                        "&nonce=" + __import__("secrets").token_urlsafe(12)
+                                        + "&client_id=4900eb1f-0c10-4bd9-99c3-c59e6c1ecebf"
+                                        "&TC=0"
+                                        "&response_mode=form_post"
+                                    )
+                                await page.goto(sso_url, wait_until="domcontentloaded", timeout=45000)
+                                await wait_for_page_ready(page, timeout=15000)
+                                signin_clicked = True
+                                logger.info("Test login %s: navigated to SSO login page", retailer_name)
+                            except Exception as sso_err:
+                                logger.warning("Test login %s: SSO fallback failed: %s", retailer_name, sso_err)
+
+                    if not signin_clicked:
                         msg = f"{retailer_name}: could not find sign-in link on homepage"
                         if page_desc:
                             msg += f" (page shows: {page_desc})"
@@ -1356,6 +1398,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     email_sel = 'input[name="email"], input[name="username"], input[type="email"], input[type="text"]'
                     pass_sel = 'input[type="password"], input[name="password"]'
                     submit_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In"), button:has-text("Continue")'
+                elif "signin.costco.com" in current_url:
+                    # Azure AD B2C SSO form uses different field names
+                    email_sel = '#signInName, input[name="signInName"], input[type="email"], input[id*="email" i]'
+                    pass_sel = '#password, input[name="password"], input[type="password"]'
+                    submit_sel = '#next, button[type="submit"], button:has-text("Sign In"), button:has-text("Sign in")'
                 else:
                     email_sel = sel["email"]
                     pass_sel = sel["password"]
