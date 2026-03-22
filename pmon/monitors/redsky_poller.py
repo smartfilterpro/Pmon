@@ -699,6 +699,7 @@ class RedSkySearch:
         *,
         sold_by_target_only: bool = False,
         include_out_of_stock: bool = False,
+        offset: int = 0,
     ) -> list[SearchResult]:
         """Search Target for *keyword* and return matching products.
 
@@ -733,7 +734,7 @@ class RedSkySearch:
                     "count": str(self.max_results),
                     "default_purchasability_filter": "false" if include_out_of_stock else "true",
                     "is_bot": "false",
-                    "offset": "0",
+                    "offset": str(offset),
                     "page": f"/s/{keyword}",
                     "pricing_store_id": self.store_id,
                     "store_ids": self.store_id,

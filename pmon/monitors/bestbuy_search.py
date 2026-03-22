@@ -125,6 +125,7 @@ class BestBuySearch:
         keyword: str,
         *,
         include_out_of_stock: bool = False,
+        offset: int = 0,
     ) -> list[SearchResult]:
         """Search Best Buy for *keyword* and return matching products.
 
@@ -146,21 +147,23 @@ class BestBuySearch:
             timeout=httpx.Timeout(15.0),
             http2=True,
         ) as client:
-            # Try primary search (Falcor model.json)
-            results = await self._search_model_json(client, keyword, include_out_of_stock)
+            page = (offset // self.max_results) + 1
 
-            # Fallback to typeahead/suggest API
-            if not results:
+            # Try primary search (Falcor model.json)
+            results = await self._search_model_json(client, keyword, include_out_of_stock, page)
+
+            # Fallback to typeahead/suggest API (no pagination support)
+            if not results and page == 1:
                 results = await self._search_typeahead(client, keyword, include_out_of_stock)
 
             return results
 
     async def _search_model_json(
-        self, client: httpx.AsyncClient, keyword: str, include_out_of_stock: bool
+        self, client: httpx.AsyncClient, keyword: str, include_out_of_stock: bool, page: int = 1
     ) -> list[SearchResult]:
         """Primary search via Best Buy's Falcor model.json API."""
         params = {
-            "paths": f'[["search","query","{keyword}","1",{{"page":"1","pageSize":"{self.max_results}"}},[["sku","names","short"],["sku","names","long"],["sku","skuId"],["sku","image"],["sku","url"],["sku","buttonState","buttonState"],["sku","price","currentPrice"],["sku","price","regularPrice"],["sku","condition"],["sku","salePrice"]]]]',
+            "paths": f'[["search","query","{keyword}","1",{{"page":"{page}","pageSize":"{self.max_results}"}},[["sku","names","short"],["sku","names","long"],["sku","skuId"],["sku","image"],["sku","url"],["sku","buttonState","buttonState"],["sku","price","currentPrice"],["sku","price","regularPrice"],["sku","condition"],["sku","salePrice"]]]]',
             "method": "get",
         }
 

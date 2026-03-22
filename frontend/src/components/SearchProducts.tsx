@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { searchProducts, addProduct, type SearchResult, type Retailer } from '../hooks/useApi';
-import { Search, Plus, Loader, ShoppingCart, Check, Store, ExternalLink } from 'lucide-react';
+import { Search, Plus, Loader, ShoppingCart, Check, Store, ExternalLink, ChevronDown } from 'lucide-react';
 import './SearchProducts.css';
 
 interface Props {
@@ -23,6 +23,8 @@ export default function SearchProducts({ refresh }: Props) {
   const [targetOnly, setTargetOnly] = useState(false);
   const [includeOos, setIncludeOos] = useState(false);
   const [maxResults, setMaxResults] = useState(10);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [selectedRetailers, setSelectedRetailers] = useState<Set<Retailer>>(new Set(['target']));
 
   const toggleRetailer = (r: Retailer) => {
@@ -46,6 +48,7 @@ export default function SearchProducts({ refresh }: Props) {
     setResults([]);
     setAdded(new Set());
     setHasSearched(true);
+    setHasMore(false);
     try {
       const retailers = Array.from(selectedRetailers);
       const { results: res, errors: searchErrors } = await searchProducts(keyword.trim(), {
@@ -55,6 +58,7 @@ export default function SearchProducts({ refresh }: Props) {
         includeOutOfStock: includeOos,
       });
       setResults(res);
+      setHasMore(res.length >= maxResults);
       if (searchErrors.length > 0) {
         setError(searchErrors.join('; '));
       } else if (res.length === 0) {
@@ -64,6 +68,31 @@ export default function SearchProducts({ refresh }: Props) {
       setError((err as Error).message);
     } finally {
       setSearching(false);
+    }
+  };
+
+  const handleLoadMore = async () => {
+    if (loadingMore || !keyword.trim()) return;
+    setLoadingMore(true);
+    try {
+      const retailers = Array.from(selectedRetailers);
+      const { results: res } = await searchProducts(keyword.trim(), {
+        retailers,
+        maxResults,
+        offset: results.length,
+        soldByTargetOnly: targetOnly,
+        includeOutOfStock: includeOos,
+      });
+      if (res.length === 0) {
+        setHasMore(false);
+      } else {
+        setResults(prev => [...prev, ...res]);
+        setHasMore(res.length >= maxResults);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -239,6 +268,16 @@ export default function SearchProducts({ refresh }: Props) {
               </div>
             );
           })}
+          {hasMore && (
+            <button
+              className="load-more-btn"
+              onClick={handleLoadMore}
+              disabled={loadingMore}
+            >
+              {loadingMore ? <Loader size={14} className="spinner" /> : <ChevronDown size={14} />}
+              {loadingMore ? 'Loading...' : 'Load More'}
+            </button>
+          )}
         </div>
       )}
 

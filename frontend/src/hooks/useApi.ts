@@ -165,6 +165,7 @@ export async function searchProducts(
   opts: {
     retailers?: Retailer[];
     maxResults?: number;
+    offset?: number;
     soldByTargetOnly?: boolean;
     includeOutOfStock?: boolean;
   } = {},
@@ -175,6 +176,7 @@ export async function searchProducts(
       keyword,
       retailers: opts.retailers ?? ['target'],
       max_results: opts.maxResults ?? 10,
+      offset: opts.offset ?? 0,
       sold_by_target_only: opts.soldByTargetOnly ?? false,
       include_out_of_stock: opts.includeOutOfStock ?? false,
     }),

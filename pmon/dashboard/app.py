@@ -209,6 +209,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if not keyword:
             return JSONResponse({"error": "Keyword required"}, 400)
         max_results = min(int(data.get("max_results", 10)), 50)
+        offset = max(0, int(data.get("offset", 0)))
         sold_by_target_only = bool(data.get("sold_by_target_only", False))
         include_out_of_stock = bool(data.get("include_out_of_stock", False))
         retailers = data.get("retailers", ["target"])
@@ -229,6 +230,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 keyword,
                 sold_by_target_only=sold_by_target_only,
                 include_out_of_stock=include_out_of_stock,
+                offset=offset,
             )
 
         async def _search_bestbuy():
@@ -236,6 +238,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return await search.find(
                 keyword,
                 include_out_of_stock=include_out_of_stock,
+                offset=offset,
             )
 
         search_map = {
