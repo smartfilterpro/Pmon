@@ -76,6 +76,9 @@ class RedSkyPoller:
     """
 
     REDSKY_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1"
+    # pdp_fulfillment_v1 — documented in the LumaDevelopment gist as the
+    # primary fulfillment endpoint Target exposes publicly.
+    REDSKY_PDP_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1"
     REDSKY_PDP_LEGACY = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
 
     # Observed from Target's real frontend — rotated on 403.
@@ -272,27 +275,23 @@ class RedSkyPoller:
             "x-application-name": "web",
         }
 
-        resp = await self._client.get(self.REDSKY_FULFILLMENT, params=params, headers=headers)
+        # Try endpoints in order: product_fulfillment_v1, pdp_fulfillment_v1,
+        # then legacy pdp_client_v1.
+        fulfillment_urls = [
+            self.REDSKY_FULFILLMENT,
+            self.REDSKY_PDP_FULFILLMENT,
+            self.REDSKY_PDP_LEGACY,
+        ]
+        resp = await self._client.get(fulfillment_urls[0], params=params, headers=headers)
 
-        # Fall back to legacy endpoint on 404/410
-        if resp.status_code in (404, 410):
-            logger.debug("RedSkyPoller: product_fulfillment_v1 returned %d, trying legacy pdp_client_v1", resp.status_code)
-            legacy_params = {
-                "key": api_key,
-                "tcin": self.tcin,
-                "is_bot": "false",
-                "store_id": self.store_id,
-                "pricing_store_id": self.store_id,
-                "has_pricing_store_id": "true",
-                "has_financing_options": "true",
-                "include_obsolete": "true",
-                "skip_personalized": "true",
-                "skip_variation_hierarchy": "true",
-                "visitor_id": self._visitor_id,
-                "channel": "WEB",
-                "page": f"/p/A-{self.tcin}",
-            }
-            resp = await self._client.get(self.REDSKY_PDP_LEGACY, params=legacy_params, headers=headers)
+        for fallback_url in fulfillment_urls[1:]:
+            if resp.status_code not in (404, 410):
+                break
+            logger.debug(
+                "RedSkyPoller: %s returned %d, trying %s",
+                resp.url.path.split("/")[-1], resp.status_code, fallback_url.split("/")[-1],
+            )
+            resp = await self._client.get(fallback_url, params=params, headers=headers)
 
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
@@ -761,7 +760,7 @@ class RedSkySearch:
                 }
                 try:
                     resp = await client.get(
-                        RedSkyPoller.REDSKY_PDP, params=params, headers=headers,
+                        RedSkyPoller.REDSKY_PDP_LEGACY, params=params, headers=headers,
                     )
                 except httpx.HTTPError as exc:
                     logger.warning("RedSkySearch lookup: network error: %s", exc)
@@ -1113,6 +1112,7 @@ class RedSkySearch:
         search_url = f"https://www.target.com/s?searchTerm={keyword}"
         captured_responses: list[dict] = []
         captured_search_url: str | None = None
+        captured_full_url: str | None = None  # full URL with query params
 
         logger.info("RedSkySearch: using browser fallback for '%s'", keyword)
 
@@ -1140,27 +1140,43 @@ class RedSkySearch:
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             """)
 
-            # Intercept responses from redsky or any search API
+            # Intercept responses from any Target API that returns search data.
+            # Cast a wide net: catch any *.target.com JSON response containing
+            # product data, not just known endpoint paths.
             async def on_response(response):
-                nonlocal captured_search_url
+                nonlocal captured_search_url, captured_full_url
                 url = response.url
-                # Capture any redsky/api.target response that looks like search
-                if ("redsky.target.com" in url or "api.target.com" in url) and ("search" in url or "plp" in url):
-                    try:
-                        body = await response.json()
-                        if isinstance(body, dict):
-                            captured_responses.append(body)
-                            captured_search_url = url.split("?")[0]
-                            logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
-                            # Extract the API key the browser used
-                            key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
-                            if key_match:
-                                fresh_key = key_match.group(1)
-                                if fresh_key not in self._api_keys:
-                                    self._api_keys.insert(0, fresh_key)
-                                    logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
-                    except Exception:
-                        pass
+                content_type = response.headers.get("content-type", "")
+                # Only inspect JSON from target.com subdomains
+                if "target.com" not in url or "application/json" not in content_type:
+                    return
+                # Skip tiny responses / images / static assets
+                if response.status != 200:
+                    return
+                try:
+                    body = await response.json()
+                except Exception:
+                    return
+                if not isinstance(body, dict):
+                    return
+                # Check if this looks like search results (products array)
+                search = body.get("data", {}).get("search") if isinstance(body.get("data"), dict) else None
+                if not isinstance(search, dict):
+                    return
+                has_products = bool(search.get("products") or search.get("search_response") or search.get("typed_search_items"))
+                if not has_products:
+                    return
+                captured_responses.append(body)
+                captured_search_url = url.split("?")[0]
+                captured_full_url = url
+                logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
+                # Extract the API key the browser used
+                key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
+                if key_match:
+                    fresh_key = key_match.group(1)
+                    if fresh_key not in self._api_keys:
+                        self._api_keys.insert(0, fresh_key)
+                        logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
 
             page.on("response", on_response)
 
@@ -1179,8 +1195,14 @@ class RedSkySearch:
                     logger.info("RedSkySearch: browser intercepted %d results for '%s'", len(results), keyword)
                     # Update the class search URL if we discovered a new endpoint
                     if captured_search_url and captured_search_url != RedSkySearch.SEARCH_URL:
-                        logger.info("RedSkySearch: discovered new search endpoint: %s", captured_search_url)
+                        logger.info(
+                            "RedSkySearch: discovered new search endpoint: %s (full: %s)",
+                            captured_search_url, captured_full_url,
+                        )
                         RedSkySearch.SEARCH_URL = captured_search_url
+                        RedSkySearch._dead_urls.discard(captured_search_url)
+                        if captured_search_url not in RedSkySearch._SEARCH_URLS:
+                            RedSkySearch._SEARCH_URLS.insert(0, captured_search_url)
                     await browser.close()
                     await pw.stop()
                     if sold_by_target_only:
