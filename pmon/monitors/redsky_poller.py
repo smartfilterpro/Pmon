@@ -76,6 +76,9 @@ class RedSkyPoller:
     """
 
     REDSKY_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1"
+    # pdp_fulfillment_v1 — documented in the LumaDevelopment gist as the
+    # primary fulfillment endpoint Target exposes publicly.
+    REDSKY_PDP_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1"
     REDSKY_PDP_LEGACY = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
 
     # Observed from Target's real frontend — rotated on 403.
@@ -272,27 +275,23 @@ class RedSkyPoller:
             "x-application-name": "web",
         }
 
-        resp = await self._client.get(self.REDSKY_FULFILLMENT, params=params, headers=headers)
+        # Try endpoints in order: product_fulfillment_v1, pdp_fulfillment_v1,
+        # then legacy pdp_client_v1.
+        fulfillment_urls = [
+            self.REDSKY_FULFILLMENT,
+            self.REDSKY_PDP_FULFILLMENT,
+            self.REDSKY_PDP_LEGACY,
+        ]
+        resp = await self._client.get(fulfillment_urls[0], params=params, headers=headers)
 
-        # Fall back to legacy endpoint on 404/410
-        if resp.status_code in (404, 410):
-            logger.debug("RedSkyPoller: product_fulfillment_v1 returned %d, trying legacy pdp_client_v1", resp.status_code)
-            legacy_params = {
-                "key": api_key,
-                "tcin": self.tcin,
-                "is_bot": "false",
-                "store_id": self.store_id,
-                "pricing_store_id": self.store_id,
-                "has_pricing_store_id": "true",
-                "has_financing_options": "true",
-                "include_obsolete": "true",
-                "skip_personalized": "true",
-                "skip_variation_hierarchy": "true",
-                "visitor_id": self._visitor_id,
-                "channel": "WEB",
-                "page": f"/p/A-{self.tcin}",
-            }
-            resp = await self._client.get(self.REDSKY_PDP_LEGACY, params=legacy_params, headers=headers)
+        for fallback_url in fulfillment_urls[1:]:
+            if resp.status_code not in (404, 410):
+                break
+            logger.debug(
+                "RedSkyPoller: %s returned %d, trying %s",
+                resp.url.path.split("/")[-1], resp.status_code, fallback_url.split("/")[-1],
+            )
+            resp = await self._client.get(fallback_url, params=params, headers=headers)
 
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
@@ -761,7 +760,7 @@ class RedSkySearch:
                 }
                 try:
                     resp = await client.get(
-                        RedSkyPoller.REDSKY_PDP, params=params, headers=headers,
+                        RedSkyPoller.REDSKY_PDP_LEGACY, params=params, headers=headers,
                     )
                 except httpx.HTTPError as exc:
                     logger.warning("RedSkySearch lookup: network error: %s", exc)
