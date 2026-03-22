@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -369,15 +370,37 @@ class ApiCheckout:
             return False
 
     async def _tgt_lookup_product(self, client: httpx.AsyncClient, tcin: str) -> dict | None:
-        """Look up product details via Redsky API."""
+        """Look up product details via Redsky API (pdp_fulfillment_v1)."""
         try:
+            # Try current endpoint first
             resp = await client.get(
-                f"https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
-                f"?key={self._TGT_API_KEY}"
-                f"&tcin={tcin}"
-                f"&channel=WEB",
+                "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1",
+                params={
+                    "key": self._TGT_API_KEY,
+                    "tcin": tcin,
+                    "store_id": "2845",
+                    "zip": "21224",
+                    "state": "MD",
+                    "latitude": "39.282024",
+                    "longitude": "-76.569695",
+                    "pricing_store_id": "2845",
+                    "has_pricing_store_id": "true",
+                    "has_store_positions_store_id": "true",
+                    "store_positions_store_id": "2845",
+                    "is_bot": "false",
+                    "visitor_id": uuid.uuid4().hex,
+                    "channel": "WEB",
+                    "page": f"/p/A-{tcin}",
+                },
                 headers={**HEADERS, "Accept": "application/json"},
             )
+            # Fall back to legacy pdp_client_v1 on 404
+            if resp.status_code == 404:
+                resp = await client.get(
+                    "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1",
+                    params={"key": self._TGT_API_KEY, "tcin": tcin, "channel": "WEB"},
+                    headers={**HEADERS, "Accept": "application/json"},
+                )
             if resp.status_code == 200:
                 data = resp.json()
                 product = data.get("data", {}).get("product", {})

@@ -30,8 +30,11 @@ class TargetMonitor(BaseMonitor):
 
     # Target's Redsky API endpoints (same base, different aggregation paths)
     REDSKY_BASE = "https://redsky.target.com/redsky_aggregations/v1/web"
+    # Current endpoint (as of 2026-03) — Target renamed from pdp_client_v1
+    FULFILLMENT_URL = f"{REDSKY_BASE}/pdp_fulfillment_v1"
+    # Fallback: older endpoint names that may still work on some products
+    FULFILLMENT_URL_LEGACY = f"{REDSKY_BASE}/product_fulfillment_and_variation_hierarchy_v1"
     PDP_URL = f"{REDSKY_BASE}/pdp_client_v1"
-    FULFILLMENT_URL = f"{REDSKY_BASE}/product_fulfillment_and_variation_hierarchy_v1"
 
     # API keys observed from Target's real frontend (2026-03-17)
     API_KEYS = [
@@ -105,11 +108,9 @@ class TargetMonitor(BaseMonitor):
 
         store_id = self.DEFAULT_STORE_ID
 
-        # --- Strategy 1: product_fulfillment_and_variation_hierarchy_v1 ---
-        # This is the endpoint Target's frontend calls for fulfillment data.
-        # It returns location-aware availability (shipping, pickup, delivery).
-        # Note: this endpoint often lacks price data, so we save the result
-        # and continue to pdp_client_v1 to fill in the price if needed.
+        # --- Strategy 1: pdp_fulfillment_v1 (current endpoint) ---
+        # Target renamed their fulfillment endpoint ~2026-03. This is the
+        # primary endpoint that the frontend now calls for fulfillment data.
         fulfillment_result: StockResult | None = None
         for api_key in self.API_KEYS:
             fulfillment_params = {
@@ -117,17 +118,14 @@ class TargetMonitor(BaseMonitor):
                 "tcin": tcin,
                 "is_bot": "false",
                 "store_id": store_id,
-                "required_store_id": store_id,
+                "store_positions_store_id": store_id,
                 "pricing_store_id": store_id,
                 "has_pricing_store_id": "true",
-                "scheduled_delivery_store_id": store_id,
+                "has_store_positions_store_id": "true",
                 "latitude": self.DEFAULT_LAT,
                 "longitude": self.DEFAULT_LNG,
                 "state": self.DEFAULT_STATE,
                 "zip": self.DEFAULT_ZIP,
-                "paid_membership": "false",
-                "base_membership": "true",
-                "card_membership": "false",
                 "visitor_id": self._visitor_id,
                 "channel": "WEB",
                 "page": f"/p/A-{tcin}",
@@ -143,16 +141,37 @@ class TargetMonitor(BaseMonitor):
                     result = self._parse_fulfillment(url, product_name, data)
                     if result.status != StockStatus.UNKNOWN:
                         logger.debug(
-                            "Target stock for %s: %s (via fulfillment API)",
+                            "Target stock for %s: %s (via pdp_fulfillment_v1)",
                             product_name, result.status.value,
                         )
                         if result.price:
                             return result
-                        # Got status but no price — save and try PDP for price
                         fulfillment_result = result
                     else:
-                        logger.debug("Target: fulfillment API returned UNKNOWN for %s, trying pdp_client_v1", tcin)
-                    break  # Got 200, no need to try other keys for this endpoint
+                        logger.debug("Target: pdp_fulfillment_v1 returned UNKNOWN for %s", tcin)
+                    break
+                elif resp.status_code == 404:
+                    # Try legacy endpoint name as fallback
+                    logger.debug("Target: pdp_fulfillment_v1 returned 404, trying legacy endpoint for %s", tcin)
+                    legacy_resp = await client.get(
+                        self.FULFILLMENT_URL_LEGACY,
+                        params={**fulfillment_params,
+                                "required_store_id": store_id,
+                                "scheduled_delivery_store_id": store_id,
+                                "paid_membership": "false",
+                                "base_membership": "true",
+                                "card_membership": "false"},
+                        headers=self._redsky_headers(url),
+                    )
+                    if legacy_resp.status_code == 200:
+                        data = legacy_resp.json()
+                        result = self._parse_fulfillment(url, product_name, data)
+                        if result.status != StockStatus.UNKNOWN:
+                            logger.debug("Target stock for %s: %s (via legacy fulfillment)", product_name, result.status.value)
+                            if result.price:
+                                return result
+                            fulfillment_result = result
+                    break
                 elif resp.status_code == 403:
                     logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id", tcin)
                     self._visitor_id = uuid.uuid4().hex
@@ -164,8 +183,7 @@ class TargetMonitor(BaseMonitor):
                 logger.debug("Target: fulfillment API failed for %s: %s", tcin, e)
                 break
 
-        # --- Strategy 2: pdp_client_v1 (full product data) ---
-        # Matches the exact parameters Target's frontend sends.
+        # --- Strategy 2: pdp_client_v1 (full product data, may be deprecated) ---
         api_attempted = False
         api_all_blocked = True
         for api_key in self.API_KEYS:
