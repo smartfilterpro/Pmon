@@ -23,6 +23,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import html as html_mod
 import json
 import logging
 import re
@@ -327,7 +328,7 @@ class RedSkyPoller:
         if isinstance(item, dict):
             desc = item.get("product_description", {})
             if isinstance(desc, dict):
-                title = desc.get("title", "")
+                title = html_mod.unescape(desc.get("title", ""))
 
         # Price
         price = ""
@@ -589,6 +590,8 @@ class RedSkySearch:
     # Keep a class attr for the last URL that actually worked, so subsequent
     # searches skip straight to it.
     SEARCH_URL = _SEARCH_URLS[0]
+    # Track endpoints confirmed dead (404/410) so we don't retry them.
+    _dead_urls: set[str] = set()
 
     _API_KEYS = RedSkyPoller._API_KEYS
 
@@ -785,7 +788,7 @@ class RedSkySearch:
                 if isinstance(item_data, dict):
                     desc = item_data.get("product_description", {})
                     if isinstance(desc, dict):
-                        title = desc.get("title", "")
+                        title = html_mod.unescape(desc.get("title", ""))
 
                 price = ""
                 price_info = product.get("price", {})
@@ -868,10 +871,12 @@ class RedSkySearch:
             return []
 
         async with self._get_client() as client:
-            # Build ordered list of URLs to try: last-known-good first, then all others
+            # Build ordered list of URLs to try: last-known-good first, then all others,
+            # skipping any we've confirmed dead (404/410).
             urls_to_try = [RedSkySearch.SEARCH_URL] + [
                 u for u in self._SEARCH_URLS if u != RedSkySearch.SEARCH_URL
             ]
+            urls_to_try = [u for u in urls_to_try if u not in RedSkySearch._dead_urls]
 
             for search_url in urls_to_try:
                 for api_key in self._api_keys:
@@ -924,8 +929,9 @@ class RedSkySearch:
                         return []
 
                     if resp.status_code in (404, 410):
+                        RedSkySearch._dead_urls.add(search_url)
                         logger.warning(
-                            "RedSkySearch: %d on %s — trying next endpoint",
+                            "RedSkySearch: %d on %s — marked dead, trying next endpoint",
                             resp.status_code, search_url,
                         )
                         break  # this endpoint is dead, try next URL
@@ -957,7 +963,11 @@ class RedSkySearch:
                         ]
                     return results
 
-        logger.warning("RedSkySearch: all endpoints/keys exhausted for '%s' — falling back to browser", keyword)
+        dead_count = len(RedSkySearch._dead_urls)
+        logger.warning(
+            "RedSkySearch: all endpoints exhausted for '%s' (%d dead) — falling back to browser",
+            keyword, dead_count,
+        )
         return await self._scrape_search_page(keyword, sold_by_target_only)
 
     def _parse_search(self, data: dict) -> list[SearchResult]:
@@ -1002,7 +1012,7 @@ class RedSkySearch:
                 if isinstance(item_data, dict):
                     desc = item_data.get("product_description", {})
                     if isinstance(desc, dict):
-                        title = desc.get("title", "")
+                        title = html_mod.unescape(desc.get("title", ""))
 
                 # Price
                 price = ""
@@ -1221,7 +1231,7 @@ class RedSkySearch:
                     title_match = re.search(
                         rf'href="[^"]*A-{tcin}[^"]*"[^>]*>([^<]+)', html,
                     )
-                    title = title_match.group(1).strip() if title_match else f"TCIN {tcin}"
+                    title = html_mod.unescape(title_match.group(1).strip()) if title_match else f"TCIN {tcin}"
                     results.append(SearchResult(
                         tcin=tcin,
                         title=title,
