@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { searchProducts, addProduct, type SearchResult, type Retailer } from '../hooks/useApi';
-import { Search, Plus, Loader, ShoppingCart, Check, Store } from 'lucide-react';
+import { Search, Plus, Loader, ShoppingCart, Check, Store, ExternalLink } from 'lucide-react';
 import './SearchProducts.css';
 
 interface Props {
@@ -22,6 +22,7 @@ export default function SearchProducts({ refresh }: Props) {
   const [hasSearched, setHasSearched] = useState(false);
   const [targetOnly, setTargetOnly] = useState(false);
   const [includeOos, setIncludeOos] = useState(false);
+  const [maxResults, setMaxResults] = useState(10);
   const [selectedRetailers, setSelectedRetailers] = useState<Set<Retailer>>(new Set(['target']));
 
   const toggleRetailer = (r: Retailer) => {
@@ -49,6 +50,7 @@ export default function SearchProducts({ refresh }: Props) {
       const retailers = Array.from(selectedRetailers);
       const { results: res, errors: searchErrors } = await searchProducts(keyword.trim(), {
         retailers,
+        maxResults,
         soldByTargetOnly: targetOnly,
         includeOutOfStock: includeOos,
       });
@@ -151,6 +153,16 @@ export default function SearchProducts({ refresh }: Props) {
           />
           Include OOS
         </label>
+        <select
+          className="results-limit-select"
+          value={maxResults}
+          onChange={(e) => setMaxResults(Number(e.target.value))}
+          title="Results per retailer"
+        >
+          <option value={10}>10 results</option>
+          <option value={20}>20 results</option>
+          <option value={50}>50 results</option>
+        </select>
         <button type="submit" className="search-btn" disabled={searching || !keyword.trim()}>
           {searching ? <Loader size={14} className="spinner" /> : <Search size={14} />}
           {searching ? 'Searching...' : 'Search'}
@@ -174,7 +186,16 @@ export default function SearchProducts({ refresh }: Props) {
                   />
                 )}
                 <div className="search-result-info">
-                  <p className="search-result-title">{r.title || `ID ${r.tcin}`}</p>
+                  <a
+                    href={r.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="search-result-title"
+                    title="Open product page"
+                  >
+                    {r.title || `ID ${r.tcin}`}
+                    <ExternalLink size={12} className="search-result-link-icon" />
+                  </a>
                   <div className="search-result-meta">
                     <span className={`search-result-retailer retailer-${r.retailer}`}>
                       {retailerLabel(r)}

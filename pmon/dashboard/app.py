@@ -208,7 +208,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         keyword = data.get("keyword", "").strip()
         if not keyword:
             return JSONResponse({"error": "Keyword required"}, 400)
-        max_results = min(int(data.get("max_results", 10)), 20)
+        max_results = min(int(data.get("max_results", 10)), 50)
         sold_by_target_only = bool(data.get("sold_by_target_only", False))
         include_out_of_stock = bool(data.get("include_out_of_stock", False))
         retailers = data.get("retailers", ["target"])
