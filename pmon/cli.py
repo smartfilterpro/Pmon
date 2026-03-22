@@ -28,6 +28,9 @@ def setup_logging(verbose: bool = False):
         format="%(message)s",
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
+    # Suppress httpx/httpcore INFO-level request logging (floods terminal)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     # Also capture WARNING+ to database
     from pmon.log_handler import DatabaseLogHandler
     logging.getLogger().addHandler(DatabaseLogHandler())

@@ -370,11 +370,11 @@ class ApiCheckout:
             return False
 
     async def _tgt_lookup_product(self, client: httpx.AsyncClient, tcin: str) -> dict | None:
-        """Look up product details via Redsky API (pdp_fulfillment_v1)."""
+        """Look up product details via Redsky API (product_fulfillment_v1)."""
         try:
             # Try current endpoint first
             resp = await client.get(
-                "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1",
+                "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1",
                 params={
                     "key": self._TGT_API_KEY,
                     "tcin": tcin,
