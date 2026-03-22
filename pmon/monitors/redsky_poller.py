@@ -577,13 +577,14 @@ class RedSkySearch:
         Override the default RedSky API key.
     """
 
-    # Endpoints to try in order — v2 first (confirmed working), then v1 on
-    # both redsky.target.com and api.target.com.
+    # Endpoints to try in order — v1 is confirmed working in the TargetAPI
+    # library; v2 is the newer variant seen in browser traffic. Try both on
+    # both domains.
     _SEARCH_URLS = [
-        "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2",
         "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v1",
-        "https://api.target.com/redsky_aggregations/v1/web/plp_search_v2",
+        "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2",
         "https://api.target.com/redsky_aggregations/v1/web/plp_search_v1",
+        "https://api.target.com/redsky_aggregations/v1/web/plp_search_v2",
     ]
     # Keep a class attr for the last URL that actually worked, so subsequent
     # searches skip straight to it.
@@ -884,10 +885,12 @@ class RedSkySearch:
                         "is_bot": "false",
                         "offset": str(offset),
                         "page": f"/s/{keyword}",
-                        "pageNumber": "1",
+                        "pageNumber": 1,
                         "platform": "desktop",
                         "pricing_store_id": self.store_id,
+                        "pricing_context": "digital",
                         "sortBy": "relevance",
+                        "storeSearch": "false",
                         "store_ids": self.store_id,
                         "visitor_id": self._visitor_id,
                     }
