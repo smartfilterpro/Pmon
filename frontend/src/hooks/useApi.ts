@@ -168,7 +168,7 @@ export async function searchProducts(
     soldByTargetOnly?: boolean;
     includeOutOfStock?: boolean;
   } = {},
-): Promise<SearchResult[]> {
+): Promise<{ results: SearchResult[]; errors: string[] }> {
   const resp = await apiFetch('/search', {
     method: 'POST',
     body: JSON.stringify({
@@ -181,7 +181,7 @@ export async function searchProducts(
   });
   const data = await resp.json();
   if (!resp.ok || data.error) throw new Error(data.error || 'Search failed');
-  return data.results;
+  return { results: data.results, errors: data.errors || [] };
 }
 
 /** @deprecated Use searchProducts instead */

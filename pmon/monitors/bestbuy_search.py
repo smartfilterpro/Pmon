@@ -129,6 +129,8 @@ class BestBuySearch:
         """Search Best Buy for *keyword* and return matching products.
 
         If *keyword* is a SKU or Best Buy URL, does a direct lookup.
+        Uses the Falcor model.json API first, then falls back to the
+        typeahead/suggest API if no results are found.
         """
         # Direct SKU lookup
         sku = self._extract_sku(keyword)
@@ -144,27 +146,131 @@ class BestBuySearch:
             timeout=httpx.Timeout(15.0),
             http2=True,
         ) as client:
-            # Best Buy's internal search endpoint used by the website
-            params = {
-                "paths": f'[["search","query","{keyword}","1",{{"page":"1","pageSize":"{self.max_results}"}},[["sku","names","short"],["sku","names","long"],["sku","skuId"],["sku","image"],["sku","url"],["sku","buttonState","buttonState"],["sku","price","currentPrice"],["sku","price","regularPrice"],["sku","condition"],["sku","salePrice"]]]]',
-                "method": "get",
-            }
+            # Try primary search (Falcor model.json)
+            results = await self._search_model_json(client, keyword, include_out_of_stock)
 
-            try:
-                resp = await client.get(_SEARCH_URL, params=params)
-            except httpx.HTTPError as exc:
-                logger.warning("BestBuySearch: network error: %s", exc)
-                return []
+            # Fallback to typeahead/suggest API
+            if not results:
+                results = await self._search_typeahead(client, keyword, include_out_of_stock)
 
-            if resp.status_code == 403:
-                logger.warning("BestBuySearch: 403 — blocked by Best Buy")
-                return []
+            return results
 
+    async def _search_model_json(
+        self, client: httpx.AsyncClient, keyword: str, include_out_of_stock: bool
+    ) -> list[SearchResult]:
+        """Primary search via Best Buy's Falcor model.json API."""
+        params = {
+            "paths": f'[["search","query","{keyword}","1",{{"page":"1","pageSize":"{self.max_results}"}},[["sku","names","short"],["sku","names","long"],["sku","skuId"],["sku","image"],["sku","url"],["sku","buttonState","buttonState"],["sku","price","currentPrice"],["sku","price","regularPrice"],["sku","condition"],["sku","salePrice"]]]]',
+            "method": "get",
+        }
+
+        try:
+            resp = await client.get(_SEARCH_URL, params=params)
+        except httpx.HTTPError as exc:
+            logger.warning("BestBuySearch: model.json network error: %s", exc)
+            return []
+
+        if resp.status_code == 403:
+            logger.warning("BestBuySearch: model.json 403 — blocked")
+            return []
+
+        if resp.status_code != 200:
+            logger.warning("BestBuySearch: model.json HTTP %d for '%s'", resp.status_code, keyword)
+            return []
+
+        return self._parse_search(resp.json(), include_out_of_stock)
+
+    async def _search_typeahead(
+        self, client: httpx.AsyncClient, keyword: str, include_out_of_stock: bool
+    ) -> list[SearchResult]:
+        """Fallback search via Best Buy's typeahead/suggest API.
+
+        This endpoint is lighter-weight and less likely to be blocked.
+        It returns product suggestions that we then enrich via priceBlocks.
+        """
+        try:
+            resp = await client.get(
+                "https://www.bestbuy.com/api/tcfb/model.json",
+                params={
+                    "paths": f'[["search","typeAhead","{keyword}",["products"]]]',
+                    "method": "get",
+                },
+            )
             if resp.status_code != 200:
-                logger.warning("BestBuySearch: HTTP %d for '%s'", resp.status_code, keyword)
+                logger.debug("BestBuySearch: typeahead HTTP %d", resp.status_code)
                 return []
 
-            return self._parse_search(resp.json(), include_out_of_stock)
+            data = resp.json()
+            return self._parse_typeahead(data, include_out_of_stock)
+        except Exception as exc:
+            logger.debug("BestBuySearch: typeahead failed: %s", exc)
+            return []
+
+    def _parse_typeahead(self, data: dict, include_out_of_stock: bool) -> list[SearchResult]:
+        """Parse typeahead/suggestion response from Best Buy."""
+        results: list[SearchResult] = []
+        try:
+            json_graph = data.get("jsonGraph", {})
+            search_data = json_graph.get("search", {}).get("typeAhead", {})
+
+            for kw_key, kw_data in search_data.items():
+                products = kw_data.get("products", {})
+                if not isinstance(products, dict):
+                    continue
+
+                # Products may be indexed numerically
+                for idx in sorted(products.keys(), key=lambda x: int(x) if x.isdigit() else 999):
+                    if len(results) >= self.max_results:
+                        break
+
+                    item = products[idx]
+                    if isinstance(item, dict) and "value" in item:
+                        item = item["value"]
+                    if not isinstance(item, dict):
+                        continue
+
+                    sku = str(item.get("sku", item.get("skuId", "")))
+                    if not sku:
+                        continue
+
+                    title = item.get("name", item.get("title", ""))
+                    image_url = item.get("image", item.get("thumbnailImage", ""))
+                    url = item.get("url", "")
+                    if isinstance(url, str) and url.startswith("/"):
+                        url = f"https://www.bestbuy.com{url}"
+                    elif not url:
+                        url = f"https://www.bestbuy.com/site/-/{sku}.p"
+
+                    price_val = item.get("salePrice", item.get("currentPrice", item.get("regularPrice", "")))
+                    price = f"${price_val}" if price_val else ""
+
+                    avail_status = "IN_STOCK"
+                    is_purchasable = True
+
+                    if not include_out_of_stock:
+                        online = item.get("onlineAvailability")
+                        if online is False:
+                            continue
+
+                    results.append(SearchResult(
+                        tcin=sku,
+                        title=title,
+                        price=price,
+                        url=url,
+                        image_url=image_url,
+                        availability_status=avail_status,
+                        is_purchasable=is_purchasable,
+                        sold_by="Best Buy",
+                        retailer="bestbuy",
+                    ))
+
+                break  # first keyword only
+        except (AttributeError, TypeError, KeyError) as e:
+            logger.debug("BestBuySearch: typeahead parse error: %s", e)
+
+        if results:
+            logger.info("BestBuySearch: typeahead found %d products", len(results))
+        return results
 
     def _parse_search(self, data: dict, include_out_of_stock: bool) -> list[SearchResult]:
         """Extract products from Best Buy's JSONP/model response."""

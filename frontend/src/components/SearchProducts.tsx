@@ -47,13 +47,17 @@ export default function SearchProducts({ refresh }: Props) {
     setHasSearched(true);
     try {
       const retailers = Array.from(selectedRetailers);
-      const res = await searchProducts(keyword.trim(), {
+      const { results: res, errors: searchErrors } = await searchProducts(keyword.trim(), {
         retailers,
         soldByTargetOnly: targetOnly,
         includeOutOfStock: includeOos,
       });
       setResults(res);
-      if (res.length === 0) setError('No products found');
+      if (searchErrors.length > 0) {
+        setError(searchErrors.join('; '));
+      } else if (res.length === 0) {
+        setError('No products found');
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
