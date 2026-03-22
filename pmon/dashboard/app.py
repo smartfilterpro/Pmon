@@ -1032,7 +1032,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "walmart": 'a[href*="/account/login"], a[href*="/account"], button:has-text("Sign In"), a:has-text("Sign In")',
             "bestbuy": 'a[href*="/signin"], a[href*="/identity"], a:has-text("Sign In"), .account-button',
             "pokemoncenter": 'a[href*="/account/login"], a[href*="/account"], a:has-text("Sign In"), a:has-text("Log In")',
-            "costco": 'a[href*="/LogonForm"], a[href*="/login"], a:has-text("Sign In"), a:has-text("Sign In / Register")',
+            "costco": 'a[href*="/LogonForm"], a[href*="/login"], a:has-text("Account"), a:has-text("Sign In"), a:has-text("Sign In / Register")',
         }
 
         # Selectors for each retailer's login form
@@ -1069,7 +1069,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "email": 'input[name="logonId"], #logonId, input[type="email"], input[name="email"], input[id*="email" i]',
                 "password": 'input[name="logonPassword"], #logonPassword, input[type="password"], input[name="password"]',
                 "submit": 'input[type="submit"], button[type="submit"], button:has-text("Sign In"), button:has-text("Sign In / Register")',
-                "success": 'a[href*="/myaccount"], a[href*="/AccountStatusView"], [id*="myaccount" i], a:has-text("My Account"), a:has-text("My Orders")',
+                "success": 'a[href*="/myaccount"], a[href*="/AccountStatusView"], [id*="myaccount" i], a:has-text("My Account"), a:has-text("Account"), a:has-text("My Orders")',
                 "error": '.error-message, [class*="error" i], [role="alert"], .field-error',
             },
         }
