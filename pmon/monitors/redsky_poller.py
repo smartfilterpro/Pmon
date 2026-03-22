@@ -577,15 +577,18 @@ class RedSkySearch:
         Override the default RedSky API key.
     """
 
-    # Endpoints to try in order — v1 is confirmed working in the TargetAPI
-    # library; v2 is the newer variant seen in browser traffic. Try both on
-    # both domains.
+    # Endpoints to try in order — try all known version/domain combos.
+    # Target periodically rotates which endpoint is live.
     _SEARCH_URLS = [
         "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v1",
         "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2",
+        "https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v3",
         "https://api.target.com/redsky_aggregations/v1/web/plp_search_v1",
         "https://api.target.com/redsky_aggregations/v1/web/plp_search_v2",
+        "https://api.target.com/redsky_aggregations/v1/web/plp_search_v3",
     ]
+    # Typeahead endpoint — lightweight, usually stays up longer than search.
+    _TYPEAHEAD_URL = "https://redsky.target.com/redsky_aggregations/v1/web/typeahead_v1"
     # Keep a class attr for the last URL that actually worked, so subsequent
     # searches skip straight to it.
     SEARCH_URL = _SEARCH_URLS[0]
@@ -964,9 +967,21 @@ class RedSkySearch:
 
         dead_count = len(RedSkySearch._dead_urls)
         logger.warning(
-            "RedSkySearch: all endpoints exhausted for '%s' (%d dead) — falling back to browser",
+            "RedSkySearch: all search endpoints exhausted for '%s' (%d dead) — trying typeahead",
             keyword, dead_count,
         )
+
+        # Typeahead fallback — returns TCIN suggestions without full search.
+        typeahead_results = await self._typeahead_search(keyword, client)
+        if typeahead_results:
+            if sold_by_target_only:
+                typeahead_results = [
+                    r for r in typeahead_results
+                    if r.sold_by.lower() in ("target", "target corporation")
+                ]
+            return typeahead_results
+
+        logger.warning("RedSkySearch: typeahead also failed — falling back to browser")
         return await self._scrape_search_page(keyword, sold_by_target_only)
 
     def _parse_search(self, data: dict) -> list[SearchResult]:
@@ -1092,6 +1107,82 @@ class RedSkySearch:
         )
         return results
 
+    async def _typeahead_search(
+        self, keyword: str, client: httpx.AsyncClient,
+    ) -> list[SearchResult]:
+        """Use the typeahead/autocomplete endpoint to find TCINs.
+
+        Typeahead is lighter than full search and often stays up when
+        plp_search is dead.  Returns basic SearchResults (TCIN + title).
+        """
+        for api_key in self._api_keys:
+            params = {
+                "key": api_key,
+                "channel": "WEB",
+                "keyword": keyword,
+                "visitor_id": self._visitor_id,
+                "is_bot": "false",
+            }
+            headers = {
+                **API_HEADERS,
+                "Referer": f"https://www.target.com/s?searchTerm={keyword}",
+                "Origin": "https://www.target.com",
+                "x-application-name": "web",
+            }
+            try:
+                resp = await client.get(self._TYPEAHEAD_URL, params=params, headers=headers)
+            except httpx.HTTPError as exc:
+                logger.debug("RedSkySearch typeahead: network error: %s", exc)
+                continue
+
+            if resp.status_code == 403:
+                self._visitor_id = uuid.uuid4().hex
+                continue
+            if resp.status_code != 200:
+                logger.debug("RedSkySearch typeahead: HTTP %d", resp.status_code)
+                continue
+
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+
+            results: list[SearchResult] = []
+            # Typeahead responses have various structures —
+            # look for product suggestions with TCINs.
+            suggestions = (
+                data.get("suggestions", [])
+                or data.get("data", {}).get("typeahead", {}).get("suggestions", [])
+                if isinstance(data.get("data"), dict) else
+                data.get("suggestions", [])
+            )
+            if isinstance(suggestions, list):
+                for sug in suggestions[:self.max_results]:
+                    if not isinstance(sug, dict):
+                        continue
+                    tcin = sug.get("tcin") or sug.get("product_id", "")
+                    if not tcin:
+                        # Try to extract from a URL
+                        sug_url = sug.get("url", "")
+                        m = re.search(r'A-(\d{6,10})', sug_url)
+                        if m:
+                            tcin = m.group(1)
+                    if not tcin:
+                        continue
+                    title = sug.get("title") or sug.get("label") or f"TCIN {tcin}"
+                    results.append(SearchResult(
+                        tcin=str(tcin),
+                        title=html_mod.unescape(title),
+                        url=f"https://www.target.com/p/-/A-{tcin}",
+                        retailer="target",
+                    ))
+
+            if results:
+                logger.info("RedSkySearch: typeahead found %d results for '%s'", len(results), keyword)
+                return results
+
+        return []
+
     async def _scrape_search_page(
         self, keyword: str, sold_by_target_only: bool = False,
     ) -> list[SearchResult]:
@@ -1150,7 +1241,7 @@ class RedSkySearch:
                 # Only inspect JSON from target.com subdomains
                 if "target.com" not in url or "application/json" not in content_type:
                     return
-                # Skip tiny responses / images / static assets
+                # Skip non-200 responses
                 if response.status != 200:
                     return
                 try:
@@ -1159,34 +1250,67 @@ class RedSkySearch:
                     return
                 if not isinstance(body, dict):
                     return
-                # Check if this looks like search results (products array)
+
+                # Strategy A: Known structure — data.search.{products,...}
                 search = body.get("data", {}).get("search") if isinstance(body.get("data"), dict) else None
-                if not isinstance(search, dict):
-                    return
-                has_products = bool(search.get("products") or search.get("search_response") or search.get("typed_search_items"))
-                if not has_products:
-                    return
-                captured_responses.append(body)
-                captured_search_url = url.split("?")[0]
-                captured_full_url = url
-                logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
+                if isinstance(search, dict):
+                    has_products = bool(
+                        search.get("products")
+                        or search.get("search_response")
+                        or search.get("typed_search_items")
+                    )
+                    if has_products:
+                        captured_responses.append(body)
+                        captured_search_url = url.split("?")[0]
+                        captured_full_url = url
+                        logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
+
+                # Strategy B: Any response with a tcin array — Target may have
+                # restructured. Walk the top two levels looking for a list of
+                # dicts that each contain a "tcin" key.
+                if not captured_responses:
+                    body_str = json.dumps(body)
+                    if '"tcin"' in body_str and len(body_str) > 500:
+                        captured_responses.append(body)
+                        captured_search_url = url.split("?")[0]
+                        captured_full_url = url
+                        logger.info(
+                            "RedSkySearch: captured likely search response (tcin-bearing JSON) from %s (%d bytes)",
+                            captured_search_url, len(body_str),
+                        )
+
                 # Extract the API key the browser used
-                key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
-                if key_match:
-                    fresh_key = key_match.group(1)
-                    if fresh_key not in self._api_keys:
-                        self._api_keys.insert(0, fresh_key)
-                        logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
+                if captured_search_url:
+                    key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
+                    if key_match:
+                        fresh_key = key_match.group(1)
+                        if fresh_key not in self._api_keys:
+                            self._api_keys.insert(0, fresh_key)
+                            logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
 
             page.on("response", on_response)
 
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            # Use networkidle to let the SPA fully hydrate and fire its API calls.
+            try:
+                await page.goto(search_url, wait_until="networkidle", timeout=45000)
+            except Exception:
+                # Timeout is fine — we might still have captured responses.
+                pass
 
-            # Wait for search API calls to complete
-            for _ in range(10):
+            # Wait for search API calls to complete (longer for slow networks)
+            for _ in range(20):
                 if captured_responses:
                     break
                 await asyncio.sleep(1)
+
+            # If no API calls intercepted, Target may have changed their
+            # frontend entirely. Try scrolling / waiting for lazy-loaded content.
+            if not captured_responses:
+                try:
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass
 
             # Strategy 1: Parse intercepted API responses
             for resp_data in captured_responses:
@@ -1212,11 +1336,12 @@ class RedSkySearch:
                         ]
                     return results
 
-            # Strategy 2: Parse __PRELOADED_QUERIES__ from page content
+            # Strategy 2: Parse embedded JSON data from page content
             html = await page.content()
             await browser.close()
             await pw.stop()
 
+            # 2a: __PRELOADED_QUERIES__
             preloaded_match = re.search(
                 r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>',
                 html, re.S,
@@ -1243,11 +1368,72 @@ class RedSkySearch:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-            # Strategy 3: Extract TCINs from product links
-            tcin_matches = re.findall(r'/p/[^/]*/A-(\d{6,10})', html)
-            tcins = list(dict.fromkeys(tcin_matches))[:self.max_results]
+            # 2b: __NEXT_DATA__ (Target uses Next.js)
+            next_data_match = re.search(
+                r'<script\s+id="__NEXT_DATA__"[^>]*>\s*(\{.+?\})\s*</script>',
+                html, re.S,
+            )
+            if next_data_match:
+                try:
+                    next_data = json.loads(next_data_match.group(1))
+                    # Walk pageProps looking for product data
+                    page_props = next_data.get("props", {}).get("pageProps", {})
+                    # Could be nested under various keys — search for tcin-bearing lists
+                    nd_str = json.dumps(page_props)
+                    if '"tcin"' in nd_str:
+                        # Try to find the search products in any nested structure
+                        search_data = page_props.get("searchData") or page_props.get("search") or {}
+                        if isinstance(search_data, dict):
+                            results = self._parse_search({"data": {"search": search_data}})
+                            if results:
+                                logger.info("RedSkySearch: browser __NEXT_DATA__ found %d results for '%s'", len(results), keyword)
+                                if sold_by_target_only:
+                                    results = [r for r in results if r.sold_by.lower() in ("target", "target corporation")]
+                                return results
+                        # Fallback: extract TCINs from the JSON blob
+                        tcin_matches_nd = re.findall(r'"tcin"\s*:\s*"(\d{6,10})"', nd_str)
+                        if tcin_matches_nd:
+                            tcins = list(dict.fromkeys(tcin_matches_nd))[:self.max_results]
+                            logger.info("RedSkySearch: browser __NEXT_DATA__ extracted %d TCINs for '%s'", len(tcins), keyword)
+                            results = [
+                                SearchResult(tcin=t, title=f"TCIN {t}", url=f"https://www.target.com/p/-/A-{t}", retailer="target")
+                                for t in tcins
+                            ]
+                            return results
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # 2c: Any <script> tag containing a JSON blob with tcin data
+            script_blocks = re.findall(r'<script[^>]*>\s*(\{.+?\})\s*</script>', html, re.S)
+            for block in script_blocks:
+                if '"tcin"' not in block:
+                    continue
+                try:
+                    blob = json.loads(block)
+                    results = self._parse_search(blob)
+                    if results:
+                        logger.info("RedSkySearch: browser script-tag JSON found %d results for '%s'", len(results), keyword)
+                        if sold_by_target_only:
+                            results = [r for r in results if r.sold_by.lower() in ("target", "target corporation")]
+                        return results
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            # Strategy 3: Extract TCINs from product links / data attributes
+            # Multiple patterns: /p/.../A-TCIN, data-tcin="...", data-test="product-...",
+            # and JSON-LD product references
+            tcin_patterns = [
+                r'/p/[^/"]*/A-(\d{6,10})',       # URL path
+                r'A-(\d{6,10})',                   # Any A-TCIN reference
+                r'data-tcin="(\d{6,10})"',         # data attribute
+                r'"tcin"\s*:\s*"(\d{6,10})"',      # inline JSON
+            ]
+            all_tcins: list[str] = []
+            for pat in tcin_patterns:
+                all_tcins.extend(re.findall(pat, html))
+            tcins = list(dict.fromkeys(all_tcins))[:self.max_results]
             if tcins:
-                logger.info("RedSkySearch: browser extracted %d TCINs from links for '%s'", len(tcins), keyword)
+                logger.info("RedSkySearch: browser extracted %d TCINs from HTML for '%s'", len(tcins), keyword)
                 results = []
                 for tcin in tcins:
                     title_match = re.search(
