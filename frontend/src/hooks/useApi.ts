@@ -225,10 +225,17 @@ export async function setAccount(retailer: string, email: string, password: stri
 }
 
 export async function testAccount(retailer: string) {
-  return (await apiFetch('/accounts/test', {
-    method: 'POST',
-    body: JSON.stringify({ retailer }),
-  })).json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+  try {
+    return await (await apiFetch('/accounts/test', {
+      method: 'POST',
+      body: JSON.stringify({ retailer }),
+      signal: controller.signal,
+    })).json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- Sessions (cookie import for checkout) ---
