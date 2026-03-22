@@ -196,11 +196,11 @@ class ApiCheckout:
 
         # Step 2: Look up product via Redsky API to verify availability
         product_info = await self._tgt_lookup_product(client, tcin)
-        if product_info and not product_info.get("available", True):
+        if product_info and not product_info.get("available", False):
             return CheckoutResult(
                 url=url, retailer=retailer, product_name=product_name,
                 status=CheckoutStatus.FAILED,
-                error_message="Product is out of stock on Target",
+                error_message="Product is out of stock on Target (confirmed via Redsky API)",
             )
 
         # Step 3: Add to cart via carts.target.com
@@ -382,10 +382,21 @@ class ApiCheckout:
                 data = resp.json()
                 product = data.get("data", {}).get("product", {})
                 avail = product.get("fulfillment", {})
+                # Check shipping availability_status_v2
+                shipping = avail.get("shipping_options", {})
                 is_available = any(
                     method.get("is_available", False)
-                    for method in avail.get("shipping_options", {}).get("availability_status_v2", [])
-                ) if avail else True  # default to True if we can't determine
+                    for method in shipping.get("availability_status_v2", [])
+                )
+                # Also check top-level shipping status
+                if not is_available:
+                    is_available = shipping.get("availability_status") == "IN_STOCK"
+                # Also check store pickup
+                if not is_available:
+                    for store in avail.get("store_options", []):
+                        if store.get("order_pickup", {}).get("availability_status") == "IN_STOCK":
+                            is_available = True
+                            break
                 return {"available": is_available, "product": product}
         except Exception as exc:
             logger.debug("Target Redsky lookup failed: %s", exc)

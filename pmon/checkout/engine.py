@@ -62,6 +62,7 @@ import base64
 import json
 import logging
 import os
+import re as _re
 from pathlib import Path
 
 from pmon.config import Config, AccountCredentials, Profile
@@ -624,6 +625,84 @@ class CheckoutEngine:
         storage_path = SESSION_DIR / f"{retailer}.json"
         await context.storage_state(path=str(storage_path))
 
+    async def _quick_target_stock_check(self, url: str) -> bool | None:
+        """Quick Redsky API stock check before starting browser checkout.
+
+        Returns True if in stock, False if confirmed OOS, None if unable
+        to determine (e.g. API error — proceed with checkout attempt).
+        """
+        import httpx
+
+        match = _re.search(r"A-(\d+)", url)
+        if not match:
+            return None  # can't extract TCIN, let checkout handle it
+
+        tcin = match.group(1)
+        api_key = "e59ce3b531b2c39afb2e2b8a71ff10113aac2a14"
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                resp = await client.get(
+                    "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1",
+                    params={
+                        "key": api_key,
+                        "tcin": tcin,
+                        "channel": "WEB",
+                        "is_bot": "false",
+                    },
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                        "Accept": "application/json",
+                        "Referer": "https://www.target.com/",
+                        "Origin": "https://www.target.com",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.debug("Quick stock check: HTTP %d for TCIN %s", resp.status_code, tcin)
+                    return None
+
+                data = resp.json()
+                product = data.get("data", {}).get("product", {})
+                fulfillment = product.get("fulfillment", {})
+
+                # Check shipping availability
+                shipping = fulfillment.get("shipping_options", {})
+                avail_status = shipping.get("availability_status", "")
+                if avail_status == "IN_STOCK":
+                    return True
+
+                # Check availability_status_v2
+                for method in shipping.get("availability_status_v2", []):
+                    if method.get("is_available", False):
+                        return True
+
+                # Check store pickup
+                for store in fulfillment.get("store_options", []):
+                    pickup = store.get("order_pickup", {})
+                    if pickup.get("availability_status") == "IN_STOCK":
+                        return True
+
+                # Check product-level availability
+                product_avail = product.get("availability", {})
+                status = product_avail.get("availability_status", "")
+                if status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
+                    return True
+
+                # Check if explicitly OOS
+                if fulfillment.get("is_out_of_stock_in_all_store_locations", False):
+                    return False
+                if avail_status in ("OUT_OF_STOCK", "UNAVAILABLE"):
+                    return False
+                if status in ("OUT_OF_STOCK", "UNAVAILABLE"):
+                    return False
+
+                # Can't determine — let checkout proceed
+                return None
+
+        except Exception as exc:
+            logger.debug("Quick stock check failed for %s: %s", url, exc)
+            return None
+
     async def _checkout_target(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
         dry_run: bool = False, **kwargs,
@@ -641,6 +720,16 @@ class CheckoutEngine:
           Target now sometimes shows "Choose a store" or "Sign in to save"
           modals after the add-to-cart click that are not dismissed
         """
+        # Quick stock re-verification before launching browser + login flow
+        stock_status = await self._quick_target_stock_check(url)
+        if stock_status is False:
+            logger.info("Target: quick stock re-check confirms %s is OUT OF STOCK — skipping checkout", product_name)
+            return CheckoutResult(
+                url=url, retailer="target", product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Product is out of stock (confirmed on re-check before checkout)",
+            )
+
         context = await self._get_context("target")
         page = await context.new_page()
 
