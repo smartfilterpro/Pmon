@@ -1978,6 +1978,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         still_on_login = False
                         logger.info("Test login %s: Walmart OAuth verifyToken/SignIn detected in URL", retailer_name)
 
+                # Best Buy-specific: /identity in URL is normal during post-login redirect
+                # Only count as failure if OTP/login text is still visible on the page
+                if retailer == "bestbuy" and still_on_login and "/identity" in final_url:
+                    try:
+                        success_visible = await page.locator(sel["success"]).first.is_visible(timeout=3000)
+                        if success_visible:
+                            still_on_login = False
+                            logger.info("Test login %s: Best Buy success indicator found despite /identity URL", retailer_name)
+                    except Exception:
+                        pass
+
                 # If we navigated away from the login page, that's a strong success signal
                 if not still_on_login:
                     # Check for explicit error messages on the page (login-specific errors only)
@@ -2045,12 +2056,43 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                         if code:
                             await _enter_otp_code(page, code)
                             logger.info("Test login %s: OTP code entered via fallback path", retailer_name)
+
+                            # Wait for post-OTP navigation/redirect
+                            await asyncio.sleep(2)
                             await wait_for_page_ready(page, timeout=10000)
-                            # Re-check if we navigated away from login
-                            final_url2 = page.url
-                            still_on_login2 = "/login" in final_url2 or "/signin" in final_url2 or "/sign-in" in final_url2 or "/identity" in final_url2
-                            if not still_on_login2:
-                                logger.info("Test login successful for %s user=%s after OTP (navigated to %s)", retailer_name, email, final_url2)
+
+                            # Check for success via page-level indicators first
+                            login_success = False
+                            try:
+                                success_el = page.locator(sel["success"])
+                                if await success_el.first.is_visible(timeout=5000):
+                                    login_success = True
+                                    logger.info("Test login %s: post-OTP success indicator found on page", retailer_name)
+                            except Exception:
+                                pass
+
+                            # Fallback: check URL navigation
+                            if not login_success:
+                                final_url2 = page.url
+                                # Best Buy post-OTP redirects often still contain /identity briefly
+                                # so only check /login and /signin as failure indicators
+                                still_on_login2 = "/login" in final_url2 or "/signin" in final_url2 or "/sign-in" in final_url2
+                                # /identity alone is not a failure — Best Buy uses /identity/global/callback
+                                if "/identity" in final_url2:
+                                    # Only fail if OTP page text is still visible
+                                    try:
+                                        otp_still_visible = await page.locator(
+                                            'text=/one-time code/i, text=/enter your code/i, '
+                                            'text=/enter the code/i, text=/verification code/i'
+                                        ).first.is_visible(timeout=2000)
+                                    except Exception:
+                                        otp_still_visible = False
+                                    still_on_login2 = otp_still_visible
+                                if not still_on_login2:
+                                    login_success = True
+
+                            if login_success:
+                                logger.info("Test login successful for %s user=%s after OTP (url=%s)", retailer_name, email, page.url)
                                 try:
                                     browser_cookies = await context.cookies()
                                     cookies_dict = {c["name"]: c["value"] for c in browser_cookies if c.get("name") and c.get("value")}
