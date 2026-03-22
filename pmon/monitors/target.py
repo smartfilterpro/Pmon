@@ -284,9 +284,10 @@ class TargetMonitor(BaseMonitor):
                             fulfillment_result = result
                     break
                 elif resp.status_code == 403:
-                    logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id", tcin)
+                    logger.warning("Target: fulfillment API 403 for %s — rotating visitor_id and re-warming", tcin)
                     self._visitor_id = uuid.uuid4().hex
                     self._warmed_up = False
+                    await self._warm_up(client)
                 else:
                     logger.debug("Target: fulfillment API returned %d for %s", resp.status_code, tcin)
                     break
@@ -340,9 +341,10 @@ class TargetMonitor(BaseMonitor):
                     else:
                         logger.debug("Target: pdp_client_v1 returned 200 but parse returned UNKNOWN for %s", tcin)
                 elif resp.status_code == 403:
-                    logger.warning("Target: pdp_client_v1 403 for %s with key ...%s", tcin, api_key[-6:])
+                    logger.warning("Target: pdp_client_v1 403 for %s with key ...%s — re-warming", tcin, api_key[-6:])
                     self._visitor_id = uuid.uuid4().hex
                     self._warmed_up = False
+                    await self._warm_up(client)
                 elif resp.status_code == 410:
                     api_all_blocked = False
                     logger.debug("Target: pdp_client_v1 returned 410 for %s", tcin)
@@ -354,6 +356,9 @@ class TargetMonitor(BaseMonitor):
 
         if api_attempted and api_all_blocked:
             logger.warning("Target: ALL API keys blocked for %s — falling back to scrape", tcin)
+            # Clear stale keys so browser refresh can trigger
+            self._refreshed_keys = None
+            self._warmed_up = False
 
         # If fulfillment got a definitive status but PDP couldn't add price, return it anyway
         if fulfillment_result:
