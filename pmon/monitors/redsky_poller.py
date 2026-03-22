@@ -29,13 +29,14 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
-from pmon.monitors.base import API_HEADERS
+from pmon.monitors.base import API_HEADERS, DEFAULT_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -582,12 +583,21 @@ class RedSkySearch:
         store_id: str = "2845",
         max_results: int = 10,
         api_key: str | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+        api_keys: list[str] | None = None,
     ) -> None:
         self.store_id = store_id
         self.max_results = max_results
-        self._api_keys = [api_key] if api_key else list(self._API_KEYS)
+        if api_keys:
+            self._api_keys = list(api_keys)
+        elif api_key:
+            self._api_keys = [api_key]
+        else:
+            self._api_keys = list(self._API_KEYS)
         self._visitor_id = uuid.uuid4().hex
         self._warmed_up = False
+        self._external_client = client  # reuse an existing warmed-up client
 
     async def _warm_up(self, client: httpx.AsyncClient) -> None:
         """Visit Target homepage to establish PerimeterX session cookies.
@@ -638,18 +648,28 @@ class RedSkySearch:
             return stripped
         return None
 
+    @asynccontextmanager
+    async def _get_client(self):
+        """Yield an httpx client — reuse external client if provided."""
+        if self._external_client and not self._external_client.is_closed:
+            yield self._external_client
+        else:
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                http2=True,
+            ) as client:
+                await self._warm_up(client)
+                yield client
+
     async def lookup_tcin(self, tcin: str) -> SearchResult | None:
         """Look up a single TCIN via the pdp_client_v1 endpoint.
 
         This works for products that are delisted from search but still
         have a product page.
         """
-        async with httpx.AsyncClient(
-            headers=API_HEADERS,
-            follow_redirects=True,
-            timeout=httpx.Timeout(15.0),
-            http2=True,
-        ) as client:
+        async with self._get_client() as client:
             for api_key in self._api_keys:
                 params = {
                     "key": api_key,
@@ -783,16 +803,7 @@ class RedSkySearch:
                 return [result]
             return []
 
-        async with httpx.AsyncClient(
-            headers=API_HEADERS,
-            follow_redirects=True,
-            timeout=httpx.Timeout(15.0),
-            http2=True,
-        ) as client:
-            # Warm up to establish PerimeterX cookies — without this,
-            # Target returns 403 on all API keys.
-            await self._warm_up(client)
-
+        async with self._get_client() as client:
             for i, api_key in enumerate(self._api_keys):
                 params = {
                     "key": api_key,
