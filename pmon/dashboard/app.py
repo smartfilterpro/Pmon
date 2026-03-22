@@ -371,6 +371,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if retailer == "walmart":
             return await _test_walmart_session(user)
 
+        # --- Costco: Akamai blocks browser login; validate session cookies first,
+        # fall back to browser login if no cookies are imported.
+        if retailer == "costco":
+            return await _test_costco_session(user, email, password)
+
         # --- All other retailers: use Playwright browser automation ---
         return await _test_login_browser(retailer, email, password, user)
 
@@ -506,6 +511,95 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         except Exception as exc:
             logger.error("Walmart session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
+
+    async def _test_costco_session(user: dict, email: str, password: str):
+        """Test Costco account by validating imported session cookies via API.
+
+        Costco uses Akamai Bot Manager which blocks headless browser logins.
+        First try validating session cookies via the /gettoken endpoint.
+        Fall back to browser-based login if no cookies are imported.
+        """
+        import json as _json
+        import httpx
+        from pmon.monitors.base import DEFAULT_HEADERS
+
+        session = db.get_retailer_session(user["id"], "costco")
+        if not session or not session.get("cookies_json"):
+            # No session cookies — try browser login as fallback
+            return await _test_login_browser("costco", email, password, user)
+
+        try:
+            cookies = _json.loads(session["cookies_json"])
+        except Exception:
+            return {"ok": False, "message": "Saved Costco session cookies are corrupted — re-import them"}
+
+        if not cookies:
+            return await _test_login_browser("costco", email, password, user)
+
+        try:
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                http2=True,
+            ) as client:
+                for name, value in cookies.items():
+                    client.cookies.set(name, str(value), domain=".costco.com")
+
+                # Check session via /gettoken endpoint
+                resp = await client.get(
+                    "https://www.costco.com/gettoken",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Accept": "application/json",
+                        "Referer": "https://www.costco.com/",
+                    },
+                )
+
+                if resp.status_code == 403:
+                    return {
+                        "ok": False,
+                        "message": "Costco session blocked by Akamai (403). Re-import fresh cookies from your browser.",
+                    }
+
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        if data.get("loggedIn") or data.get("userId") or data.get("token"):
+                            return {"ok": True, "message": f"Costco session valid — {len(cookies)} cookies active"}
+                    except Exception:
+                        pass
+
+                # Fallback: try /myaccount
+                acct_resp = await client.get(
+                    "https://www.costco.com/myaccount",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Accept": "text/html,*/*",
+                        "Referer": "https://www.costco.com/",
+                    },
+                    follow_redirects=False,
+                )
+
+                if acct_resp.status_code == 302:
+                    location = acct_resp.headers.get("location", "")
+                    if "LogonForm" in location or "login" in location.lower():
+                        return {
+                            "ok": False,
+                            "message": "Costco session expired — re-import cookies from your browser.",
+                        }
+
+                if acct_resp.status_code == 200:
+                    return {"ok": True, "message": f"Costco session valid — {len(cookies)} cookies active"}
+
+                return {
+                    "ok": False,
+                    "message": f"Costco session check returned HTTP {resp.status_code}. Try re-importing cookies.",
+                }
+
+        except Exception as exc:
+            logger.error("Costco session validation error: %s", exc)
+            return {"ok": False, "message": f"Could not validate Costco session: {exc}"}
 
     async def _bestbuy_test_verification(page, user: dict, email_sel: str, pass_sel: str,
                                           vision_fill, vision_click, vision_read_page):
@@ -821,6 +915,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             # page.  Navigating to /account/login triggers the WAF block page.
             # Use None to force the homepage → click-sign-in-link approach.
             "pokemoncenter": None,
+            "costco": "https://www.costco.com/LogonForm",
         }
 
         # Fallback: navigate to homepage and click sign-in link if direct URL fails
@@ -829,6 +924,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "walmart": "https://www.walmart.com",
             "bestbuy": "https://www.bestbuy.com",
             "pokemoncenter": "https://www.pokemoncenter.com",
+            "costco": "https://www.costco.com",
         }
 
         SIGNIN_LINK_SELECTORS = {
@@ -836,6 +932,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "walmart": 'a[href*="/account/login"], a[href*="/account"], button:has-text("Sign In"), a:has-text("Sign In")',
             "bestbuy": 'a[href*="/signin"], a[href*="/identity"], a:has-text("Sign In"), .account-button',
             "pokemoncenter": 'a[href*="/account/login"], a[href*="/account"], a:has-text("Sign In"), a:has-text("Log In")',
+            "costco": 'a[href*="/LogonForm"], a[href*="/login"], a:has-text("Sign In"), a:has-text("Sign In / Register")',
         }
 
         # Selectors for each retailer's login form
@@ -868,10 +965,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "success": 'a[href*="/account"], .account-nav, [href*="/account/dashboard"], [data-testid*="account"]',
                 "error": '.error-message, [class*="error" i], .alert, [data-testid*="error"], [role="alert"]',
             },
+            "costco": {
+                "email": 'input[name="logonId"], #logonId, input[type="email"], input[name="email"], input[id*="email" i]',
+                "password": 'input[name="logonPassword"], #logonPassword, input[type="password"], input[name="password"]',
+                "submit": 'input[type="submit"], button[type="submit"], button:has-text("Sign In"), button:has-text("Sign In / Register")',
+                "success": 'a[href*="/myaccount"], a[href*="/AccountStatusView"], [id*="myaccount" i], a:has-text("My Account"), a:has-text("My Orders")',
+                "error": '.error-message, [class*="error" i], [role="alert"], .field-error',
+            },
         }
 
         sel = SELECTORS[retailer]
-        retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center"}[retailer]
+        retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center", "costco": "Costco"}[retailer]
 
         # Import shared stealth JS and Chrome version from checkout engine
         from pmon.checkout.engine import STEALTH_JS
@@ -935,6 +1039,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             "walmart": ".walmart.com",
                             "bestbuy": ".bestbuy.com",
                             "pokemoncenter": ".pokemoncenter.com",
+                            "costco": ".costco.com",
                         }
                         pw_cookies = []
                         for name, value in saved_cookies.items():
@@ -1003,7 +1108,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 current_url = page.url
 
                 # Determine if we actually landed on a login page
-                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com"]
+                login_indicators = ["/login", "/signin", "/sign-in", "/identity", "access.pokemon.com", "sso.pokemon.com", "identity.walmart.com", "/logonform"]
                 landed_on_login = any(ind in current_url.lower() for ind in login_indicators)
 
                 # Walmart: verifyToken means OAuth completed — NOT a login page
