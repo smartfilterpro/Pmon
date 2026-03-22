@@ -29,14 +29,13 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Coroutine
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 
-from pmon.monitors.base import API_HEADERS, DEFAULT_HEADERS
+from pmon.monitors.base import API_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -583,57 +582,11 @@ class RedSkySearch:
         store_id: str = "2845",
         max_results: int = 10,
         api_key: str | None = None,
-        *,
-        client: httpx.AsyncClient | None = None,
-        api_keys: list[str] | None = None,
     ) -> None:
         self.store_id = store_id
         self.max_results = max_results
-        if api_keys:
-            self._api_keys = list(api_keys)
-        elif api_key:
-            self._api_keys = [api_key]
-        else:
-            self._api_keys = list(self._API_KEYS)
+        self._api_keys = [api_key] if api_key else list(self._API_KEYS)
         self._visitor_id = uuid.uuid4().hex
-        self._warmed_up = False
-        self._external_client = client  # reuse an existing warmed-up client
-
-    async def _warm_up(self, client: httpx.AsyncClient) -> None:
-        """Visit Target homepage to establish PerimeterX session cookies.
-
-        Without this, the search API returns 403 for all keys.
-        Also attempts to extract fresh API keys from the page HTML.
-        """
-        if self._warmed_up:
-            return
-        try:
-            resp = await client.get(
-                "https://www.target.com/",
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Sec-Fetch-Dest": "document",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Site": "none",
-                    "Sec-Fetch-User": "?1",
-                },
-            )
-            if resp.status_code == 200:
-                self._warmed_up = True
-                logger.debug("RedSkySearch: warm-up visit OK, cookies established")
-                # Try to extract fresh API keys from page HTML/JS
-                url_keys = re.findall(
-                    r'redsky\.target\.com/[^"\']*[?&]key=([a-f0-9]{30,50})', resp.text
-                )
-                js_keys = re.findall(
-                    r'["\']?apiKey["\']?\s*[:=]\s*["\']([a-f0-9]{30,50})["\']', resp.text
-                )
-                fresh_keys = list(dict.fromkeys(url_keys + js_keys))
-                if fresh_keys:
-                    logger.info("RedSkySearch: extracted %d fresh API key(s) from HTML", len(fresh_keys))
-                    self._api_keys = fresh_keys
-        except Exception as e:
-            logger.debug("RedSkySearch: warm-up visit failed: %s", e)
 
     @staticmethod
     def _extract_tcin(text: str) -> str | None:
@@ -648,28 +601,18 @@ class RedSkySearch:
             return stripped
         return None
 
-    @asynccontextmanager
-    async def _get_client(self):
-        """Yield an httpx client — reuse external client if provided."""
-        if self._external_client and not self._external_client.is_closed:
-            yield self._external_client
-        else:
-            async with httpx.AsyncClient(
-                headers=DEFAULT_HEADERS,
-                follow_redirects=True,
-                timeout=httpx.Timeout(15.0),
-                http2=True,
-            ) as client:
-                await self._warm_up(client)
-                yield client
-
     async def lookup_tcin(self, tcin: str) -> SearchResult | None:
         """Look up a single TCIN via the pdp_client_v1 endpoint.
 
         This works for products that are delisted from search but still
         have a product page.
         """
-        async with self._get_client() as client:
+        async with httpx.AsyncClient(
+            headers=API_HEADERS,
+            follow_redirects=True,
+            timeout=httpx.Timeout(15.0),
+            http2=True,
+        ) as client:
             for api_key in self._api_keys:
                 params = {
                     "key": api_key,
@@ -803,7 +746,12 @@ class RedSkySearch:
                 return [result]
             return []
 
-        async with self._get_client() as client:
+        async with httpx.AsyncClient(
+            headers=API_HEADERS,
+            follow_redirects=True,
+            timeout=httpx.Timeout(15.0),
+            http2=True,
+        ) as client:
             for i, api_key in enumerate(self._api_keys):
                 params = {
                     "key": api_key,
@@ -835,12 +783,10 @@ class RedSkySearch:
 
                 if resp.status_code == 403:
                     logger.warning(
-                        "RedSkySearch: 403 with key ...%s — rotating session and re-warming",
+                        "RedSkySearch: 403 with key ...%s — trying next",
                         api_key[-6:],
                     )
                     self._visitor_id = uuid.uuid4().hex
-                    self._warmed_up = False
-                    await self._warm_up(client)
                     continue
 
                 if resp.status_code == 429:
@@ -853,15 +799,7 @@ class RedSkySearch:
                     )
                     continue
 
-                resp_data = resp.json()
-                results = self._parse_search(resp_data)
-                if not results:
-                    # Log response structure for debugging
-                    search_keys = list(resp_data.get("data", {}).get("search", {}).keys()) if isinstance(resp_data.get("data", {}).get("search"), dict) else "N/A"
-                    logger.warning(
-                        "RedSkySearch: 0 results parsed for '%s'. Response search keys: %s",
-                        keyword, search_keys,
-                    )
+                results = self._parse_search(resp.json())
                 if sold_by_target_only:
                     results = [
                         r for r in results
@@ -869,35 +807,18 @@ class RedSkySearch:
                     ]
                 return results
 
-        logger.warning("RedSkySearch: all API keys exhausted for '%s' — falling back to HTML scrape", keyword)
-        return await self._scrape_search_page(keyword, sold_by_target_only)
+        logger.error("RedSkySearch: all API keys exhausted for '%s'", keyword)
+        return []
 
     def _parse_search(self, data: dict) -> list[SearchResult]:
-        """Extract products from a Target search API response."""
+        """Extract products from the plp_search_v2 response."""
         results: list[SearchResult] = []
         try:
-            search = data.get("data", {}).get("search", {})
-            products = search.get("products", [])
-
-            # Fallback: Target sometimes nests results under search_response
-            if not products:
-                search_resp = search.get("search_response", {})
-                if isinstance(search_resp, dict):
-                    items = search_resp.get("items", {})
-                    if isinstance(items, dict):
-                        products = items.get("Item", [])
-                    elif isinstance(items, list):
-                        products = items
-
-            # Fallback: typed_search_items (newer Target API structure)
-            if not products:
-                typed = search.get("typed_search_items", [])
-                if isinstance(typed, list):
-                    for group in typed:
-                        if isinstance(group, dict):
-                            items = group.get("items", [])
-                            if isinstance(items, list):
-                                products.extend(items)
+            products = (
+                data.get("data", {})
+                .get("search", {})
+                .get("products", [])
+            )
         except (AttributeError, TypeError):
             logger.warning("RedSkySearch: unexpected response structure")
             return results
@@ -933,9 +854,7 @@ class RedSkySearch:
                     if isinstance(images, dict):
                         image_url = images.get("primary_image_url", "")
 
-                # Availability — use fulfillment-level status only.
-                # product.availability.availability_status is catalog-level
-                # (active listing) and does NOT reflect actual inventory.
+                # Availability
                 avail_status = ""
                 is_purchasable = False
                 fulfillment = item.get("fulfillment", {})
@@ -943,19 +862,11 @@ class RedSkySearch:
                     shipping = fulfillment.get("shipping_options", {})
                     if isinstance(shipping, dict):
                         avail_status = shipping.get("availability_status", "")
-                    # Check store pickup availability as fallback
-                    if not avail_status:
-                        store_options = fulfillment.get("store_options", [])
-                        if isinstance(store_options, list):
-                            for opt in store_options:
-                                pickup = opt.get("order_pickup", {})
-                                if isinstance(pickup, dict):
-                                    ps = pickup.get("availability_status", "")
-                                    if ps:
-                                        avail_status = ps
-                                        break
                 product_avail = item.get("availability", {})
                 if isinstance(product_avail, dict):
+                    pa = product_avail.get("availability_status", "")
+                    if pa:
+                        avail_status = pa
                     is_purchasable = bool(
                         product_avail.get("is_purchasable", False)
                     )
@@ -994,151 +905,6 @@ class RedSkySearch:
             "RedSkySearch: found %d products for keyword query", len(results),
         )
         return results
-
-    async def _scrape_search_page(
-        self, keyword: str, sold_by_target_only: bool = False,
-    ) -> list[SearchResult]:
-        """Fallback: use Playwright browser to search Target and capture results.
-
-        When the Redsky search API is gone (410), we open a real browser,
-        navigate to the search page, and either:
-        1. Intercept the API response the frontend makes (discovering the new endpoint)
-        2. Parse __PRELOADED_QUERIES__ from the rendered page
-        3. Extract TCINs from product links as last resort
-        """
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            logger.warning("RedSkySearch: playwright not installed — cannot do browser search fallback")
-            return []
-
-        search_url = f"https://www.target.com/s?searchTerm={keyword}"
-        captured_responses: list[dict] = []
-        captured_search_url: str | None = None
-
-        logger.info("RedSkySearch: using browser fallback for '%s'", keyword)
-
-        try:
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1920, "height": 1080},
-            )
-            page = await context.new_page()
-
-            await page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            """)
-
-            # Intercept responses from redsky or any search API
-            async def on_response(response):
-                nonlocal captured_search_url
-                url = response.url
-                # Capture any redsky response that looks like search results
-                if ("redsky.target.com" in url or "api.target.com" in url) and ("search" in url or "plp" in url):
-                    try:
-                        body = await response.json()
-                        if isinstance(body, dict):
-                            captured_responses.append(body)
-                            captured_search_url = url.split("?")[0]
-                            logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
-                    except Exception:
-                        pass
-
-            page.on("response", on_response)
-
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-
-            # Wait for search API calls to complete
-            for _ in range(10):
-                if captured_responses:
-                    break
-                await asyncio.sleep(1)
-
-            # Strategy 1: Parse intercepted API responses
-            for resp_data in captured_responses:
-                results = self._parse_search(resp_data)
-                if results:
-                    logger.info("RedSkySearch: browser intercepted %d results for '%s'", len(results), keyword)
-                    # Update the class search URL if we discovered a new endpoint
-                    if captured_search_url and captured_search_url != self.SEARCH_URL:
-                        logger.info("RedSkySearch: discovered new search endpoint: %s", captured_search_url)
-                    await browser.close()
-                    await pw.stop()
-                    if sold_by_target_only:
-                        results = [
-                            r for r in results
-                            if r.sold_by.lower() in ("target", "target corporation")
-                        ]
-                    return results
-
-            # Strategy 2: Parse __PRELOADED_QUERIES__ from page content
-            html = await page.content()
-            await browser.close()
-            await pw.stop()
-
-            preloaded_match = re.search(
-                r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>',
-                html, re.S,
-            )
-            if preloaded_match:
-                try:
-                    preloaded = json.loads(preloaded_match.group(1))
-                    for _key, value in preloaded.items():
-                        if not isinstance(value, dict):
-                            continue
-                        result = value.get("result") or value.get("data") or value
-                        if isinstance(result, dict):
-                            search_data = result.get("data", {}).get("search") or result.get("search")
-                            if isinstance(search_data, dict) and "products" in search_data:
-                                results = self._parse_search({"data": {"search": search_data}})
-                                if results:
-                                    logger.info("RedSkySearch: browser preloaded data found %d results for '%s'", len(results), keyword)
-                                    if sold_by_target_only:
-                                        results = [
-                                            r for r in results
-                                            if r.sold_by.lower() in ("target", "target corporation")
-                                        ]
-                                    return results
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # Strategy 3: Extract TCINs from product links
-            tcin_matches = re.findall(r'/p/[^/]*/A-(\d{6,10})', html)
-            tcins = list(dict.fromkeys(tcin_matches))[:self.max_results]
-            if tcins:
-                logger.info("RedSkySearch: browser extracted %d TCINs from links for '%s'", len(tcins), keyword)
-                results = []
-                for tcin in tcins:
-                    title_match = re.search(
-                        rf'href="[^"]*A-{tcin}[^"]*"[^>]*>([^<]+)', html,
-                    )
-                    title = title_match.group(1).strip() if title_match else f"TCIN {tcin}"
-                    results.append(SearchResult(
-                        tcin=tcin,
-                        title=title,
-                        url=f"https://www.target.com/p/-/A-{tcin}",
-                        retailer="target",
-                    ))
-                return results
-
-            logger.warning("RedSkySearch: browser fallback found no products for '%s'", keyword)
-            return []
-        except Exception as exc:
-            logger.warning("RedSkySearch: browser fallback failed for '%s': %s", keyword, exc)
-            return []
 
     async def find_and_poll(
         self,
