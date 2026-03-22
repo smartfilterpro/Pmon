@@ -1113,6 +1113,7 @@ class RedSkySearch:
         search_url = f"https://www.target.com/s?searchTerm={keyword}"
         captured_responses: list[dict] = []
         captured_search_url: str | None = None
+        captured_full_url: str | None = None  # full URL with query params
 
         logger.info("RedSkySearch: using browser fallback for '%s'", keyword)
 
@@ -1140,27 +1141,43 @@ class RedSkySearch:
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             """)
 
-            # Intercept responses from redsky or any search API
+            # Intercept responses from any Target API that returns search data.
+            # Cast a wide net: catch any *.target.com JSON response containing
+            # product data, not just known endpoint paths.
             async def on_response(response):
-                nonlocal captured_search_url
+                nonlocal captured_search_url, captured_full_url
                 url = response.url
-                # Capture any redsky/api.target response that looks like search
-                if ("redsky.target.com" in url or "api.target.com" in url) and ("search" in url or "plp" in url):
-                    try:
-                        body = await response.json()
-                        if isinstance(body, dict):
-                            captured_responses.append(body)
-                            captured_search_url = url.split("?")[0]
-                            logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
-                            # Extract the API key the browser used
-                            key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
-                            if key_match:
-                                fresh_key = key_match.group(1)
-                                if fresh_key not in self._api_keys:
-                                    self._api_keys.insert(0, fresh_key)
-                                    logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
-                    except Exception:
-                        pass
+                content_type = response.headers.get("content-type", "")
+                # Only inspect JSON from target.com subdomains
+                if "target.com" not in url or "application/json" not in content_type:
+                    return
+                # Skip tiny responses / images / static assets
+                if response.status != 200:
+                    return
+                try:
+                    body = await response.json()
+                except Exception:
+                    return
+                if not isinstance(body, dict):
+                    return
+                # Check if this looks like search results (products array)
+                search = body.get("data", {}).get("search") if isinstance(body.get("data"), dict) else None
+                if not isinstance(search, dict):
+                    return
+                has_products = bool(search.get("products") or search.get("search_response") or search.get("typed_search_items"))
+                if not has_products:
+                    return
+                captured_responses.append(body)
+                captured_search_url = url.split("?")[0]
+                captured_full_url = url
+                logger.info("RedSkySearch: captured search API response from %s", captured_search_url)
+                # Extract the API key the browser used
+                key_match = re.search(r'[?&]key=([a-f0-9]{30,50})', url)
+                if key_match:
+                    fresh_key = key_match.group(1)
+                    if fresh_key not in self._api_keys:
+                        self._api_keys.insert(0, fresh_key)
+                        logger.info("RedSkySearch: captured fresh API key from browser: ...%s", fresh_key[-8:])
 
             page.on("response", on_response)
 
@@ -1179,8 +1196,14 @@ class RedSkySearch:
                     logger.info("RedSkySearch: browser intercepted %d results for '%s'", len(results), keyword)
                     # Update the class search URL if we discovered a new endpoint
                     if captured_search_url and captured_search_url != RedSkySearch.SEARCH_URL:
-                        logger.info("RedSkySearch: discovered new search endpoint: %s", captured_search_url)
+                        logger.info(
+                            "RedSkySearch: discovered new search endpoint: %s (full: %s)",
+                            captured_search_url, captured_full_url,
+                        )
                         RedSkySearch.SEARCH_URL = captured_search_url
+                        RedSkySearch._dead_urls.discard(captured_search_url)
+                        if captured_search_url not in RedSkySearch._SEARCH_URLS:
+                            RedSkySearch._SEARCH_URLS.insert(0, captured_search_url)
                     await browser.close()
                     await pw.stop()
                     if sold_by_target_only:
