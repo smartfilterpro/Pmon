@@ -676,7 +676,7 @@ class RedSkySearch:
                 sold_by = _extract_seller(product)
                 street_date, release_label = _extract_release_info(product)
 
-                logger.info("RedSkySearch: direct lookup found TCIN %s — %s", tcin, title)
+                logger.debug("RedSkySearch: direct lookup found TCIN %s — %s", tcin, title)
                 return SearchResult(
                     tcin=tcin,
                     title=title,
@@ -875,7 +875,7 @@ class RedSkySearch:
                 logger.debug("RedSkySearch: skipping unparseable item", exc_info=True)
                 continue
 
-        logger.info(
+        logger.debug(
             "RedSkySearch: found %d products for keyword query", len(results),
         )
         return results
@@ -908,7 +908,7 @@ class RedSkySearch:
             poller.on("available", on_available)
             await poller.start()
             pollers.append(poller)
-            logger.info(
+            logger.debug(
                 "RedSkySearch: polling TCIN %s — %s (%s)",
                 sr.tcin, sr.title, sr.price,
             )

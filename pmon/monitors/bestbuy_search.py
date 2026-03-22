@@ -225,7 +225,7 @@ class BestBuySearch:
                     continue
                 results.append(result)
 
-            logger.info("BestBuySearch: API returned %d products for '%s'", len(results), keyword)
+            logger.debug("BestBuySearch: API returned %d products for '%s'", len(results), keyword)
             return results
 
     def _item_to_result(self, item: dict) -> SearchResult | None:

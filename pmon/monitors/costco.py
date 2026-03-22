@@ -126,7 +126,7 @@ class CostcoMonitor(BaseMonitor):
             return result
 
         # --- Strategy 2: HTML page scrape ---
-        logger.info("Costco: falling back to page scrape for %s", product_name)
+        logger.debug("Costco: falling back to page scrape for %s", product_name)
         return await self._scrape_page(client, url, product_name, item_number)
 
     async def _check_via_graphql(

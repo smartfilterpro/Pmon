@@ -101,7 +101,7 @@ class BestBuyMonitor(BaseMonitor):
         if not sku and self._extract_bsin(url):
             sku = await self._resolve_sku_from_page(url)
             if sku:
-                logger.info("Best Buy: resolved SKU %s from BSIN URL %s", sku, url)
+                logger.debug("Best Buy: resolved SKU %s from BSIN URL %s", sku, url)
 
         client = await self.get_client()
 
@@ -263,7 +263,7 @@ class BestBuyMonitor(BaseMonitor):
                     error_message="High Demand Product — reservation/invite required",
                 )
             elif state:
-                logger.info("Best Buy fulfillment: button state = %s for %s", state, url)
+                logger.debug("Best Buy fulfillment: button state = %s for %s", state, url)
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
@@ -378,7 +378,7 @@ class BestBuyMonitor(BaseMonitor):
         if high_demand:
             # High demand doesn't mean out of stock — it may still have "Add to cart"
             # from third-party sellers. Continue checking for add-to-cart below.
-            logger.info("Best Buy: high demand product detected for %s", url)
+            logger.debug("Best Buy: high demand product detected for %s", url)
 
         # Check __NEXT_DATA__ for button state (new Next.js PDP)
         next_data_match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
