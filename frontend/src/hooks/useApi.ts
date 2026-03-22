@@ -141,7 +141,9 @@ export async function checkoutNow(url: string) {
 
 // --- Search ---
 
-export interface TargetSearchResult {
+export type Retailer = 'target' | 'bestbuy';
+
+export interface SearchResult {
   tcin: string;
   title: string;
   price: string;
@@ -152,16 +154,26 @@ export interface TargetSearchResult {
   sold_by: string;
   street_date: string;
   release_label: string;
+  retailer: Retailer;
 }
 
-export async function searchTarget(
+/** @deprecated Use SearchResult instead */
+export type TargetSearchResult = SearchResult;
+
+export async function searchProducts(
   keyword: string,
-  opts: { maxResults?: number; soldByTargetOnly?: boolean; includeOutOfStock?: boolean } = {},
-): Promise<TargetSearchResult[]> {
+  opts: {
+    retailers?: Retailer[];
+    maxResults?: number;
+    soldByTargetOnly?: boolean;
+    includeOutOfStock?: boolean;
+  } = {},
+): Promise<SearchResult[]> {
   const resp = await apiFetch('/search', {
     method: 'POST',
     body: JSON.stringify({
       keyword,
+      retailers: opts.retailers ?? ['target'],
       max_results: opts.maxResults ?? 10,
       sold_by_target_only: opts.soldByTargetOnly ?? false,
       include_out_of_stock: opts.includeOutOfStock ?? false,
@@ -171,6 +183,12 @@ export async function searchTarget(
   if (!resp.ok || data.error) throw new Error(data.error || 'Search failed');
   return data.results;
 }
+
+/** @deprecated Use searchProducts instead */
+export const searchTarget = (
+  keyword: string,
+  opts: { maxResults?: number; soldByTargetOnly?: boolean; includeOutOfStock?: boolean } = {},
+) => searchProducts(keyword, { ...opts, retailers: ['target'] });
 
 // --- Monitor ---
 
