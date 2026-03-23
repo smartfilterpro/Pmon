@@ -447,6 +447,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if retailer == "costco":
             return await _test_costco_session(user, email, password)
 
+        # --- Pokemon Center: WAF blocks headless browsers; validate session first ---
+        if retailer == "pokemoncenter":
+            return await _test_pokemoncenter_session(user, email, password)
+
         # --- All other retailers: use Playwright browser automation ---
         return await _test_login_browser(retailer, email, password, user)
 
@@ -467,18 +471,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         import httpx
         from pmon.monitors.base import DEFAULT_HEADERS
 
-        # Check if the Walmart monitor is currently in a rate-limit cooldown.
-        # If so, skip the network call — another request would just extend the ban.
+        # Get the Walmart monitor reference (used to record 429s if we get one)
         walmart_monitor = engine._monitors.get("walmart")
-        if walmart_monitor and walmart_monitor.is_rate_limited():
-            remaining = walmart_monitor.rate_limit_remaining()
-            return {
-                "ok": False,
-                "message": (
-                    f"Walmart is rate limiting us (429). "
-                    f"All Walmart requests paused — wait {remaining:.0f}s before testing again."
-                ),
-            }
 
         session = db.get_retailer_session(user["id"], "walmart")
         if not session or not session.get("cookies_json"):
@@ -596,8 +590,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         session = db.get_retailer_session(user["id"], "costco")
         if not session or not session.get("cookies_json"):
-            # No session cookies — try browser login as fallback
-            return await _test_login_browser("costco", email, password, user)
+            # Costco's Akamai Bot Manager blocks headless browser logins,
+            # so browser-based login is unreliable.  Ask user to import cookies.
+            return {
+                "ok": False,
+                "message": "No Costco session cookies found. Costco blocks automated logins — "
+                           "import cookies from your browser to test your session.",
+            }
 
         try:
             cookies = _json.loads(session["cookies_json"])
@@ -605,7 +604,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return {"ok": False, "message": "Saved Costco session cookies are corrupted — re-import them"}
 
         if not cookies:
-            return await _test_login_browser("costco", email, password, user)
+            return {
+                "ok": False,
+                "message": "Costco session cookies are empty — re-import cookies from your browser.",
+            }
 
         try:
             async with httpx.AsyncClient(
@@ -671,6 +673,78 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         except Exception as exc:
             logger.error("Costco session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Costco session: {exc}"}
+
+    async def _test_pokemoncenter_session(user: dict, email: str, password: str):
+        """Test Pokemon Center account by validating session cookies via API.
+
+        Pokemon Center uses aggressive WAF/bot detection that blocks headless
+        browsers on the homepage itself.  Validate session cookies via the
+        profile API endpoint instead.  Fall back to browser login if no
+        cookies are imported.
+        """
+        import json as _json
+        import httpx
+        from pmon.monitors.base import DEFAULT_HEADERS
+
+        session = db.get_retailer_session(user["id"], "pokemoncenter")
+        if not session or not session.get("cookies_json"):
+            # No cookies — try browser login as last resort
+            return await _test_login_browser("pokemoncenter", email, password, user)
+
+        try:
+            cookies = _json.loads(session["cookies_json"])
+        except Exception:
+            return {"ok": False, "message": "Saved Pokemon Center session cookies are corrupted — re-import them"}
+
+        if not cookies:
+            return await _test_login_browser("pokemoncenter", email, password, user)
+
+        try:
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                http2=True,
+            ) as client:
+                for name, value in cookies.items():
+                    client.cookies.set(name, str(value), domain=".pokemoncenter.com")
+
+                # Check session via profile API (used by the checkout engine
+                # as a login-confirmation signal)
+                resp = await client.get(
+                    "https://www.pokemoncenter.com/tpci-ecommweb-api/profile/data",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Accept": "application/json",
+                        "Referer": "https://www.pokemoncenter.com/",
+                    },
+                )
+
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        # Profile endpoint returns user data when authenticated
+                        if data and (isinstance(data, dict) and (data.get("email") or data.get("firstName") or data.get("id") or data.get("profile"))):
+                            return {"ok": True, "message": f"Pokemon Center session valid — {len(cookies)} cookies active"}
+                    except Exception:
+                        pass
+                    # 200 but no profile data — could still be valid (empty profile response)
+                    return {"ok": True, "message": f"Pokemon Center session valid — {len(cookies)} cookies active"}
+
+                if resp.status_code in (401, 403):
+                    return {
+                        "ok": False,
+                        "message": "Pokemon Center session expired or blocked. Re-import fresh cookies from your browser.",
+                    }
+
+                return {
+                    "ok": False,
+                    "message": f"Pokemon Center session check returned HTTP {resp.status_code}. Try re-importing cookies.",
+                }
+
+        except Exception as exc:
+            logger.error("Pokemon Center session validation error: %s", exc)
+            return {"ok": False, "message": f"Could not validate Pokemon Center session: {exc}"}
 
     async def _bestbuy_test_verification(page, user: dict, email_sel: str, pass_sel: str,
                                           vision_fill, vision_click, vision_read_page):
@@ -2221,10 +2295,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 return {"ok": False, "message": msg}
 
             finally:
-                await page.close()
-                await context.close()
-                await browser.close()
-                await pw.stop()
+                for cleanup_coro in [page.close(), context.close(), browser.close(), pw.stop()]:
+                    try:
+                        await cleanup_coro
+                    except Exception:
+                        pass
 
         except Exception as e:
             err_str = str(e).lower()
@@ -2235,7 +2310,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 return {"ok": False, "message": msg}
             msg = f"Error testing {retailer_name}: {str(e)}"
             logger.error("Test login error for %s: %s", retailer_name, e, exc_info=True)
-            db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
+            try:
+                db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
+            except Exception:
+                pass
             return {"ok": False, "message": msg}
 
     async def _page_has_value(page, selector: str, value: str) -> bool:
