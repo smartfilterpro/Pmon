@@ -429,19 +429,121 @@ class TargetMonitor(BaseMonitor):
     def _find_primary_product_in_preloaded(preloaded: dict) -> dict | None:
         """Extract the primary product dict from __PRELOADED_QUERIES__.
 
-        Target's preloaded data contains queries keyed by endpoint path.
-        The primary product is under a product_fulfillment or pdp_client key.
-        We avoid matching recommended/carousel products which also appear.
+        Target's preloaded data uses an array-of-tuples format:
+          {"queries": [[[query_name, params], response_data], ...]}
+        The primary product is under the '@web/domain-product/get-pdp-v1' query.
         """
-        for key, value in preloaded.items():
-            if not isinstance(value, dict):
+        queries = preloaded.get("queries", [])
+        if not isinstance(queries, list):
+            return None
+
+        for entry in queries:
+            if not isinstance(entry, list) or len(entry) < 2:
                 continue
-            # Look for the query result containing product data
-            result = value.get("result") or value.get("data") or value
-            if isinstance(result, dict):
-                product = result.get("data", {}).get("product") or result.get("product")
-                if isinstance(product, dict) and "fulfillment" in product:
+            query_key = entry[0]
+            response = entry[1]
+
+            # query_key is [query_name, params] or just a string
+            query_name = ""
+            if isinstance(query_key, list) and len(query_key) >= 1:
+                query_name = str(query_key[0])
+            elif isinstance(query_key, str):
+                query_name = query_key
+
+            # Look for PDP or fulfillment queries
+            if not any(name in query_name for name in (
+                "get-pdp", "pdp_client", "product_fulfillment",
+            )):
+                continue
+
+            if not isinstance(response, dict):
+                continue
+
+            # Navigate to product data
+            data = response.get("data", response)
+            if isinstance(data, dict):
+                product = data.get("product")
+                if isinstance(product, dict):
                     return product
+
+        return None
+
+    @staticmethod
+    def _check_preloaded_oos_signals(preloaded: dict) -> bool | None:
+        """Check CDUI layout data for out-of-stock signals.
+
+        Target's CDUI layout includes module placements that indicate stock state.
+        The 'adapt_pdp_oos_01' placement is specifically for OOS alternative carousels.
+        Returns True if OOS signals found, False if buyable signals found, None if unclear.
+        """
+        queries = preloaded.get("queries", [])
+        if not isinstance(queries, list):
+            return None
+
+        for entry in queries:
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            query_key = entry[0]
+            response = entry[1]
+
+            query_name = ""
+            if isinstance(query_key, list) and len(query_key) >= 1:
+                query_name = str(query_key[0])
+            elif isinstance(query_key, str):
+                query_name = query_key
+
+            if "cdui" not in query_name.lower():
+                continue
+
+            if not isinstance(response, dict):
+                continue
+
+            # Serialize layout data and look for OOS placement IDs
+            layout_str = json.dumps(response)
+
+            # adapt_pdp_oos = out-of-stock alternative carousel
+            if "adapt_pdp_oos" in layout_str:
+                logger.debug("Target: CDUI layout contains adapt_pdp_oos placement — OOS signal")
+                return True
+
+        return None
+
+    @staticmethod
+    def _extract_preloaded_queries(html: str) -> dict | None:
+        """Extract __PRELOADED_QUERIES__ from Target's __TGT_DATA__ variable.
+
+        Target embeds data as:
+          window.__TGT_DATA__ = deepFreeze(JSON.parse("{...escaped json...}"))
+        The inner JSON contains a __PRELOADED_QUERIES__ key.
+        """
+        # Match the JSON.parse("...") content inside __TGT_DATA__
+        tgt_match = re.search(
+            r"'__TGT_DATA__'.*?JSON\.parse\(\"(.*?)\"\)\)", html, re.S
+        )
+        if tgt_match:
+            try:
+                # The content is a JSON string with escaped quotes
+                raw = tgt_match.group(1)
+                # Unescape: \" → ", \\ → \, etc.
+                unescaped = raw.encode().decode("unicode_escape")
+                tgt_data = json.loads(unescaped)
+                preloaded = tgt_data.get("__PRELOADED_QUERIES__")
+                if isinstance(preloaded, dict):
+                    return preloaded
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+                logger.debug("Target: failed to parse __TGT_DATA__: %s", e)
+
+        # Fallback: legacy format where __PRELOADED_QUERIES__ is a standalone variable
+        legacy_match = re.search(
+            r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>',
+            html, re.S,
+        )
+        if legacy_match:
+            try:
+                return json.loads(legacy_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
         return None
 
     @staticmethod
@@ -605,22 +707,44 @@ class TargetMonitor(BaseMonitor):
             except (json.JSONDecodeError, TypeError, AttributeError):
                 continue
 
-        # Strategy 2: __PRELOADED_QUERIES__ data — parse the primary product's
-        # fulfillment block only (not recommended products, carousels, etc.)
-        preloaded_match = re.search(r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>', html, re.S)
-        if preloaded_match:
-            try:
-                preloaded = json.loads(preloaded_match.group(1))
-                # Walk the preloaded data to find the primary product fulfillment
-                product_data = self._find_primary_product_in_preloaded(preloaded)
-                if product_data:
-                    fulfillment = product_data.get("fulfillment", {})
-                    price = self._extract_price_from_product(product_data)
-                    result = self._check_fulfillment_availability(url, product_name, product_data, fulfillment, price)
+        # Strategy 2: __PRELOADED_QUERIES__ data from __TGT_DATA__
+        # Target embeds this as: window.__TGT_DATA__ = deepFreeze(JSON.parse("..."))
+        # where the JSON contains a __PRELOADED_QUERIES__ key with queries array.
+        preloaded = self._extract_preloaded_queries(html)
+        if preloaded:
+            # 2a: Check CDUI layout for OOS signals (adapt_pdp_oos placement)
+            oos_signal = self._check_preloaded_oos_signals(preloaded)
+            price_from_preloaded = ""
+
+            # 2b: Try to get product data for price and fulfillment info
+            product_data = self._find_primary_product_in_preloaded(preloaded)
+            if product_data:
+                price_from_preloaded = self._extract_price_from_product(product_data)
+
+                # Check if the product-level fulfillment has availability data
+                # (product.fulfillment — not product.item.fulfillment which is just
+                # shipping restrictions like purchase_limit)
+                fulfillment = product_data.get("fulfillment", {})
+                if fulfillment and any(
+                    k in fulfillment for k in (
+                        "is_out_of_stock_in_all_store_locations",
+                        "shipping_options", "store_options", "scheduled_delivery",
+                    )
+                ):
+                    result = self._check_fulfillment_availability(
+                        url, product_name, product_data, fulfillment, price_from_preloaded,
+                    )
                     if result.status != StockStatus.UNKNOWN:
                         return result
-            except (json.JSONDecodeError, TypeError):
-                pass
+
+            # 2c: Use CDUI OOS signal if fulfillment data wasn't available
+            if oos_signal is True:
+                logger.debug("Target: OOS determined via CDUI layout signal for %s", product_name)
+                return StockResult(
+                    url=url, retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.OUT_OF_STOCK, price=price_from_preloaded,
+                )
 
         # Try to get price from embedded data for remaining strategies
         page_price = ""

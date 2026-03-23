@@ -787,6 +787,43 @@ class RedSkySearch:
             ]
 
     @staticmethod
+    def _extract_preloaded_queries_from_html(html: str) -> dict | None:
+        """Extract __PRELOADED_QUERIES__ from Target HTML.
+
+        Target embeds data as:
+          window.__TGT_DATA__ = deepFreeze(JSON.parse("{...escaped json...}"))
+        The inner JSON contains a __PRELOADED_QUERIES__ key.
+        Falls back to legacy standalone variable format.
+        """
+        # Primary: __TGT_DATA__ with JSON.parse
+        tgt_match = re.search(
+            r"'__TGT_DATA__'.*?JSON\.parse\(\"(.*?)\"\)\)", html, re.S
+        )
+        if tgt_match:
+            try:
+                raw = tgt_match.group(1)
+                unescaped = raw.encode().decode("unicode_escape")
+                tgt_data = json.loads(unescaped)
+                preloaded = tgt_data.get("__PRELOADED_QUERIES__")
+                if isinstance(preloaded, dict):
+                    return preloaded
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                pass
+
+        # Fallback: legacy standalone variable
+        legacy_match = re.search(
+            r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>',
+            html, re.S,
+        )
+        if legacy_match:
+            try:
+                return json.loads(legacy_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    @staticmethod
     def _extract_tcin(text: str) -> str | None:
         """Try to extract a TCIN from a Target URL or raw number."""
         # Target URL: .../A-12345678 or .../A-12345678?...
@@ -1601,20 +1638,20 @@ class RedSkySearch:
             await browser.close()
             await pw.stop()
 
-            # 2a: __PRELOADED_QUERIES__
-            preloaded_match = re.search(
-                r'window\.__PRELOADED_QUERIES__\s*=\s*(\{.+?\});?\s*</script>',
-                html, re.S,
-            )
-            if preloaded_match:
+            # 2a: __PRELOADED_QUERIES__ (may be inside __TGT_DATA__ or standalone)
+            preloaded = self._extract_preloaded_queries_from_html(html)
+            if preloaded:
                 try:
-                    preloaded = json.loads(preloaded_match.group(1))
-                    for _key, value in preloaded.items():
-                        if not isinstance(value, dict):
+                    queries = preloaded.get("queries", [])
+                    for entry in queries:
+                        if not isinstance(entry, list) or len(entry) < 2:
                             continue
-                        result = value.get("result") or value.get("data") or value
-                        if isinstance(result, dict):
-                            search_data = result.get("data", {}).get("search") or result.get("search")
+                        response = entry[1]
+                        if not isinstance(response, dict):
+                            continue
+                        data = response.get("data", response)
+                        if isinstance(data, dict):
+                            search_data = data.get("search")
                             if isinstance(search_data, dict) and "products" in search_data:
                                 results = self._parse_search({"data": {"search": search_data}})
                                 if results:
@@ -1625,7 +1662,7 @@ class RedSkySearch:
                                             if r.sold_by.lower() in ("target", "target corporation")
                                         ]
                                     return results
-                except (json.JSONDecodeError, TypeError):
+                except (TypeError, KeyError):
                     pass
 
             # 2b: __NEXT_DATA__ (Target uses Next.js)
