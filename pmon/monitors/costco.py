@@ -1,19 +1,20 @@
 """Costco stock monitor.
 
-Uses Costco's GraphQL product API (ecom-api.costco.com) to check stock status.
+Uses Costco's batch inventory API (ecom-api.costco.com) to check stock status.
 Falls back to HTML scraping of product pages when the API is unavailable.
 
 Costco uses:
-- Next.js frontend (consumer-web) with server-side rendering
-- GraphQL product API at ecom-api.costco.com/ebusiness/product/v1/products/graphql
+- JSP/WCS (WebSphere Commerce) frontend with server-side rendering
+- Batch inventory API at ecom-api.costco.com/ebusiness/inventory/v1/
+- Embedded product data in JS variables (window.digitalData, var products)
 - Akamai bot detection (mPulse boomerang)
 - Queue-it for high-traffic events
-- OAuth login at /OAuthLogonCmd
 
 Key quirks:
 - Costco requires membership for most online purchases
 - Product URLs contain item numbers (e.g. .product.1234567.html or /p/1234567)
-- The GraphQL API returns inventory, pricing, and fulfillment data
+- Stock data is embedded in page JS as ``var products`` and ``window.digitalData``
+- Price may be base64-encoded in ``listPrice`` field; use digitalData.priceMin instead
 - Session cookies from a logged-in member account are needed for member pricing
 """
 
@@ -37,8 +38,9 @@ class CostcoMonitor(BaseMonitor):
     # Costco is aggressive with rate limiting — use a conservative interval
     _min_request_interval: float = 5.0
 
-    # Costco's GraphQL product API
-    GRAPHQL_URL = "https://ecom-api.costco.com/ebusiness/product/v1/products/graphql"
+    # Costco's batch inventory API (real endpoint from their frontend)
+    INVENTORY_URL = "https://ecom-api.costco.com/ebusiness/inventory/v1/inventorylevels/availability/batch/v2"
+    CLIENT_ID = "481b1aec-aa3b-454b-b81b-48187e28f205"
 
     def __init__(self):
         super().__init__()
@@ -75,11 +77,12 @@ class CostcoMonitor(BaseMonitor):
 
         return None
 
-    def _graphql_headers(self, url: str) -> dict:
-        """Build headers matching Costco's real frontend GraphQL requests."""
+    def _inventory_headers(self, url: str) -> dict:
+        """Build headers matching Costco's real frontend inventory API requests."""
         return {
             **API_HEADERS,
             "Content-Type": "application/json",
+            "client-identifier": self.CLIENT_ID,
             "Referer": url,
             "Origin": "https://www.costco.com",
             "Sec-Fetch-Dest": "empty",
@@ -120,8 +123,8 @@ class CostcoMonitor(BaseMonitor):
         client = await self.get_client()
         await self._warm_up(client)
 
-        # --- Strategy 1: GraphQL product API ---
-        result = await self._check_via_graphql(client, url, product_name, item_number)
+        # --- Strategy 1: Batch inventory API ---
+        result = await self._check_via_inventory_api(client, url, product_name, item_number)
         if result and result.status != StockStatus.UNKNOWN:
             return result
 
@@ -129,50 +132,22 @@ class CostcoMonitor(BaseMonitor):
         logger.debug("Costco: falling back to page scrape for %s", product_name)
         return await self._scrape_page(client, url, product_name, item_number)
 
-    async def _check_via_graphql(
+    async def _check_via_inventory_api(
         self, client, url: str, product_name: str, item_number: str
     ) -> StockResult | None:
-        """Check stock via Costco's GraphQL product API."""
-        # Costco's GraphQL API accepts product queries with item numbers.
-        # The exact query shape is reverse-engineered from network captures.
-        query = """
-        query ProductQuery($itemNumber: String!) {
-            product(itemNumber: $itemNumber) {
-                itemNumber
-                name
-                active
-                inventoryAvailable
-                isPublished
-                maxQty
-                minQty
-                onlineOnly
-                price {
-                    finalPrice
-                    originalPrice
-                    priceDisplay
-                }
-                inventory {
-                    status
-                    quantity
-                    isBackorderable
-                    isPreorderable
-                }
-                fulfillment {
-                    deliveryAvailable
-                    shippingAvailable
-                }
-            }
-        }
-        """
+        """Check stock via Costco's batch inventory API.
 
+        This is the real API that costco.com's frontend calls to check
+        availability. It requires the client-identifier header.
+        """
         try:
             resp = await client.post(
-                self.GRAPHQL_URL,
-                json={
-                    "query": query,
-                    "variables": {"itemNumber": item_number},
-                },
-                headers=self._graphql_headers(url),
+                self.INVENTORY_URL,
+                json=[{
+                    "productId": item_number,
+                    "partNumber": item_number,
+                }],
+                headers=self._inventory_headers(url),
             )
 
             if resp.status_code == 429:
@@ -185,99 +160,55 @@ class CostcoMonitor(BaseMonitor):
                 )
 
             if resp.status_code == 403:
-                logger.warning("Costco: GraphQL API 403 — Akamai blocked, rotating session")
+                logger.warning("Costco: Inventory API 403 — Akamai blocked, rotating session")
                 self._warmed_up = False
                 return None
 
             if resp.status_code != 200:
-                logger.debug("Costco: GraphQL API returned %d for item %s", resp.status_code, item_number)
+                logger.debug("Costco: Inventory API returned %d for item %s", resp.status_code, item_number)
                 return None
 
             data = resp.json()
-            return self._parse_graphql_response(url, product_name, data)
+            return self._parse_inventory_response(url, product_name, data)
 
         except Exception as e:
-            logger.debug("Costco: GraphQL API failed for item %s: %s", item_number, e)
+            logger.debug("Costco: Inventory API failed for item %s: %s", item_number, e)
             return None
 
-    def _parse_graphql_response(self, url: str, product_name: str, data: dict) -> StockResult:
-        """Parse the GraphQL product response."""
+    def _parse_inventory_response(self, url: str, product_name: str, data) -> StockResult:
+        """Parse the batch inventory API response."""
         try:
-            product = data.get("data", {}).get("product", {})
-            if not product:
-                # Check for errors in GraphQL response
-                errors = data.get("errors", [])
-                if errors:
-                    logger.debug("Costco: GraphQL errors: %s", errors[:2])
+            # Response is a list of inventory items or an object with items
+            items = data if isinstance(data, list) else data.get("inventoryItems", [data])
+            if not items:
                 return StockResult(
                     url=url, retailer=self.retailer_name,
                     product_name=product_name, status=StockStatus.UNKNOWN,
-                    error_message="No product data in GraphQL response",
+                    error_message="No items in inventory API response",
                 )
 
-            # Extract price
+            item = items[0] if isinstance(items, list) else items
+
+            # The API can return various status fields
+            inv_status = (
+                item.get("inventoryStatus", "")
+                or item.get("status", "")
+                or item.get("availabilityStatus", "")
+            ).upper()
+
             price = ""
-            price_data = product.get("price", {})
-            if isinstance(price_data, dict):
-                price = price_data.get("priceDisplay", "")
-                if not price:
-                    final_price = price_data.get("finalPrice")
-                    if final_price is not None:
-                        price = f"${final_price}"
+            price_val = item.get("price") or item.get("finalPrice")
+            if price_val is not None:
+                price = f"${price_val}"
 
-            # Check active/published status
-            if product.get("active") is False or product.get("isPublished") is False:
-                return StockResult(
-                    url=url, retailer=self.retailer_name,
-                    product_name=product_name,
-                    status=StockStatus.OUT_OF_STOCK, price=price,
-                )
-
-            # Check inventory
-            inventory = product.get("inventory", {})
-            if isinstance(inventory, dict):
-                inv_status = inventory.get("status", "").upper()
-                if inv_status in ("IN_STOCK", "AVAILABLE"):
-                    self.record_success()
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
-                if inv_status in ("OUT_OF_STOCK", "UNAVAILABLE", "SOLD_OUT"):
-                    self.record_success()
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.OUT_OF_STOCK, price=price,
-                    )
-                # Preorder/backorder count as available
-                if inventory.get("isPreorderable") or inventory.get("isBackorderable"):
-                    self.record_success()
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
-                # Check quantity
-                qty = inventory.get("quantity", 0)
-                if isinstance(qty, (int, float)) and qty > 0:
-                    self.record_success()
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
-
-            # Check inventoryAvailable (top-level boolean)
-            if product.get("inventoryAvailable") is True:
+            if inv_status in ("IN_STOCK", "AVAILABLE"):
                 self.record_success()
                 return StockResult(
                     url=url, retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.IN_STOCK, price=price,
                 )
-            if product.get("inventoryAvailable") is False:
+            if inv_status in ("OUT_OF_STOCK", "UNAVAILABLE", "SOLD_OUT", "NOT_AVAILABLE"):
                 self.record_success()
                 return StockResult(
                     url=url, retailer=self.retailer_name,
@@ -285,45 +216,48 @@ class CostcoMonitor(BaseMonitor):
                     status=StockStatus.OUT_OF_STOCK, price=price,
                 )
 
-            # Check fulfillment
-            fulfillment = product.get("fulfillment", {})
-            if isinstance(fulfillment, dict):
-                if fulfillment.get("deliveryAvailable") or fulfillment.get("shippingAvailable"):
-                    self.record_success()
-                    return StockResult(
-                        url=url, retailer=self.retailer_name,
-                        product_name=product_name,
-                        status=StockStatus.IN_STOCK, price=price,
-                    )
-
-            # Broad string search across product JSON
-            product_str = json.dumps(product)
-            if any(s in product_str for s in ('"IN_STOCK"', '"AVAILABLE"', '"inventoryAvailable":true')):
+            # Broad string match on the response
+            data_str = json.dumps(data)
+            if '"IN_STOCK"' in data_str or '"AVAILABLE"' in data_str:
                 self.record_success()
                 return StockResult(
                     url=url, retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.IN_STOCK, price=price,
                 )
+            if '"OUT_OF_STOCK"' in data_str or '"SOLD_OUT"' in data_str:
+                self.record_success()
+                return StockResult(
+                    url=url, retailer=self.retailer_name,
+                    product_name=product_name,
+                    status=StockStatus.OUT_OF_STOCK, price=price,
+                )
 
-            self.record_success()
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK, price=price,
-            )
-
-        except (KeyError, TypeError) as e:
+            # Could not determine from API — fall through to page scrape
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name, status=StockStatus.UNKNOWN,
-                error_message=f"Could not parse Costco GraphQL data: {e}",
+                error_message="Could not determine stock from inventory API",
+            )
+
+        except (KeyError, TypeError, IndexError) as e:
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name, status=StockStatus.UNKNOWN,
+                error_message=f"Could not parse Costco inventory data: {e}",
             )
 
     async def _scrape_page(
         self, client, url: str, product_name: str, item_number: str
     ) -> StockResult:
-        """Scrape the Costco product page for stock status."""
+        """Scrape the Costco product page for stock status.
+
+        Costco uses JSP/WCS server-side rendering. Key data sources:
+        - ``window.digitalData`` — contains inventoryStatus, priceMin/priceMax
+        - ``var products`` — JS array with per-SKU inventory and price
+        - ``var product`` — JS array with product-level metadata
+        - Add-to-cart button presence/disabled state
+        """
         try:
             resp = await client.get(
                 url,
@@ -355,9 +289,22 @@ class CostcoMonitor(BaseMonitor):
 
             resp.raise_for_status()
             html = resp.text
+
+            # Strategy 1: window.digitalData (most reliable on Costco JSP pages)
+            # Contains inventoryStatus ('in stock' / 'out of stock') and pricing
+            result = self._parse_digital_data(url, product_name, html)
+            if result and result.status != StockStatus.UNKNOWN:
+                return result
+
+            # Strategy 2: var products JS array
+            # Contains per-SKU data: "inventory" : "IN_STOCK", price, etc.
+            result = self._parse_products_array(url, product_name, html)
+            if result and result.status != StockStatus.UNKNOWN:
+                return result
+
             soup = BeautifulSoup(html, "html.parser")
 
-            # Strategy 1: JSON-LD structured data
+            # Strategy 3: JSON-LD structured data
             for script in soup.find_all("script", type="application/ld+json"):
                 try:
                     ld_data = json.loads(script.string or "")
@@ -390,35 +337,23 @@ class CostcoMonitor(BaseMonitor):
                 except (json.JSONDecodeError, TypeError, AttributeError):
                     continue
 
-            # Strategy 2: Next.js __NEXT_DATA__ (Costco uses Next.js)
-            next_data_tag = soup.find("script", id="__NEXT_DATA__")
-            if next_data_tag and next_data_tag.string:
-                try:
-                    nd = json.loads(next_data_tag.string)
-                    props = nd.get("props", {}).get("pageProps", {})
-                    product = props.get("product", {}) or props.get("initialData", {}).get("product", {})
-                    if product:
-                        return self._parse_next_data_product(url, product_name, product)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # Strategy 3: Embedded product data in scripts
+            # Strategy 4: Embedded script data (inventoryAvailable or inventory status)
             for script in soup.find_all("script"):
                 text = script.string or ""
-                if "inventoryAvailable" in text or "addToCartUrl" in text:
-                    price = ""
-                    price_match = re.search(r'"price"\s*:\s*"?\$?([\d.]+)', text)
-                    if price_match:
-                        price = f"${price_match.group(1)}"
+                if not text or len(text) < 20:
+                    continue
 
-                    if re.search(r'"inventoryAvailable"\s*:\s*true', text, re.I):
+                # Check for inventoryAvailable boolean
+                if "inventoryAvailable" in text:
+                    price = self._extract_script_price(text)
+                    if re.search(r'["\']?inventoryAvailable["\']?\s*[:=]\s*true', text, re.I):
                         self.record_success()
                         return StockResult(
                             url=url, retailer=self.retailer_name,
                             product_name=product_name,
                             status=StockStatus.IN_STOCK, price=price,
                         )
-                    if re.search(r'"inventoryAvailable"\s*:\s*false', text, re.I):
+                    if re.search(r'["\']?inventoryAvailable["\']?\s*[:=]\s*false', text, re.I):
                         self.record_success()
                         return StockResult(
                             url=url, retailer=self.retailer_name,
@@ -426,14 +361,31 @@ class CostcoMonitor(BaseMonitor):
                             status=StockStatus.OUT_OF_STOCK, price=price,
                         )
 
-            # Strategy 4: Text-based detection
-            page_price = ""
-            price_el = soup.find(class_=re.compile(r"price", re.I))
-            if price_el:
-                price_match = re.search(r"\$[\d,]+\.?\d*", price_el.get_text())
-                if price_match:
-                    page_price = price_match.group()
+                # Check for inventory status string
+                if '"inventory"' in text or "'inventory'" in text:
+                    price = self._extract_script_price(text)
+                    inv_match = re.search(
+                        r"""['"]\s*inventory\s*['"]\s*:\s*['"]([\w_]+)['"]""", text
+                    )
+                    if inv_match:
+                        inv_val = inv_match.group(1).upper()
+                        if inv_val in ("IN_STOCK", "AVAILABLE"):
+                            self.record_success()
+                            return StockResult(
+                                url=url, retailer=self.retailer_name,
+                                product_name=product_name,
+                                status=StockStatus.IN_STOCK, price=price,
+                            )
+                        if inv_val in ("OUT_OF_STOCK", "UNAVAILABLE", "SOLD_OUT"):
+                            self.record_success()
+                            return StockResult(
+                                url=url, retailer=self.retailer_name,
+                                product_name=product_name,
+                                status=StockStatus.OUT_OF_STOCK, price=price,
+                            )
 
+            # Strategy 5: Text-based detection
+            page_price = self._extract_page_price(soup)
             if re.search(r"(out of stock|sold out|temporarily unavailable)", html, re.I):
                 self.record_success()
                 return StockResult(
@@ -442,7 +394,7 @@ class CostcoMonitor(BaseMonitor):
                     status=StockStatus.OUT_OF_STOCK, price=page_price,
                 )
 
-            # Strategy 5: "Add to Cart" button presence
+            # Strategy 6: "Add to Cart" button presence
             add_btn = soup.find("input", attrs={"value": re.compile(r"add to cart", re.I)})
             if not add_btn:
                 add_btn = soup.find("button", string=re.compile(r"add to cart", re.I))
@@ -468,54 +420,125 @@ class CostcoMonitor(BaseMonitor):
                 error_message=str(e),
             )
 
-    def _parse_next_data_product(self, url: str, product_name: str, product: dict) -> StockResult:
-        """Parse product data from Costco's Next.js __NEXT_DATA__."""
-        price = ""
-        price_data = product.get("price", product.get("pricing", {}))
-        if isinstance(price_data, dict):
-            price = price_data.get("priceDisplay", "") or price_data.get("finalPrice", "")
-            if price and not str(price).startswith("$"):
-                price = f"${price}"
-        elif isinstance(price_data, (int, float)):
-            price = f"${price_data}"
+    def _parse_digital_data(self, url: str, product_name: str, html: str) -> StockResult | None:
+        """Parse ``window.digitalData`` embedded in Costco pages.
 
-        # Check inventory fields
-        if product.get("inventoryAvailable") is True:
-            self.record_success()
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.IN_STOCK, price=price,
-            )
-        if product.get("inventoryAvailable") is False:
-            self.record_success()
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK, price=price,
-            )
+        This JS object contains::
 
-        # Check active status
-        if product.get("active") is False:
-            self.record_success()
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.OUT_OF_STOCK, price=price,
-            )
-
-        # Broad check
-        product_str = json.dumps(product)
-        if '"IN_STOCK"' in product_str or '"AVAILABLE"' in product_str:
-            self.record_success()
-            return StockResult(
-                url=url, retailer=self.retailer_name,
-                product_name=product_name,
-                status=StockStatus.IN_STOCK, price=price,
-            )
-
-        return StockResult(
-            url=url, retailer=self.retailer_name,
-            product_name=product_name, status=StockStatus.UNKNOWN,
-            error_message="Could not determine stock from Next.js data",
+            window.digitalData = {
+                product: {
+                    inventoryStatus: 'in stock',
+                    priceMin: '89.99',
+                    priceMax: '89.99',
+                    pid: '4000271399',
+                    ...
+                },
+            }
+        """
+        # Extract the inventoryStatus value
+        inv_match = re.search(
+            r"""inventoryStatus\s*:\s*['"]([^'"]+)['"]""", html
         )
+        if not inv_match:
+            return None
+
+        inv_status = inv_match.group(1).strip().lower()
+
+        # Extract price from priceMin
+        price = ""
+        price_match = re.search(r"""priceMin\s*:\s*['"]([^'"]+)['"]""", html)
+        if price_match:
+            price_val = price_match.group(1).strip()
+            if price_val and price_val != "0":
+                price = f"${price_val}"
+
+        if inv_status in ("in stock", "in_stock", "available"):
+            self.record_success()
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.IN_STOCK, price=price,
+            )
+        if inv_status in ("out of stock", "out_of_stock", "sold out", "unavailable"):
+            self.record_success()
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.OUT_OF_STOCK, price=price,
+            )
+
+        logger.debug("Costco: unrecognized inventoryStatus in digitalData: %r", inv_status)
+        return None
+
+    def _parse_products_array(self, url: str, product_name: str, html: str) -> StockResult | None:
+        """Parse the ``var products`` JS array embedded in Costco PDP pages.
+
+        The array contains per-SKU objects with inventory status::
+
+            var products = [[{
+                "inventory" : "IN_STOCK",
+                "price" : "",
+                ...
+            }]];
+        """
+        # Look for "inventory" : "VALUE" pattern in the products array region
+        # This is distinct from digitalData — it's in the product JS block
+        products_match = re.search(
+            r'var\s+products\s*=\s*\[', html
+        )
+        if not products_match:
+            return None
+
+        # Search for inventory field after var products declaration
+        remaining = html[products_match.start():]
+        inv_match = re.search(
+            r"""['"]\s*inventory\s*['"]\s*:\s*['"]([\w_]+)['"]""", remaining
+        )
+        if not inv_match:
+            return None
+
+        inv_status = inv_match.group(1).upper()
+
+        # Try to get price from digitalData since products array often has empty price
+        price = ""
+        price_match = re.search(r"""priceMin\s*:\s*['"]([^'"]+)['"]""", html)
+        if price_match:
+            price_val = price_match.group(1).strip()
+            if price_val and price_val != "0":
+                price = f"${price_val}"
+
+        if inv_status in ("IN_STOCK", "AVAILABLE"):
+            self.record_success()
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.IN_STOCK, price=price,
+            )
+        if inv_status in ("OUT_OF_STOCK", "UNAVAILABLE", "SOLD_OUT"):
+            self.record_success()
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.OUT_OF_STOCK, price=price,
+            )
+
+        logger.debug("Costco: unrecognized inventory in products array: %r", inv_status)
+        return None
+
+    @staticmethod
+    def _extract_script_price(text: str) -> str:
+        """Extract a price from an inline script block."""
+        price_match = re.search(r"""['"]\s*price\s*['"]\s*:\s*['"]\$?([\d.]+)""", text)
+        if price_match:
+            return f"${price_match.group(1)}"
+        return ""
+
+    @staticmethod
+    def _extract_page_price(soup: BeautifulSoup) -> str:
+        """Extract a price from visible page elements."""
+        price_el = soup.find(class_=re.compile(r"price", re.I))
+        if price_el:
+            price_match = re.search(r"\$[\d,]+\.?\d*", price_el.get_text())
+            if price_match:
+                return price_match.group()
+        return ""
