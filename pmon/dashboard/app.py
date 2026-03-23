@@ -2476,10 +2476,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             cookies_json=_json.dumps(cookies_dict),
         )
 
-        # If checkout engine exists, hot-reload the session
+        # Hot-reload cookies into checkout engine and monitor
         if engine.checkout_engine:
             engine.checkout_engine._api.load_session_cookies(retailer, cookies_dict)
             engine.checkout_engine._api.reset_client(retailer)
+        if retailer in engine._monitors:
+            engine._monitors[retailer].load_session_cookies(cookies_dict)
 
         logger.info("Imported %d cookies for %s (user %s)", len(cookies_dict), retailer, user["username"])
         return {"ok": True, "cookie_count": len(cookies_dict)}

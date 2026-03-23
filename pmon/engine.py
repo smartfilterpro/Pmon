@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -81,11 +82,39 @@ class PmonEngine:
                     auto_checkout=bool(p["auto_checkout"]),
                 ))
 
+        # Refresh session cookies on existing monitors so newly imported
+        # cookies take effect without restarting the monitor.
+        for retailer, monitor in self._monitors.items():
+            self._load_monitor_cookies(retailer, monitor)
+
     def _get_monitor(self, retailer: str) -> BaseMonitor:
         if retailer not in self._monitors:
             monitor_class = get_monitor(retailer)
-            self._monitors[retailer] = monitor_class()
+            monitor = monitor_class()
+            self._monitors[retailer] = monitor
+            self._load_monitor_cookies(retailer, monitor)
         return self._monitors[retailer]
+
+    def _load_monitor_cookies(self, retailer: str, monitor: BaseMonitor):
+        """Load session cookies from any user into the monitor's httpx client.
+
+        Monitors are shared across users (one per retailer).  We pick the
+        first user that has stored session cookies for this retailer.
+        """
+        try:
+            conn = db.get_db()
+            row = conn.execute(
+                "SELECT cookies_json FROM retailer_sessions "
+                "WHERE retailer = ? AND cookies_json != '{}' "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (retailer,),
+            ).fetchone()
+            if row and row["cookies_json"]:
+                cookies = json.loads(row["cookies_json"])
+                if cookies:
+                    monitor.load_session_cookies(cookies)
+        except Exception as exc:
+            logger.debug("Could not load session cookies for %s monitor: %s", retailer, exc)
 
     def _get_discord_notifier(self, webhook: str) -> DiscordNotifier | None:
         if not webhook:
