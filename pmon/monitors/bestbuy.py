@@ -181,11 +181,27 @@ class BestBuyMonitor(BaseMonitor):
             except Exception as e:
                 logger.debug("Best Buy priceBlocks API failed for %s: %s", product_id, e)
 
+        # Ambiguous API states that may actually be invite-only products —
+        # fall through to page scraping so we can detect invite text.
+        _AMBIGUOUS_STATES = {"NOT_AVAILABLE"}
+
         # Combine: use fulfillment for status, priceBlocks for price
         if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
             if not fulfillment_result.price and price_result and price_result.price:
                 fulfillment_result.price = price_result.price
-            return fulfillment_result
+            # For ambiguous states, fall through to page scraping to check for invite signals
+            if fulfillment_result.error_message:
+                for amb in _AMBIGUOUS_STATES:
+                    if amb in fulfillment_result.error_message:
+                        logger.debug(
+                            "Best Buy: ambiguous state %s for %s, will scrape page for invite check",
+                            amb, url,
+                        )
+                        break
+                else:
+                    return fulfillment_result
+            else:
+                return fulfillment_result
         if price_result and price_result.status != StockStatus.UNKNOWN:
             return price_result
 
@@ -200,17 +216,34 @@ class BestBuyMonitor(BaseMonitor):
                 sku = self._extract_sku_from_html(html)
                 if sku:
                     logger.debug("Best Buy: resolved SKU %s from page HTML for %s", sku, url)
-                    # Retry APIs with the resolved SKU
-                    try:
-                        fulfillment_result = await self._check_fulfillment_api(url, product_name, sku, client)
-                        if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
-                            return fulfillment_result
-                    except Exception:
-                        pass
+                    # Retry APIs with the resolved SKU (but not if we're here
+                    # because of an ambiguous state — we specifically want the
+                    # page parse to check for invite text).
+                    if not fulfillment_result:
+                        try:
+                            fulfillment_result = await self._check_fulfillment_api(
+                                url, product_name, sku, client
+                            )
+                            if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
+                                return fulfillment_result
+                        except Exception:
+                            pass
 
-            return self._parse_page(url, product_name, html)
+            page_result = self._parse_page(url, product_name, html)
+
+            # If the page scrape found a definitive result, use it.
+            # If it returned UNKNOWN and we had a fulfillment result, prefer fulfillment.
+            if page_result.status != StockStatus.UNKNOWN:
+                return page_result
+            if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
+                return fulfillment_result
+            return page_result
         except Exception as e:
             logger.debug("Best Buy page scrape failed for %s: %s", url, e)
+
+        # If page scrape failed but we had a fulfillment result, return it
+        if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
+            return fulfillment_result
 
         return StockResult(
             url=url,
