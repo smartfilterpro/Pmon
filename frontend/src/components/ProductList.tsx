@@ -102,6 +102,11 @@ export default function ProductList({ products, refresh }: Props) {
                 <DollarSign size={12} />
                 {p.price || 'Price unavailable'}
               </span>
+              {p.stock_quantity != null && (
+                <span className="stock-qty-tag">
+                  {p.stock_quantity > 10 ? '10+' : p.stock_quantity} in stock
+                </span>
+              )}
             </div>
 
             {p.error && <p className="product-error">{p.error}</p>}

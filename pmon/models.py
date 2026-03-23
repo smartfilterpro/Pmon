@@ -56,6 +56,7 @@ class StockResult:
     image_url: str = ""
     timestamp: datetime = field(default_factory=_utcnow)
     error_message: str = ""
+    stock_quantity: int | None = None
 
 
 @dataclass

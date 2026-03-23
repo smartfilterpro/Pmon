@@ -594,15 +594,20 @@ class TargetMonitor(BaseMonitor):
         """Shared logic to check availability from fulfillment data.
 
         Checks multiple fields and structures that Target uses to indicate
-        stock status, in order of reliability.
+        stock status, in order of reliability.  Also extracts
+        available_to_promise_quantity so the dashboard can show stock counts.
         """
+        # --- Extract stock quantity from API response ---
+        stock_qty = self._extract_stock_quantity(fulfillment)
+
         def _in_stock(reason: str = "") -> StockResult:
             if reason:
-                logger.debug("Target stock: %s → IN_STOCK", reason)
+                logger.debug("Target stock: %s → IN_STOCK (qty=%s)", reason, stock_qty)
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.IN_STOCK, price=price, image_url=image_url,
+                stock_quantity=stock_qty,
             )
 
         # 1. is_out_of_stock_in_all_store_locations — explicit flag
@@ -636,13 +641,18 @@ class TargetMonitor(BaseMonitor):
                     if sub.get("availability_status") == "IN_STOCK":
                         return _in_stock(f"store_options.{sub_key}=IN_STOCK")
 
-        # NOTE: Previously checks 5-8 used catalog-level availability_status,
+        # 5. available_to_promise_quantity > 0 — catches restocks where
+        #    availability_status hasn't flipped yet (e.g. new/pre-order items)
+        if stock_qty is not None and stock_qty > 0:
+            return _in_stock(f"available_to_promise_quantity={stock_qty}")
+
+        # NOTE: Previously checks used catalog-level availability_status,
         # shipping reason_code (SHIP_ELIGIBLE), and broad JSON string searches.
         # These caused false IN_STOCK results because:
         #   - product.availability.availability_status is catalog-level, not inventory
         #   - SHIP_ELIGIBLE means the product type is shippable, not in stock
         #   - Broad string searches matched unrelated fields
-        # Only the fulfillment-specific checks above (1-4) are reliable.
+        # Only the fulfillment-specific checks above (1-5) are reliable.
 
         # Nothing found → OUT_OF_STOCK
         logger.debug(
@@ -655,7 +665,38 @@ class TargetMonitor(BaseMonitor):
             url=url, retailer=self.retailer_name,
             product_name=product_name,
             status=StockStatus.OUT_OF_STOCK, price=price, image_url=image_url,
+            stock_quantity=stock_qty,
         )
+
+    @staticmethod
+    def _extract_stock_quantity(fulfillment: dict) -> int | None:
+        """Sum available_to_promise_quantity across shipping and store options."""
+        total = 0
+        found = False
+
+        # Shipping / online quantity
+        shipping = fulfillment.get("shipping_options", {})
+        ship_qty = shipping.get("available_to_promise_quantity")
+        if ship_qty is not None:
+            try:
+                total += int(ship_qty)
+                found = True
+            except (ValueError, TypeError):
+                pass
+
+        # Store-level quantities (pickup / in-store)
+        store_options = fulfillment.get("store_options", [])
+        if isinstance(store_options, list):
+            for opt in store_options:
+                loc_qty = opt.get("location_available_to_promise_quantity")
+                if loc_qty is not None:
+                    try:
+                        total += int(loc_qty)
+                        found = True
+                    except (ValueError, TypeError):
+                        pass
+
+        return total if found else None
 
     async def _scrape_page(self, url: str, product_name: str, client) -> StockResult:
         resp = await client.get(
