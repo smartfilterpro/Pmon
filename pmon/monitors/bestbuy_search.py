@@ -57,7 +57,8 @@ class BestBuySearch:
         """Try to extract a Best Buy SKU from a URL or raw number.
 
         Best Buy URLs:
-          /site/product-name/1234567.p
+          Old: /site/product-name/1234567.p
+          New: /product/product-name/JJG2TLCK6H  (BSIN)
         """
         match = re.search(r"/(\d{7,8})\.p", text)
         if match:
@@ -66,6 +67,14 @@ class BestBuySearch:
         if re.fullmatch(r"\d{7,8}", stripped):
             return stripped
         return None
+
+    @staticmethod
+    def _extract_bsin(text: str) -> str | None:
+        """Extract BSIN from new Best Buy URL format."""
+        match = re.search(r"/product/[^/]+/([A-Za-z0-9]{6,12})(?:\?|$|#|/)", text)
+        if not match:
+            match = re.search(r"/product/[^/]+/([A-Za-z0-9]{6,12})\s*$", text)
+        return match.group(1) if match else None
 
     async def lookup_sku(self, sku: str) -> SearchResult | None:
         """Look up a single product by SKU.
@@ -176,6 +185,14 @@ class BestBuySearch:
         sku = self._extract_sku(keyword)
         if sku:
             result = await self.lookup_sku(sku)
+            if result:
+                return [result]
+            return []
+
+        # BSIN URL lookup — try using BSIN as SKU identifier
+        bsin = self._extract_bsin(keyword)
+        if bsin:
+            result = await self.lookup_sku(bsin)
             if result:
                 return [result]
             return []
