@@ -447,8 +447,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if retailer == "walmart":
             return await _test_walmart_session(user)
 
-        # --- Costco: Akamai blocks browser login; validate session cookies first,
-        # fall back to browser login if no cookies are imported.
+        # --- Costco: validate session cookies first, fall back to browser login ---
         if retailer == "costco":
             return await _test_costco_session(user, email, password)
 
@@ -585,9 +584,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     async def _test_costco_session(user: dict, email: str, password: str):
         """Test Costco account by validating imported session cookies via API.
 
-        Costco uses Akamai Bot Manager which blocks headless browser logins.
         First try validating session cookies via the /gettoken endpoint.
-        Fall back to browser-based login if no cookies are imported.
+        Fall back to browser-based login if no cookies are available.
         """
         import json as _json
         import httpx
@@ -595,13 +593,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         session = db.get_retailer_session(user["id"], "costco")
         if not session or not session.get("cookies_json"):
-            # Costco's Akamai Bot Manager blocks headless browser logins,
-            # so browser-based login is unreliable.  Ask user to import cookies.
-            return {
-                "ok": False,
-                "message": "No Costco session cookies found. Costco blocks automated logins — "
-                           "import cookies from your browser to test your session.",
-            }
+            # No cookies — try browser login
+            return await _test_login_browser("costco", email, password, user)
 
         try:
             cookies = _json.loads(session["cookies_json"])
@@ -609,10 +602,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return {"ok": False, "message": "Saved Costco session cookies are corrupted — re-import them"}
 
         if not cookies:
-            return {
-                "ok": False,
-                "message": "Costco session cookies are empty — re-import cookies from your browser.",
-            }
+            return await _test_login_browser("costco", email, password, user)
 
         try:
             async with httpx.AsyncClient(
