@@ -733,11 +733,16 @@ class RedSkySearch:
                 yield client
 
     async def lookup_tcin(self, tcin: str) -> SearchResult | None:
-        """Look up a single TCIN via the pdp_client_v1 endpoint.
+        """Look up a single TCIN via PDP endpoints.
 
-        This works for products that are delisted from search but still
-        have a product page.
+        Tries all three endpoints (product_fulfillment_v1, pdp_fulfillment_v1,
+        pdp_client_v1) in order, like the poller does.
         """
+        pdp_urls = [
+            RedSkyPoller.REDSKY_FULFILLMENT,
+            RedSkyPoller.REDSKY_PDP_FULFILLMENT,
+            RedSkyPoller.REDSKY_PDP_LEGACY,
+        ]
         async with self._get_client() as client:
             for api_key in self._api_keys:
                 params = {
@@ -761,25 +766,31 @@ class RedSkySearch:
                     "Origin": "https://www.target.com",
                     "x-application-name": "web",
                 }
-                try:
-                    resp = await client.get(
-                        RedSkyPoller.REDSKY_PDP_LEGACY, params=params, headers=headers,
-                    )
-                except httpx.HTTPError as exc:
-                    logger.warning("RedSkySearch lookup: network error: %s", exc)
-                    continue
 
-                if resp.status_code == 403:
-                    self._visitor_id = uuid.uuid4().hex
-                    continue
-                if resp.status_code != 200:
-                    logger.debug("RedSkySearch lookup: HTTP %d for TCIN %s", resp.status_code, tcin)
-                    continue
+                product = None
+                for pdp_url in pdp_urls:
+                    try:
+                        resp = await client.get(pdp_url, params=params, headers=headers)
+                    except httpx.HTTPError as exc:
+                        logger.warning("RedSkySearch lookup: network error on %s: %s", pdp_url.split("/")[-1], exc)
+                        continue
 
-                try:
-                    product = resp.json().get("data", {}).get("product", {})
-                except Exception:
-                    continue
+                    if resp.status_code == 403:
+                        self._visitor_id = uuid.uuid4().hex
+                        break  # rotate key
+                    if resp.status_code in (404, 410):
+                        logger.debug("RedSkySearch lookup: %d on %s for TCIN %s, trying next", resp.status_code, pdp_url.split("/")[-1], tcin)
+                        continue
+                    if resp.status_code != 200:
+                        logger.debug("RedSkySearch lookup: HTTP %d on %s for TCIN %s", resp.status_code, pdp_url.split("/")[-1], tcin)
+                        continue
+
+                    try:
+                        product = resp.json().get("data", {}).get("product", {})
+                    except Exception:
+                        continue
+                    if product:
+                        break
 
                 if not product:
                     continue
@@ -1106,10 +1117,103 @@ class RedSkySearch:
                 logger.debug("RedSkySearch: skipping unparseable item", exc_info=True)
                 continue
 
+        # Fallback: if standard parsing found nothing, recursively search
+        # the entire response for product-like dicts (e.g. cdui_orchestrations
+        # responses have a different structure).
+        if not results:
+            product_dicts = self._find_product_dicts(data)
+            if product_dicts:
+                logger.info("RedSkySearch: deep-scan found %d product dicts in non-standard response", len(product_dicts))
+                for item in product_dicts[: self.max_results]:
+                    try:
+                        tcin = str(item.get("tcin", ""))
+                        if not tcin:
+                            continue
+
+                        title = ""
+                        item_data = item.get("item", {})
+                        if isinstance(item_data, dict):
+                            desc = item_data.get("product_description", {})
+                            if isinstance(desc, dict):
+                                title = html_mod.unescape(desc.get("title", ""))
+
+                        price = ""
+                        price_info = item.get("price", {})
+                        if isinstance(price_info, dict):
+                            price = price_info.get("formatted_current_price", "")
+
+                        image_url = ""
+                        enrichment = (item_data if isinstance(item_data, dict) else {}).get("enrichment", {})
+                        if isinstance(enrichment, dict):
+                            images = enrichment.get("images", {})
+                            if isinstance(images, dict):
+                                image_url = images.get("primary_image_url", "")
+
+                        avail_status = ""
+                        is_purchasable = False
+                        fulfillment = item.get("fulfillment", {})
+                        if isinstance(fulfillment, dict):
+                            shipping = fulfillment.get("shipping_options", {})
+                            if isinstance(shipping, dict):
+                                avail_status = shipping.get("availability_status", "")
+                            if not avail_status:
+                                store_options = fulfillment.get("store_options", [])
+                                if isinstance(store_options, list):
+                                    for opt in store_options:
+                                        pickup = opt.get("order_pickup", {})
+                                        if isinstance(pickup, dict):
+                                            ps = pickup.get("availability_status", "")
+                                            if ps:
+                                                avail_status = ps
+                                                break
+                        product_avail = item.get("availability", {})
+                        if isinstance(product_avail, dict):
+                            is_purchasable = bool(product_avail.get("is_purchasable", False))
+
+                        sold_by = _extract_seller(item)
+                        street_date, release_label = _extract_release_info(item)
+
+                        results.append(SearchResult(
+                            tcin=tcin,
+                            title=title,
+                            price=price,
+                            url=f"https://www.target.com/p/-/A-{tcin}",
+                            image_url=image_url,
+                            availability_status=avail_status,
+                            is_purchasable=is_purchasable,
+                            sold_by=sold_by,
+                            street_date=street_date,
+                            release_label=release_label,
+                        ))
+                    except Exception:
+                        continue
+
         logger.debug(
             "RedSkySearch: found %d products for keyword query", len(results),
         )
         return results
+
+    @staticmethod
+    def _find_product_dicts(data: object, _depth: int = 0) -> list[dict]:
+        """Recursively find dicts that look like Target product objects.
+
+        A product dict has a 'tcin' key and at least one of 'item', 'price',
+        or 'fulfillment'.
+        """
+        if _depth > 12:
+            return []
+        found: list[dict] = []
+        if isinstance(data, dict):
+            tcin = data.get("tcin")
+            if tcin and any(k in data for k in ("item", "price", "fulfillment")):
+                found.append(data)
+            else:
+                for v in data.values():
+                    found.extend(RedSkySearch._find_product_dicts(v, _depth + 1))
+        elif isinstance(data, list):
+            for item in data:
+                found.extend(RedSkySearch._find_product_dicts(item, _depth + 1))
+        return found
 
     async def _enrich_results(self, results: list[SearchResult]) -> list[SearchResult]:
         """Enrich bare SearchResults (TCIN-only) with title, price, availability.
