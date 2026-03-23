@@ -2221,10 +2221,11 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 return {"ok": False, "message": msg}
 
             finally:
-                await page.close()
-                await context.close()
-                await browser.close()
-                await pw.stop()
+                for cleanup_coro in [page.close(), context.close(), browser.close(), pw.stop()]:
+                    try:
+                        await cleanup_coro
+                    except Exception:
+                        pass
 
         except Exception as e:
             err_str = str(e).lower()
@@ -2235,7 +2236,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 return {"ok": False, "message": msg}
             msg = f"Error testing {retailer_name}: {str(e)}"
             logger.error("Test login error for %s: %s", retailer_name, e, exc_info=True)
-            db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
+            try:
+                db.add_error_log(user["id"], "ERROR", "test-login", msg, "")
+            except Exception:
+                pass
             return {"ok": False, "message": msg}
 
     async def _page_has_value(page, selector: str, value: str) -> bool:
