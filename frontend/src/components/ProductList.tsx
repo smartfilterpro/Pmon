@@ -77,6 +77,14 @@ export default function ProductList({ products, refresh }: Props) {
     <div className="product-list">
       {products.map((p) => (
         <div key={p.url} className={`product-card status-${p.status}`}>
+          {p.image_url && (
+            <img
+              src={p.image_url}
+              alt=""
+              className="product-thumb"
+              loading="lazy"
+            />
+          )}
           <div className="product-main">
             <div className="product-header">
               <span className={`retailer-tag retailer-${p.retailer}`}>

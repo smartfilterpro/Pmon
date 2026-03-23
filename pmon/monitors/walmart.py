@@ -115,13 +115,25 @@ class WalmartMonitor(BaseMonitor):
             price_info = product.get("priceInfo", {})
             price = price_info.get("currentPrice", {}).get("priceString", "")
 
+            # Extract image
+            image_url = ""
+            image_info = product.get("imageInfo", {})
+            if isinstance(image_info, dict):
+                thumb = image_info.get("thumbnailUrl", "")
+                if thumb:
+                    image_url = thumb
+                else:
+                    all_images = image_info.get("allImages", [])
+                    if isinstance(all_images, list) and all_images:
+                        image_url = all_images[0].get("url", "") if isinstance(all_images[0], dict) else ""
+
             if availability == "IN_STOCK":
                 return StockResult(
                     url=url,
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.IN_STOCK,
-                    price=price,
+                    price=price, image_url=image_url,
                 )
             elif availability in ("OUT_OF_STOCK", "NOT_AVAILABLE"):
                 return StockResult(
@@ -129,7 +141,7 @@ class WalmartMonitor(BaseMonitor):
                     retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.OUT_OF_STOCK,
-                    price=price,
+                    price=price, image_url=image_url,
                 )
         except (KeyError, TypeError):
             pass

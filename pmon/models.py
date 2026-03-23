@@ -53,6 +53,7 @@ class StockResult:
     product_name: str
     status: StockStatus
     price: str = ""
+    image_url: str = ""
     timestamp: datetime = field(default_factory=_utcnow)
     error_message: str = ""
 

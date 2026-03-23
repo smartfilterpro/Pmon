@@ -23,6 +23,7 @@ from bs4 import BeautifulSoup
 
 from pmon.models import StockResult, StockStatus
 from .base import API_HEADERS, BaseMonitor
+from .redsky_poller import _extract_image_url
 
 logger = logging.getLogger(__name__)
 
@@ -413,11 +414,12 @@ class TargetMonitor(BaseMonitor):
             product = data.get("data", {}).get("product", {})
             fulfillment = product.get("fulfillment", {})
             price = self._extract_price_from_product(product)
+            image_url = _extract_image_url(product)
 
             logger.debug("Target fulfillment response keys: %s", list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A")
 
             # This endpoint returns detailed fulfillment with availability per method
-            return self._check_fulfillment_availability(url, product_name, product, fulfillment, price)
+            return self._check_fulfillment_availability(url, product_name, product, fulfillment, price, image_url)
         except (KeyError, TypeError) as e:
             return StockResult(
                 url=url, retailer=self.retailer_name,
@@ -573,10 +575,11 @@ class TargetMonitor(BaseMonitor):
             product = data.get("data", {}).get("product", {})
             fulfillment = product.get("fulfillment", {})
             price = self._extract_price_from_product(product)
+            image_url = _extract_image_url(product)
 
             logger.debug("Target pdp_client_v1 fulfillment data: %s", json.dumps(fulfillment, indent=2)[:2000])
 
-            return self._check_fulfillment_availability(url, product_name, product, fulfillment, price)
+            return self._check_fulfillment_availability(url, product_name, product, fulfillment, price, image_url)
         except (KeyError, TypeError) as e:
             return StockResult(
                 url=url, retailer=self.retailer_name,
@@ -586,6 +589,7 @@ class TargetMonitor(BaseMonitor):
 
     def _check_fulfillment_availability(
         self, url: str, product_name: str, product: dict, fulfillment: dict, price: str,
+        image_url: str = "",
     ) -> StockResult:
         """Shared logic to check availability from fulfillment data.
 
@@ -598,7 +602,7 @@ class TargetMonitor(BaseMonitor):
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
-                status=StockStatus.IN_STOCK, price=price,
+                status=StockStatus.IN_STOCK, price=price, image_url=image_url,
             )
 
         # 1. is_out_of_stock_in_all_store_locations — explicit flag
@@ -650,7 +654,7 @@ class TargetMonitor(BaseMonitor):
         return StockResult(
             url=url, retailer=self.retailer_name,
             product_name=product_name,
-            status=StockStatus.OUT_OF_STOCK, price=price,
+            status=StockStatus.OUT_OF_STOCK, price=price, image_url=image_url,
         )
 
     async def _scrape_page(self, url: str, product_name: str, client) -> StockResult:
@@ -684,6 +688,12 @@ class TargetMonitor(BaseMonitor):
                 ld_data = json.loads(script.string or "")
                 items = ld_data if isinstance(ld_data, list) else [ld_data]
                 for item in items:
+                    ld_image = ""
+                    img = item.get("image", "")
+                    if isinstance(img, list) and img:
+                        ld_image = img[0] if isinstance(img[0], str) else ""
+                    elif isinstance(img, str):
+                        ld_image = img
                     offers = item.get("offers", {})
                     offer_list = offers if isinstance(offers, list) else [offers]
                     for offer in offer_list:
@@ -697,12 +707,14 @@ class TargetMonitor(BaseMonitor):
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
                                 status=StockStatus.IN_STOCK, price=price,
+                                image_url=ld_image,
                             )
                         elif "OutOfStock" in avail:
                             return StockResult(
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
                                 status=StockStatus.OUT_OF_STOCK, price=price,
+                                image_url=ld_image,
                             )
             except (json.JSONDecodeError, TypeError, AttributeError):
                 continue
@@ -710,6 +722,7 @@ class TargetMonitor(BaseMonitor):
         # Strategy 2: __PRELOADED_QUERIES__ data from __TGT_DATA__
         # Target embeds this as: window.__TGT_DATA__ = deepFreeze(JSON.parse("..."))
         # where the JSON contains a __PRELOADED_QUERIES__ key with queries array.
+        page_image = ""
         preloaded = self._extract_preloaded_queries(html)
         if preloaded:
             # 2a: Check CDUI layout for OOS signals (adapt_pdp_oos placement)
@@ -720,6 +733,7 @@ class TargetMonitor(BaseMonitor):
             product_data = self._find_primary_product_in_preloaded(preloaded)
             if product_data:
                 price_from_preloaded = self._extract_price_from_product(product_data)
+                page_image = _extract_image_url(product_data)
 
                 # Check if the product-level fulfillment has availability data
                 # (product.fulfillment — not product.item.fulfillment which is just
@@ -732,7 +746,7 @@ class TargetMonitor(BaseMonitor):
                     )
                 ):
                     result = self._check_fulfillment_availability(
-                        url, product_name, product_data, fulfillment, price_from_preloaded,
+                        url, product_name, product_data, fulfillment, price_from_preloaded, page_image,
                     )
                     if result.status != StockStatus.UNKNOWN:
                         return result
@@ -744,6 +758,7 @@ class TargetMonitor(BaseMonitor):
                     url=url, retailer=self.retailer_name,
                     product_name=product_name,
                     status=StockStatus.OUT_OF_STOCK, price=price_from_preloaded,
+                    image_url=page_image,
                 )
 
         # Try to get price from embedded data for remaining strategies
@@ -758,6 +773,7 @@ class TargetMonitor(BaseMonitor):
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.OUT_OF_STOCK, price=page_price,
+                image_url=page_image,
             )
 
         # Strategy 5: "Add to cart" button presence
@@ -769,6 +785,7 @@ class TargetMonitor(BaseMonitor):
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
                 status=StockStatus.IN_STOCK, price=page_price,
+                image_url=page_image,
             )
 
         return StockResult(
@@ -776,4 +793,5 @@ class TargetMonitor(BaseMonitor):
             product_name=product_name,
             status=StockStatus.UNKNOWN,
             error_message="Could not determine stock status from page",
+            image_url=page_image,
         )

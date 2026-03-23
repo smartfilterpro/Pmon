@@ -164,6 +164,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "auto_checkout": bool(p["auto_checkout"]),
                 "status": stock.status.value if stock else "unknown",
                 "price": stock.price if stock else "",
+                "image_url": stock.image_url if stock else "",
                 "timestamp": stock.timestamp.isoformat() if stock else "",
                 "error": stock.error_message if stock else "",
             })
