@@ -434,7 +434,7 @@ class BestBuyMonitor(BaseMonitor):
             )
 
         # Check for invitation-only or reservation system (Best Buy's Pokemon/high-demand system)
-        invite = soup.find(string=re.compile(r"(get your invite|invitation|reservation process)", re.I))
+        invite = soup.find(string=re.compile(r"(get your invite|ask for an invite|invitation|reservation process|exclusive sales event)", re.I))
         if invite:
             return StockResult(
                 url=url,
