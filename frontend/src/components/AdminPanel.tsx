@@ -15,6 +15,8 @@ export default function AdminPanel() {
       const [u, p] = await Promise.all([getAdminUsers(), getPendingUsers()]);
       setUsers(u);
       setPending(p);
+    } catch {
+      // Auth errors are handled globally by apiFetch
     } finally {
       setLoading(false);
     }

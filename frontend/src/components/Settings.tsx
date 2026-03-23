@@ -63,7 +63,7 @@ export default function Settings({ user, onOtpRequired }: Props) {
   const [totpSuccess, setTotpSuccess] = useState('');
 
   const refreshSessions = () => {
-    getSessions().then(data => setSessions(data.sessions || {}));
+    getSessions().then(data => setSessions(data.sessions || {})).catch(() => {});
   };
 
   useEffect(() => {
@@ -72,8 +72,8 @@ export default function Settings({ user, onOtpRequired }: Props) {
       setDiscordWebhook(data.settings.discord_webhook || '');
       setSpendLimit(data.settings.spend_limit || 0);
       setApiKey(data.settings.api_key || '');
-    });
-    getAccounts().then(data => setAccounts(data.accounts || {}));
+    }).catch(() => {});
+    getAccounts().then(data => setAccounts(data.accounts || {})).catch(() => {});
     refreshSessions();
     // Refresh TOTP status from server (user prop may be stale)
     checkAuth().then(u => { if (u) setTotpEnabled(u.totp_enabled); });
