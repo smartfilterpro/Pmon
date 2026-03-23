@@ -9,6 +9,8 @@ function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
+let _loggingOut = false;
+
 async function apiFetch(path: string, opts: RequestInit = {}) {
   const resp = await fetch(`${API}${path}`, {
     ...opts,
@@ -17,10 +19,14 @@ async function apiFetch(path: string, opts: RequestInit = {}) {
       ...authHeaders(),
       ...(opts.headers || {}),
     },
+    cache: 'no-store',
   });
   if (resp.status === 401) {
-    localStorage.removeItem('pmon_token');
-    window.location.reload();
+    if (!_loggingOut) {
+      _loggingOut = true;
+      localStorage.removeItem('pmon_token');
+      window.location.reload();
+    }
     throw new Error('Unauthorized');
   }
   return resp;
