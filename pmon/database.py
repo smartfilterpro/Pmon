@@ -183,6 +183,11 @@ def _migrate(conn: sqlite3.Connection):
     if "price_amount" not in checkout_cols:
         conn.execute("ALTER TABLE checkout_log ADD COLUMN price_amount REAL DEFAULT 0")
 
+    # Add last_in_stock_at to products for tracking when a product was last seen in stock
+    product_cols = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+    if "last_in_stock_at" not in product_cols:
+        conn.execute("ALTER TABLE products ADD COLUMN last_in_stock_at TEXT")
+
     conn.commit()
 
 
@@ -327,6 +332,16 @@ def update_product_quantity(user_id: int, url: str, quantity: int):
         (quantity, user_id, url),
     )
     db.commit()
+
+
+def update_last_in_stock(url: str):
+    """Update last_in_stock_at for all rows matching *url* (across all users)."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE products SET last_in_stock_at = datetime('now') WHERE url = ?",
+        (url,),
+    )
+    conn.commit()
 
 
 # --- Retailer account operations ---

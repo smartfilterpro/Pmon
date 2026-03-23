@@ -156,6 +156,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         for p in products:
             # Get live stock status if available
             stock = engine.state.products.get(p["url"])
+            last_in_stock = p.get("last_in_stock_at") or ""
+            if last_in_stock and not last_in_stock.endswith(("Z", "+00:00")):
+                last_in_stock = last_in_stock.replace(" ", "T") + "Z"
             product_list.append({
                 "url": p["url"],
                 "name": p["name"],
@@ -167,6 +170,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "image_url": stock.image_url if stock else "",
                 "timestamp": stock.timestamp.isoformat() if stock else "",
                 "error": stock.error_message if stock else "",
+                "last_in_stock": last_in_stock,
             })
 
         checkouts = db.get_checkout_log(user_id, limit=30)

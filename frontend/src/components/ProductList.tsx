@@ -119,6 +119,11 @@ export default function ProductList({ products, refresh }: Props) {
             <p className="product-time">
               {p.timestamp ? `Last checked: ${new Date(p.timestamp).toLocaleTimeString()}` : 'Not checked yet'}
             </p>
+            {p.last_in_stock && (
+              <p className="product-time last-in-stock-time">
+                Last in stock: {new Date(p.last_in_stock).toLocaleString()}
+              </p>
+            )}
           </div>
 
           <div className="product-actions">

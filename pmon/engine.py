@@ -194,6 +194,7 @@ class PmonEngine:
         self.state.update_stock(result)
 
         if result.status == StockStatus.IN_STOCK:
+            db.update_last_in_stock(product.url)
             if product.url not in self._notified:
                 self._notified.add(product.url)
                 logger.info(f"IN STOCK: {product.name} at {product.retailer}")
