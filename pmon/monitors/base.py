@@ -68,6 +68,9 @@ class BaseMonitor(ABC):
     # rate-limit (e.g. Walmart) override this with a higher value.
     _min_request_interval: float = 2.0
 
+    # Domain used for setting cookies on the httpx client.
+    _cookie_domain: str = ""
+
     def __init__(self):
         self._client: httpx.AsyncClient | None = None
         # Timestamp (monotonic) of the last request we made
@@ -76,6 +79,28 @@ class BaseMonitor(ABC):
         self._rate_limit_until: float = 0.0
         # Consecutive 429 count — drives exponential backoff
         self._consecutive_429s: int = 0
+        # Session cookies loaded from the database ({name: value})
+        self._session_cookies: dict[str, str] = {}
+
+    def load_session_cookies(self, cookies: dict[str, str]):
+        """Load session cookies and apply them to the current client.
+
+        Called by the engine on startup and by the dashboard when cookies
+        are imported.  Triggers a client reset so the new cookies take effect.
+        Skips reset if cookies haven't changed.
+        """
+        new_cookies = dict(cookies)
+        if new_cookies == self._session_cookies:
+            return  # No change — skip client reset
+        self._session_cookies = new_cookies
+        # Force client recreation so cookies are applied on next request
+        if self._client and not self._client.is_closed:
+            asyncio.get_event_loop().create_task(self._client.aclose())
+        self._client = None
+        logger.info(
+            "%s: loaded %d session cookies for monitoring",
+            self.retailer_name, len(cookies),
+        )
 
     async def get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -85,6 +110,14 @@ class BaseMonitor(ABC):
                 timeout=httpx.Timeout(15.0),
                 http2=True,  # Target/Walmart expect h2; plain h1.1 is a bot signal
             )
+            # Apply session cookies if available
+            if self._session_cookies and self._cookie_domain:
+                for name, value in self._session_cookies.items():
+                    self._client.cookies.set(name, str(value), domain=self._cookie_domain)
+                logger.debug(
+                    "%s: applied %d session cookies to monitor client",
+                    self.retailer_name, len(self._session_cookies),
+                )
         return self._client
 
     async def close(self):

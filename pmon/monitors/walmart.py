@@ -29,6 +29,7 @@ class WalmartMonitor(BaseMonitor):
     retailer_name = "walmart"
     # Walmart aggressively rate-limits — enforce at least 5s between requests
     _min_request_interval: float = 5.0
+    _cookie_domain: str = ".walmart.com"
 
     def _extract_product_id(self, url: str) -> str | None:
         """Extract product/item ID from Walmart URL.
@@ -62,18 +63,20 @@ class WalmartMonitor(BaseMonitor):
         if resp.status_code == 429:
             retry_after = _parse_retry_after(resp)
             self.record_rate_limit(retry_after)
+            hint = "" if self._session_cookies else " Import session cookies to reduce rate limiting."
             return StockResult(
                 url=url, retailer=self.retailer_name, product_name=product_name,
                 status=StockStatus.ERROR,
-                error_message=f"Rate limited by Walmart (429). Cooling down for {self.rate_limit_remaining():.0f}s.",
+                error_message=f"Rate limited by Walmart (429). Cooling down for {self.rate_limit_remaining():.0f}s.{hint}",
             )
 
         if resp.status_code == 403:
             logger.warning("Walmart: 403 on product page — PerimeterX blocked")
+            hint = " Re-import fresh cookies." if self._session_cookies else " Import session cookies to improve reliability."
             return StockResult(
                 url=url, retailer=self.retailer_name, product_name=product_name,
                 status=StockStatus.ERROR,
-                error_message="Blocked by Walmart (403). Import session cookies to improve reliability.",
+                error_message=f"Blocked by Walmart (403).{hint}",
             )
 
         resp.raise_for_status()
@@ -216,10 +219,11 @@ class WalmartMonitor(BaseMonitor):
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp)
                 self.record_rate_limit(retry_after)
+                hint = "" if self._session_cookies else " Import session cookies to reduce rate limiting."
                 return StockResult(
                     url=url, retailer=self.retailer_name, product_name=product_name,
                     status=StockStatus.ERROR,
-                    error_message=f"Rate limited by Walmart (429). Cooling down for {self.rate_limit_remaining():.0f}s.",
+                    error_message=f"Rate limited by Walmart (429). Cooling down for {self.rate_limit_remaining():.0f}s.{hint}",
                 )
 
             if resp.status_code != 200:
