@@ -2829,7 +2829,7 @@ class CheckoutEngine:
             await wait_for_page_ready(page, timeout=10000)
 
             # Check for invitation system — use vision as backup detector
-            invite_text = await page.locator('text=/invitation/i').count()
+            invite_text = await page.locator('text=/invitation|ask for an invite|exclusive sales event/i').count()
             if invite_text > 0:
                 return CheckoutResult(
                     url=url,
