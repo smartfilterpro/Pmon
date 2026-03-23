@@ -506,6 +506,62 @@ def _extract_release_info(product: dict) -> tuple[str, str]:
     return street_date, label
 
 
+def _extract_image_url(product: dict) -> str:
+    """Extract the primary image URL from a product dict.
+
+    Searches multiple paths since different API responses (redsky search,
+    pdp_client_v1, cdui_orchestrations) nest images differently.
+    """
+    # Path 1: item.enrichment.images.primary_image_url (classic redsky)
+    item = product.get("item", {})
+    if isinstance(item, dict):
+        enrichment = item.get("enrichment", {})
+        if isinstance(enrichment, dict):
+            images = enrichment.get("images", {})
+            if isinstance(images, dict):
+                url = images.get("primary_image_url", "")
+                if url:
+                    return url
+
+    # Path 2: top-level images or primary_image_url
+    images = product.get("images", {})
+    if isinstance(images, dict):
+        url = images.get("primary_image_url", "") or images.get("primaryUri", "")
+        if url:
+            return url
+    if isinstance(images, list) and images:
+        first = images[0]
+        if isinstance(first, dict):
+            url = first.get("base_url", "") or first.get("url", "") or first.get("uri", "")
+            if url:
+                return url
+        elif isinstance(first, str):
+            return first
+
+    # Path 3: enrichment at top level
+    enrichment = product.get("enrichment", {})
+    if isinstance(enrichment, dict):
+        images = enrichment.get("images", {})
+        if isinstance(images, dict):
+            url = images.get("primary_image_url", "")
+            if url:
+                return url
+
+    # Path 4: image_url / primary_image_url / primaryUri at top level
+    for key in ("image_url", "primary_image_url", "primaryUri", "imageUri"):
+        url = product.get(key, "")
+        if url:
+            return url
+
+    # Path 5: brute-force scan for a Target scene7 image URL
+    product_str = json.dumps(product)
+    scene7_match = re.search(r'"(https?://target\.scene7\.com/is/image/[^"]+)"', product_str)
+    if scene7_match:
+        return scene7_match.group(1)
+
+    return ""
+
+
 def _extract_seller(product: dict) -> str:
     """Determine who sells a Target product by scanning the full product dict.
 
@@ -808,13 +864,7 @@ class RedSkySearch:
                 if isinstance(price_info, dict):
                     price = price_info.get("formatted_current_price", "")
 
-                image_url = ""
-                if isinstance(item_data, dict):
-                    enrichment = item_data.get("enrichment", {})
-                    if isinstance(enrichment, dict):
-                        images = enrichment.get("images", {})
-                        if isinstance(images, dict):
-                            image_url = images.get("primary_image_url", "")
+                image_url = _extract_image_url(product)
 
                 avail_status = ""
                 is_purchasable = False
@@ -1053,12 +1103,7 @@ class RedSkySearch:
                 url = f"https://www.target.com/p/-/A-{tcin}"
 
                 # Image
-                image_url = ""
-                enrichment = item.get("item", {}).get("enrichment", {})
-                if isinstance(enrichment, dict):
-                    images = enrichment.get("images", {})
-                    if isinstance(images, dict):
-                        image_url = images.get("primary_image_url", "")
+                image_url = _extract_image_url(item)
 
                 # Availability — use fulfillment-level status only.
                 # product.availability.availability_status is catalog-level
@@ -1142,12 +1187,7 @@ class RedSkySearch:
                         if isinstance(price_info, dict):
                             price = price_info.get("formatted_current_price", "")
 
-                        image_url = ""
-                        enrichment = (item_data if isinstance(item_data, dict) else {}).get("enrichment", {})
-                        if isinstance(enrichment, dict):
-                            images = enrichment.get("images", {})
-                            if isinstance(images, dict):
-                                image_url = images.get("primary_image_url", "")
+                        image_url = _extract_image_url(item)
 
                         avail_status = ""
                         is_purchasable = False
