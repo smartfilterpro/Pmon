@@ -170,6 +170,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "image_url": stock.image_url if stock else "",
                 "timestamp": stock.timestamp.isoformat() if stock else "",
                 "error": stock.error_message if stock else "",
+                "stock_quantity": stock.stock_quantity if stock else None,
                 "last_in_stock": last_in_stock,
             })
 

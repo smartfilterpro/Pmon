@@ -9,6 +9,7 @@ export interface Product {
   image_url: string;
   timestamp: string;
   error: string;
+  stock_quantity: number | null;
   last_in_stock: string;
 }
 
