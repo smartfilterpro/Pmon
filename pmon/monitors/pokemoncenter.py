@@ -101,18 +101,21 @@ class PokemonCenterMonitor(BaseMonitor):
                         availability = offers[0].get("availability", "")
 
                     price = self._extract_price_from_offers(offers)
+                    ld_image = self._extract_ld_image(ld)
 
                     if "InStock" in availability:
                         return StockResult(
                             url=url, retailer=self.retailer_name,
                             product_name=product_name,
                             status=StockStatus.IN_STOCK, price=price,
+                            image_url=ld_image,
                         )
                     elif "OutOfStock" in availability or "SoldOut" in availability:
                         return StockResult(
                             url=url, retailer=self.retailer_name,
                             product_name=product_name,
                             status=StockStatus.OUT_OF_STOCK, price=price,
+                            image_url=ld_image,
                         )
                 except (json.JSONDecodeError, StopIteration):
                     continue
@@ -135,20 +138,26 @@ class PokemonCenterMonitor(BaseMonitor):
                         price = product.get("price", "")
                         if isinstance(price, (int, float)):
                             price = f"${price:.2f}"
+                        nd_image = ""
+                        images = product.get("images", product.get("image", []))
+                        if isinstance(images, list) and images:
+                            nd_image = images[0] if isinstance(images[0], str) else images[0].get("url", "")
+                        elif isinstance(images, str):
+                            nd_image = images
 
                         if in_stock is True or "InStock" in str(avail):
                             return StockResult(
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
                                 status=StockStatus.IN_STOCK,
-                                price=str(price),
+                                price=str(price), image_url=nd_image,
                             )
                         elif in_stock is False or "OutOfStock" in str(avail):
                             return StockResult(
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
                                 status=StockStatus.OUT_OF_STOCK,
-                                price=str(price),
+                                price=str(price), image_url=nd_image,
                             )
                 except (json.JSONDecodeError, AttributeError):
                     pass
@@ -239,6 +248,14 @@ class PokemonCenterMonitor(BaseMonitor):
                 status=StockStatus.ERROR,
                 error_message=str(exc),
             )
+
+    @staticmethod
+    def _extract_ld_image(ld: dict) -> str:
+        """Extract image URL from a JSON-LD Product object."""
+        img = ld.get("image", "")
+        if isinstance(img, list) and img:
+            return img[0] if isinstance(img[0], str) else img[0].get("url", "")
+        return img if isinstance(img, str) else ""
 
     def _extract_price_from_offers(self, offers) -> str:
         """Extract price from JSON-LD offers."""

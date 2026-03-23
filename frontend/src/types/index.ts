@@ -6,6 +6,7 @@ export interface Product {
   auto_checkout: boolean;
   status: 'in_stock' | 'out_of_stock' | 'unknown' | 'error';
   price: string;
+  image_url: string;
   timestamp: string;
   error: string;
 }

@@ -21,6 +21,16 @@
 .product-card.status-error { border-left-color: var(--orange); }
 .product-card.status-unknown { border-left-color: var(--text-secondary); }
 
+.product-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  flex-shrink: 0;
+  margin-right: 14px;
+}
+
 .product-main { flex: 1; min-width: 0; }
 
 .product-header {
@@ -208,6 +218,12 @@
     align-items: flex-start;
     padding: 14px;
     gap: 10px;
+  }
+  .product-thumb {
+    width: 48px;
+    height: 48px;
+    margin-right: 0;
+    margin-bottom: 4px;
   }
   .product-name {
     font-size: 14px;
