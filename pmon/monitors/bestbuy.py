@@ -94,36 +94,92 @@ class BestBuyMonitor(BaseMonitor):
             logger.debug("Best Buy: failed to resolve SKU from page %s: %s", url, e)
         return None
 
+    def _extract_sku_from_html(self, html: str) -> str | None:
+        """Extract numeric SKU from already-fetched HTML content.
+
+        Same extraction logic as _resolve_sku_from_page but without fetching.
+        """
+        for pattern in (
+            r'"skuId"\s*:\s*"(\d{7,8})"',
+            r'"sku"\s*:\s*"(\d{7,8})"',
+            r'SKU:\s*(\d{7,8})',
+            r'<meta[^>]*content="(\d{7,8})"[^>]*name="[^"]*sku[^"]*"',
+            r'/(\d{7,8})\.p',
+            r'data-sku-id="(\d{7,8})"',
+            r'"productId"\s*:\s*"(\d{7,8})"',
+            r'"skuID"\s*:\s*"(\d{7,8})"',
+        ):
+            match = re.search(pattern, html, re.I)
+            if match:
+                return match.group(1)
+        return None
+
+    async def _resolve_sku_from_bsin_api(self, bsin: str) -> str | None:
+        """Try to resolve a numeric SKU from a BSIN via Best Buy's internal API.
+
+        Best Buy's product pages make XHR calls that map BSINs to SKUs.
+        We try the pricing/product API endpoints that accept BSINs.
+        """
+        client = await self.get_client()
+
+        # Try the product details API which may accept BSIN
+        try:
+            resp = await client.get(
+                f"https://www.bestbuy.com/api/3.0/priceBlocks",
+                params={"skus": bsin},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    sku_info = item.get("sku", {})
+                    sku_id = sku_info.get("skuId", "")
+                    if sku_id and re.fullmatch(r"\d{7,8}", str(sku_id)):
+                        return str(sku_id)
+        except Exception as e:
+            logger.debug("Best Buy: BSIN→SKU via priceBlocks failed for %s: %s", bsin, e)
+
+        return None
+
     async def check_stock(self, url: str, product_name: str) -> StockResult:
         sku = self._extract_sku(url)
+        bsin = self._extract_bsin(url) if not sku else None
 
-        # For new-format URLs, resolve SKU from the page
-        if not sku and self._extract_bsin(url):
+        # For new-format URLs, resolve SKU from the page or via API
+        if not sku and bsin:
             sku = await self._resolve_sku_from_page(url)
             if sku:
                 logger.debug("Best Buy: resolved SKU %s from BSIN URL %s", sku, url)
+            else:
+                sku = await self._resolve_sku_from_bsin_api(bsin)
+                if sku:
+                    logger.debug("Best Buy: resolved SKU %s from BSIN API for %s", sku, url)
+
+        # Use BSIN as product identifier when numeric SKU is unavailable.
+        # Best Buy's fulfillment API may accept BSINs directly.
+        product_id = sku or bsin
 
         client = await self.get_client()
 
         # Primary: fulfillment GraphQL endpoint (works with new PDP)
         fulfillment_result = None
-        if sku:
+        if product_id:
             try:
-                fulfillment_result = await self._check_fulfillment_api(url, product_name, sku, client)
+                fulfillment_result = await self._check_fulfillment_api(url, product_name, product_id, client)
             except Exception as e:
-                logger.debug("Best Buy fulfillment API failed for %s: %s", sku, e)
+                logger.debug("Best Buy fulfillment API failed for %s: %s", product_id, e)
 
         # priceBlocks API — used for price even when fulfillment already got status
         price_result = None
-        if sku:
+        if product_id:
             try:
                 api_url = "https://www.bestbuy.com/api/3.0/priceBlocks"
-                params = {"skus": sku}
+                params = {"skus": product_id}
                 resp = await client.get(api_url, params=params)
                 if resp.status_code == 200:
                     price_result = self._parse_api_response(url, product_name, resp.json())
             except Exception as e:
-                logger.debug("Best Buy priceBlocks API failed for %s: %s", sku, e)
+                logger.debug("Best Buy priceBlocks API failed for %s: %s", product_id, e)
 
         # Combine: use fulfillment for status, priceBlocks for price
         if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
@@ -137,7 +193,22 @@ class BestBuyMonitor(BaseMonitor):
         try:
             resp = await client.get(url)
             resp.raise_for_status()
-            return self._parse_page(url, product_name, resp.text)
+            html = resp.text
+
+            # If we still don't have a SKU, try one more extraction from the fetched HTML
+            if not sku and bsin:
+                sku = self._extract_sku_from_html(html)
+                if sku:
+                    logger.debug("Best Buy: resolved SKU %s from page HTML for %s", sku, url)
+                    # Retry APIs with the resolved SKU
+                    try:
+                        fulfillment_result = await self._check_fulfillment_api(url, product_name, sku, client)
+                        if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
+                            return fulfillment_result
+                    except Exception:
+                        pass
+
+            return self._parse_page(url, product_name, html)
         except Exception as e:
             logger.debug("Best Buy page scrape failed for %s: %s", url, e)
 
@@ -146,7 +217,7 @@ class BestBuyMonitor(BaseMonitor):
             retailer=self.retailer_name,
             product_name=product_name,
             status=StockStatus.UNKNOWN,
-            error_message=f"Could not determine stock status (SKU: {sku or 'unknown'})",
+            error_message=f"Could not determine stock status (SKU: {sku or bsin or 'unknown'})",
         )
 
     async def _check_fulfillment_api(
