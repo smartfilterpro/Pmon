@@ -447,6 +447,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if retailer == "costco":
             return await _test_costco_session(user, email, password)
 
+        # --- Pokemon Center: WAF blocks headless browsers; validate session first ---
+        if retailer == "pokemoncenter":
+            return await _test_pokemoncenter_session(user, email, password)
+
         # --- All other retailers: use Playwright browser automation ---
         return await _test_login_browser(retailer, email, password, user)
 
@@ -679,6 +683,78 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         except Exception as exc:
             logger.error("Costco session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Costco session: {exc}"}
+
+    async def _test_pokemoncenter_session(user: dict, email: str, password: str):
+        """Test Pokemon Center account by validating session cookies via API.
+
+        Pokemon Center uses aggressive WAF/bot detection that blocks headless
+        browsers on the homepage itself.  Validate session cookies via the
+        profile API endpoint instead.  Fall back to browser login if no
+        cookies are imported.
+        """
+        import json as _json
+        import httpx
+        from pmon.monitors.base import DEFAULT_HEADERS
+
+        session = db.get_retailer_session(user["id"], "pokemoncenter")
+        if not session or not session.get("cookies_json"):
+            # No cookies — try browser login as last resort
+            return await _test_login_browser("pokemoncenter", email, password, user)
+
+        try:
+            cookies = _json.loads(session["cookies_json"])
+        except Exception:
+            return {"ok": False, "message": "Saved Pokemon Center session cookies are corrupted — re-import them"}
+
+        if not cookies:
+            return await _test_login_browser("pokemoncenter", email, password, user)
+
+        try:
+            async with httpx.AsyncClient(
+                headers=DEFAULT_HEADERS,
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0),
+                http2=True,
+            ) as client:
+                for name, value in cookies.items():
+                    client.cookies.set(name, str(value), domain=".pokemoncenter.com")
+
+                # Check session via profile API (used by the checkout engine
+                # as a login-confirmation signal)
+                resp = await client.get(
+                    "https://www.pokemoncenter.com/tpci-ecommweb-api/profile/data",
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Accept": "application/json",
+                        "Referer": "https://www.pokemoncenter.com/",
+                    },
+                )
+
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        # Profile endpoint returns user data when authenticated
+                        if data and (isinstance(data, dict) and (data.get("email") or data.get("firstName") or data.get("id") or data.get("profile"))):
+                            return {"ok": True, "message": f"Pokemon Center session valid — {len(cookies)} cookies active"}
+                    except Exception:
+                        pass
+                    # 200 but no profile data — could still be valid (empty profile response)
+                    return {"ok": True, "message": f"Pokemon Center session valid — {len(cookies)} cookies active"}
+
+                if resp.status_code in (401, 403):
+                    return {
+                        "ok": False,
+                        "message": "Pokemon Center session expired or blocked. Re-import fresh cookies from your browser.",
+                    }
+
+                return {
+                    "ok": False,
+                    "message": f"Pokemon Center session check returned HTTP {resp.status_code}. Try re-importing cookies.",
+                }
+
+        except Exception as exc:
+            logger.error("Pokemon Center session validation error: %s", exc)
+            return {"ok": False, "message": f"Could not validate Pokemon Center session: {exc}"}
 
     async def _bestbuy_test_verification(page, user: dict, email_sel: str, pass_sel: str,
                                           vision_fill, vision_click, vision_read_page):
