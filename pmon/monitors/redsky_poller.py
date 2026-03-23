@@ -1158,19 +1158,36 @@ class RedSkySearch:
                 is_purchasable = False
                 fulfillment = item.get("fulfillment", {})
                 if isinstance(fulfillment, dict):
-                    shipping = fulfillment.get("shipping_options", {})
-                    if isinstance(shipping, dict):
-                        avail_status = shipping.get("availability_status", "")
-                    # Check store pickup availability as fallback
+                    # 1. Explicit OOS flag
+                    if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
+                        avail_status = "IN_STOCK"
+                    # 2. shipping_options.availability_status
                     if not avail_status:
+                        shipping = fulfillment.get("shipping_options", {})
+                        if isinstance(shipping, dict):
+                            avail_status = shipping.get("availability_status", "")
+                    # 3. availability_status_v2
+                    if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+                        for method_key in ("shipping_options", "scheduled_delivery"):
+                            method = fulfillment.get(method_key, {})
+                            if isinstance(method, dict):
+                                v2 = method.get("availability_status_v2", [])
+                                if isinstance(v2, list):
+                                    for entry in v2:
+                                        if isinstance(entry, dict) and entry.get("is_available"):
+                                            avail_status = "IN_STOCK"
+                                            break
+                    # 4. store_options — pickup / ship_to_store
+                    if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
                         store_options = fulfillment.get("store_options", [])
                         if isinstance(store_options, list):
                             for opt in store_options:
-                                pickup = opt.get("order_pickup", {})
-                                if isinstance(pickup, dict):
-                                    ps = pickup.get("availability_status", "")
-                                    if ps:
-                                        avail_status = ps
+                                if not isinstance(opt, dict):
+                                    continue
+                                for sub_key in ("order_pickup", "ship_to_store", "in_store_only"):
+                                    sub = opt.get(sub_key, {})
+                                    if isinstance(sub, dict) and sub.get("availability_status") == "IN_STOCK":
+                                        avail_status = "IN_STOCK"
                                         break
                 product_avail = item.get("availability", {})
                 if isinstance(product_avail, dict):
@@ -1239,18 +1256,32 @@ class RedSkySearch:
                         is_purchasable = False
                         fulfillment = item.get("fulfillment", {})
                         if isinstance(fulfillment, dict):
-                            shipping = fulfillment.get("shipping_options", {})
-                            if isinstance(shipping, dict):
-                                avail_status = shipping.get("availability_status", "")
+                            if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
+                                avail_status = "IN_STOCK"
                             if not avail_status:
+                                shipping = fulfillment.get("shipping_options", {})
+                                if isinstance(shipping, dict):
+                                    avail_status = shipping.get("availability_status", "")
+                            if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+                                for method_key in ("shipping_options", "scheduled_delivery"):
+                                    method = fulfillment.get(method_key, {})
+                                    if isinstance(method, dict):
+                                        v2 = method.get("availability_status_v2", [])
+                                        if isinstance(v2, list):
+                                            for entry in v2:
+                                                if isinstance(entry, dict) and entry.get("is_available"):
+                                                    avail_status = "IN_STOCK"
+                                                    break
+                            if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
                                 store_options = fulfillment.get("store_options", [])
                                 if isinstance(store_options, list):
                                     for opt in store_options:
-                                        pickup = opt.get("order_pickup", {})
-                                        if isinstance(pickup, dict):
-                                            ps = pickup.get("availability_status", "")
-                                            if ps:
-                                                avail_status = ps
+                                        if not isinstance(opt, dict):
+                                            continue
+                                        for sub_key in ("order_pickup", "ship_to_store", "in_store_only"):
+                                            sub = opt.get(sub_key, {})
+                                            if isinstance(sub, dict) and sub.get("availability_status") == "IN_STOCK":
+                                                avail_status = "IN_STOCK"
                                                 break
                         product_avail = item.get("availability", {})
                         if isinstance(product_avail, dict):
