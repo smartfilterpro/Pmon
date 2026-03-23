@@ -206,10 +206,10 @@ class RedSkyPoller:
                 self._consecutive_errors = 0  # reset on success
 
                 current_status = product_data.availability_status
-                is_available = (
-                    current_status == "IN_STOCK"
-                    or product_data.is_purchasable
-                )
+                # Only fulfillment-level status determines availability.
+                # is_purchasable is catalog-level (product CAN be sold) and
+                # does NOT reflect actual inventory.
+                is_available = current_status in ("IN_STOCK", "LIMITED_STOCK")
 
                 # Log state transitions
                 if current_status != self._last_status:
@@ -340,26 +340,52 @@ class RedSkyPoller:
         avail_status = "UNKNOWN"
         is_purchasable = False
 
-        # 1. shipping_options.availability_status
-        shipping = fulfillment.get("shipping_options", {})
-        if isinstance(shipping, dict):
-            s = shipping.get("availability_status", "")
-            if s:
-                avail_status = s
+        # Use fulfillment-specific checks only — catalog-level
+        # availability_status and broad JSON string scans cause false
+        # IN_STOCK results (see target.py _check_fulfillment_availability).
 
-        # 2. product-level availability
+        # 1. is_out_of_stock_in_all_store_locations — explicit flag
+        if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
+            avail_status = "IN_STOCK"
+
+        # 2. shipping_options.availability_status
+        if not avail_status:
+            shipping = fulfillment.get("shipping_options", {})
+            if isinstance(shipping, dict):
+                s = shipping.get("availability_status", "")
+                if s:
+                    avail_status = s
+
+        # 3. availability_status_v2 across fulfillment methods
+        if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+            for method_key in ("shipping_options", "scheduled_delivery"):
+                method = fulfillment.get(method_key, {})
+                if isinstance(method, dict):
+                    v2 = method.get("availability_status_v2", [])
+                    if isinstance(v2, list):
+                        for entry in v2:
+                            if isinstance(entry, dict) and entry.get("is_available"):
+                                avail_status = "IN_STOCK"
+                                break
+
+        # 4. store_options — pickup / ship_to_store availability
+        if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+            store_options = fulfillment.get("store_options", [])
+            if isinstance(store_options, list):
+                for opt in store_options:
+                    if not isinstance(opt, dict):
+                        continue
+                    for sub_key in ("order_pickup", "ship_to_store", "in_store_only"):
+                        sub = opt.get(sub_key, {})
+                        if isinstance(sub, dict) and sub.get("availability_status") == "IN_STOCK":
+                            avail_status = "IN_STOCK"
+                            break
+
+        # product-level is_purchasable (catalog-level, NOT inventory —
+        # only used for display, never as sole availability signal)
         product_avail = product.get("availability", {})
         if isinstance(product_avail, dict):
-            pa = product_avail.get("availability_status", "")
-            if pa:
-                avail_status = pa
             is_purchasable = bool(product_avail.get("is_purchasable", False))
-
-        # 3. Broad check: any IN_STOCK in fulfillment JSON
-        if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
-            fulfillment_str = json.dumps(fulfillment)
-            if '"IN_STOCK"' in fulfillment_str or '"AVAILABLE"' in fulfillment_str:
-                avail_status = "IN_STOCK"
 
         return RedSkyProductData(
             tcin=self.tcin,
@@ -880,11 +906,31 @@ class RedSkySearch:
                         avail_status = pa
                     is_purchasable = bool(product_avail.get("is_purchasable", False))
 
-                # Broad check
-                if avail_status not in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER", "COMING_SOON"):
-                    ful_str = json.dumps(fulfillment)
-                    if '"IN_STOCK"' in ful_str or '"AVAILABLE"' in ful_str:
+                # Additional fulfillment checks (matching _parse logic)
+                if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+                    if fulfillment.get("is_out_of_stock_in_all_store_locations") is False:
                         avail_status = "IN_STOCK"
+                if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+                    for method_key in ("shipping_options", "scheduled_delivery"):
+                        method = fulfillment.get(method_key, {})
+                        if isinstance(method, dict):
+                            v2 = method.get("availability_status_v2", [])
+                            if isinstance(v2, list):
+                                for entry in v2:
+                                    if isinstance(entry, dict) and entry.get("is_available"):
+                                        avail_status = "IN_STOCK"
+                                        break
+                if avail_status not in ("IN_STOCK", "LIMITED_STOCK"):
+                    store_options = fulfillment.get("store_options", [])
+                    if isinstance(store_options, list):
+                        for opt in store_options:
+                            if not isinstance(opt, dict):
+                                continue
+                            for sub_key in ("order_pickup", "ship_to_store", "in_store_only"):
+                                sub = opt.get(sub_key, {})
+                                if isinstance(sub, dict) and sub.get("availability_status") == "IN_STOCK":
+                                    avail_status = "IN_STOCK"
+                                    break
 
                 sold_by = _extract_seller(product)
                 street_date, release_label = _extract_release_info(product)
