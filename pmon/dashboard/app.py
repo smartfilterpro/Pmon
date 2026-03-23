@@ -471,18 +471,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         import httpx
         from pmon.monitors.base import DEFAULT_HEADERS
 
-        # Check if the Walmart monitor is currently in a rate-limit cooldown.
-        # If so, skip the network call — another request would just extend the ban.
+        # Get the Walmart monitor reference (used to record 429s if we get one)
         walmart_monitor = engine._monitors.get("walmart")
-        if walmart_monitor and walmart_monitor.is_rate_limited():
-            remaining = walmart_monitor.rate_limit_remaining()
-            return {
-                "ok": False,
-                "message": (
-                    f"Walmart is rate limiting us (429). "
-                    f"All Walmart requests paused — wait {remaining:.0f}s before testing again."
-                ),
-            }
 
         session = db.get_retailer_session(user["id"], "walmart")
         if not session or not session.get("cookies_json"):
