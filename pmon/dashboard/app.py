@@ -624,12 +624,6 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     },
                 )
 
-                if resp.status_code == 403:
-                    return {
-                        "ok": False,
-                        "message": "Costco session blocked by Akamai (403). Re-import fresh cookies from your browser.",
-                    }
-
                 if resp.status_code == 200:
                     try:
                         data = resp.json()
@@ -649,25 +643,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     follow_redirects=False,
                 )
 
-                if acct_resp.status_code == 302:
-                    location = acct_resp.headers.get("location", "")
-                    if "LogonForm" in location or "login" in location.lower():
-                        return {
-                            "ok": False,
-                            "message": "Costco session expired — re-import cookies from your browser.",
-                        }
-
                 if acct_resp.status_code == 200:
                     return {"ok": True, "message": f"Costco session valid — {len(cookies)} cookies active"}
 
-                return {
-                    "ok": False,
-                    "message": f"Costco session check returned HTTP {resp.status_code}. Try re-importing cookies.",
-                }
-
         except Exception as exc:
-            logger.error("Costco session validation error: %s", exc)
-            return {"ok": False, "message": f"Could not validate Costco session: {exc}"}
+            logger.warning("Costco cookie validation failed (%s), trying browser login", exc)
+
+        # Cookies didn't validate — fall back to browser login
+        return await _test_login_browser("costco", email, password, user)
 
     async def _test_pokemoncenter_session(user: dict, email: str, password: str):
         """Test Pokemon Center account by validating session cookies via API.
