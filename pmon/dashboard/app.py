@@ -596,8 +596,13 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         session = db.get_retailer_session(user["id"], "costco")
         if not session or not session.get("cookies_json"):
-            # No session cookies — try browser login as fallback
-            return await _test_login_browser("costco", email, password, user)
+            # Costco's Akamai Bot Manager blocks headless browser logins,
+            # so browser-based login is unreliable.  Ask user to import cookies.
+            return {
+                "ok": False,
+                "message": "No Costco session cookies found. Costco blocks automated logins — "
+                           "import cookies from your browser to test your session.",
+            }
 
         try:
             cookies = _json.loads(session["cookies_json"])
@@ -605,7 +610,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             return {"ok": False, "message": "Saved Costco session cookies are corrupted — re-import them"}
 
         if not cookies:
-            return await _test_login_browser("costco", email, password, user)
+            return {
+                "ok": False,
+                "message": "Costco session cookies are empty — re-import cookies from your browser.",
+            }
 
         try:
             async with httpx.AsyncClient(
