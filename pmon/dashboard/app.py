@@ -478,6 +478,19 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         # Get the Walmart monitor reference (used to record 429s if we get one)
         walmart_monitor = engine._monitors.get("walmart")
 
+        # ── Pre-flight: honour existing rate-limit cooldown ──────────
+        # If the monitor is already cooling down from a 429, don't fire
+        # another request — just report the remaining wait time.
+        if walmart_monitor and walmart_monitor.is_rate_limited():
+            remaining = walmart_monitor.rate_limit_remaining()
+            return {
+                "ok": False,
+                "message": (
+                    f"Walmart is currently rate-limited. "
+                    f"Try again in {remaining:.0f}s."
+                ),
+            }
+
         session = db.get_retailer_session(user["id"], "walmart")
         if not session or not session.get("cookies_json"):
             return {
@@ -500,86 +513,101 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if not cookies:
             return {"ok": False, "message": "No session cookies found — import them via Settings > Session Cookies"}
 
-        # Single attempt — no retry loop.  If we get 429, record it on the
-        # shared monitor so the entire system backs off together.
+        # ── Use the shared monitor's client when possible ────────────
+        # Creating a brand-new httpx client opens a fresh TLS connection
+        # with no prior request history, which Walmart's PerimeterX treats
+        # as a strong bot signal.  Reusing the monitor's client keeps the
+        # existing TLS session and avoids double-requesting within the 5 s
+        # minimum interval.
+        _close_client = False
         try:
-            async with httpx.AsyncClient(
-                headers=DEFAULT_HEADERS,
-                follow_redirects=True,
-                timeout=httpx.Timeout(15.0),
-                http2=True,
-            ) as client:
+            if walmart_monitor:
+                # Respect the per-retailer throttle (5 s minimum gap)
+                await walmart_monitor.throttle()
+                client = await walmart_monitor.get_client()
+                _close_client = False
+            else:
+                client = httpx.AsyncClient(
+                    headers=DEFAULT_HEADERS,
+                    follow_redirects=True,
+                    timeout=httpx.Timeout(15.0),
+                    http2=True,
+                )
                 for name, value in cookies.items():
                     client.cookies.set(name, str(value), domain=".walmart.com")
+                _close_client = True
 
-                req_headers = {
-                    **DEFAULT_HEADERS,
-                    "Accept": "application/json",
-                    "Sec-Fetch-Dest": "empty",
-                    "Sec-Fetch-Mode": "cors",
-                    "Sec-Fetch-Site": "same-origin",
-                    "Referer": "https://www.walmart.com/",
+            req_headers = {
+                **DEFAULT_HEADERS,
+                "Accept": "application/json",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+                "Referer": "https://www.walmart.com/",
+            }
+
+            resp = await client.get(
+                "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                "?configNames=identity",
+                headers=req_headers,
+            )
+
+            if resp.status_code == 429:
+                # Parse optional Retry-After header
+                retry_after = None
+                retry_after_val = resp.headers.get("Retry-After")
+                if retry_after_val:
+                    try:
+                        retry_after = float(retry_after_val)
+                    except (ValueError, TypeError):
+                        pass
+                # Record on shared monitor so the monitor loop backs off too
+                if walmart_monitor:
+                    walmart_monitor.record_rate_limit(retry_after)
+                    remaining = walmart_monitor.rate_limit_remaining()
+                else:
+                    remaining = 60
+                return {
+                    "ok": False,
+                    "message": (
+                        f"Walmart rate limited (429). "
+                        f"All Walmart requests paused for {remaining:.0f}s. "
+                        f"Wait and try again."
+                    ),
                 }
 
-                resp = await client.get(
-                    "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
-                    "?configNames=identity",
-                    headers=req_headers,
-                )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Check if identity config indicates logged in
+                identity = data.get("identity", {})
+                is_logged_in = identity.get("isLoggedIn", False)
+                if walmart_monitor:
+                    walmart_monitor.record_success()
+                if is_logged_in:
+                    logger.info("Walmart: session cookies valid (logged in)")
+                    return {"ok": True, "message": f"Walmart session valid — {len(cookies)} cookies active"}
 
-                if resp.status_code == 429:
-                    # Parse optional Retry-After header
-                    retry_after = None
-                    retry_after_val = resp.headers.get("Retry-After")
-                    if retry_after_val:
-                        try:
-                            retry_after = float(retry_after_val)
-                        except (ValueError, TypeError):
-                            pass
-                    # Record on shared monitor so the monitor loop backs off too
-                    if walmart_monitor:
-                        walmart_monitor.record_rate_limit(retry_after)
-                        remaining = walmart_monitor.rate_limit_remaining()
-                    else:
-                        remaining = 60
-                    return {
-                        "ok": False,
-                        "message": (
-                            f"Walmart rate limited (429). "
-                            f"All Walmart requests paused for {remaining:.0f}s. "
-                            f"Wait and try again."
-                        ),
-                    }
+                # Even if not definitively logged in, 200 means cookies aren't expired
+                logger.info("Walmart: session cookies accepted (HTTP 200)")
+                return {"ok": True, "message": f"Walmart session cookies accepted ({len(cookies)} cookies) — if checkout fails, re-import fresh cookies"}
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Check if identity config indicates logged in
-                    identity = data.get("identity", {})
-                    is_logged_in = identity.get("isLoggedIn", False)
-                    if walmart_monitor:
-                        walmart_monitor.record_success()
-                    if is_logged_in:
-                        logger.info("Walmart: session cookies valid (logged in)")
-                        return {"ok": True, "message": f"Walmart session valid — {len(cookies)} cookies active"}
-
-                    # Even if not definitively logged in, 200 means cookies aren't expired
-                    logger.info("Walmart: session cookies accepted (HTTP 200)")
-                    return {"ok": True, "message": f"Walmart session cookies accepted ({len(cookies)} cookies) — if checkout fails, re-import fresh cookies"}
-
-                elif resp.status_code == 403:
-                    return {
-                        "ok": False,
-                        "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
-                    }
-                else:
-                    return {
-                        "ok": False,
-                        "message": f"Walmart session check returned HTTP {resp.status_code}. Try re-importing cookies.",
-                    }
+            elif resp.status_code == 403:
+                return {
+                    "ok": False,
+                    "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
+                }
+            else:
+                return {
+                    "ok": False,
+                    "message": f"Walmart session check returned HTTP {resp.status_code}. Try re-importing cookies.",
+                }
 
         except Exception as exc:
             logger.error("Walmart session validation error: %s", exc)
             return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
+        finally:
+            if _close_client:
+                await client.aclose()
 
     async def _test_costco_session(user: dict, email: str, password: str):
         """Test Costco account by validating imported session cookies via API.
