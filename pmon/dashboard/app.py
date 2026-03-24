@@ -459,37 +459,18 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         return await _test_login_browser(retailer, email, password, user)
 
     async def _test_walmart_session(user: dict):
-        """Test Walmart account by validating imported session cookies via API.
+        """Test Walmart session by validating imported cookies locally.
 
-        Walmart uses aggressive PerimeterX bot protection with a press-and-hold
-        CAPTCHA that cannot be solved by headless browsers.  Instead of attempting
-        browser login (which always fails), we validate that the user's imported
-        session cookies are still valid by making an API call to Walmart's
-        lightweight config endpoint.
-
-        This function coordinates with the shared WalmartMonitor rate-limit
-        state so the dashboard and monitor loop don't pile requests on top of
-        each other.
+        Walmart's PerimeterX bot protection returns 429 on virtually every
+        API probe from a server-side HTTP client, which then triggers a 60 s
+        global pause on all Walmart monitoring.  Instead of making a network
+        request, we validate the cookies offline: check that they exist, parse
+        correctly, and contain the key cookie names Walmart sets for logged-in
+        sessions.  The real proof comes from the monitor's next stock check —
+        if those cookies work, stock checks succeed; if not, the user gets a
+        clear 403 / CAPTCHA error telling them to re-import.
         """
         import json as _json
-        import httpx
-        from pmon.monitors.base import DEFAULT_HEADERS
-
-        # Get the Walmart monitor reference (used to record 429s if we get one)
-        walmart_monitor = engine._monitors.get("walmart")
-
-        # ── Pre-flight: honour existing rate-limit cooldown ──────────
-        # If the monitor is already cooling down from a 429, don't fire
-        # another request — just report the remaining wait time.
-        if walmart_monitor and walmart_monitor.is_rate_limited():
-            remaining = walmart_monitor.rate_limit_remaining()
-            return {
-                "ok": False,
-                "message": (
-                    f"Walmart is currently rate-limited. "
-                    f"Try again in {remaining:.0f}s."
-                ),
-            }
 
         session = db.get_retailer_session(user["id"], "walmart")
         if not session or not session.get("cookies_json"):
@@ -513,101 +494,54 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if not cookies:
             return {"ok": False, "message": "No session cookies found — import them via Settings > Session Cookies"}
 
-        # ── Use the shared monitor's client when possible ────────────
-        # Creating a brand-new httpx client opens a fresh TLS connection
-        # with no prior request history, which Walmart's PerimeterX treats
-        # as a strong bot signal.  Reusing the monitor's client keeps the
-        # existing TLS session and avoids double-requesting within the 5 s
-        # minimum interval.
-        _close_client = False
-        try:
-            if walmart_monitor:
-                # Respect the per-retailer throttle (5 s minimum gap)
-                await walmart_monitor.throttle()
-                client = await walmart_monitor.get_client()
-                _close_client = False
-            else:
-                client = httpx.AsyncClient(
-                    headers=DEFAULT_HEADERS,
-                    follow_redirects=True,
-                    timeout=httpx.Timeout(15.0),
-                    http2=True,
-                )
-                for name, value in cookies.items():
-                    client.cookies.set(name, str(value), domain=".walmart.com")
-                _close_client = True
+        # ── Local validation (no network request) ────────────────────
+        # Check for key Walmart session cookie names.  These are the
+        # cookies Walmart consistently sets for authenticated sessions.
+        cookie_names = set(cookies.keys())
+        # Core session cookies that indicate a logged-in Walmart session
+        auth_indicators = {"CID", "auth", "hasACID", "ACID", "customer"}
+        # PerimeterX cookies needed to avoid bot blocks
+        px_indicators = {"_px3", "_pxhd", "_px2"}
 
-            req_headers = {
-                **DEFAULT_HEADERS,
-                "Accept": "application/json",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "Referer": "https://www.walmart.com/",
-            }
+        found_auth = cookie_names & auth_indicators
+        found_px = cookie_names & px_indicators
 
-            resp = await client.get(
-                "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
-                "?configNames=identity",
-                headers=req_headers,
+        warnings = []
+        if not found_auth:
+            warnings.append(
+                "No auth cookies found (CID, auth, ACID). "
+                "Make sure you export cookies while logged in to walmart.com."
+            )
+        if not found_px:
+            warnings.append(
+                "No PerimeterX cookies found (_px3, _pxhd). "
+                "These help avoid bot blocks — re-export from a fresh browser session."
             )
 
-            if resp.status_code == 429:
-                # Parse optional Retry-After header
-                retry_after = None
-                retry_after_val = resp.headers.get("Retry-After")
-                if retry_after_val:
-                    try:
-                        retry_after = float(retry_after_val)
-                    except (ValueError, TypeError):
-                        pass
-                # Record on shared monitor so the monitor loop backs off too
-                if walmart_monitor:
-                    walmart_monitor.record_rate_limit(retry_after)
-                    remaining = walmart_monitor.rate_limit_remaining()
-                else:
-                    remaining = 60
-                return {
-                    "ok": False,
-                    "message": (
-                        f"Walmart rate limited (429). "
-                        f"All Walmart requests paused for {remaining:.0f}s. "
-                        f"Wait and try again."
-                    ),
-                }
+        if warnings:
+            return {
+                "ok": False,
+                "message": (
+                    f"{len(cookies)} cookies imported but may be incomplete:\n"
+                    + "\n".join(f"• {w}" for w in warnings)
+                ),
+            }
 
-            if resp.status_code == 200:
-                data = resp.json()
-                # Check if identity config indicates logged in
-                identity = data.get("identity", {})
-                is_logged_in = identity.get("isLoggedIn", False)
-                if walmart_monitor:
-                    walmart_monitor.record_success()
-                if is_logged_in:
-                    logger.info("Walmart: session cookies valid (logged in)")
-                    return {"ok": True, "message": f"Walmart session valid — {len(cookies)} cookies active"}
+        # Report rate-limit status if the monitor is currently cooling down
+        walmart_monitor = engine._monitors.get("walmart")
+        status_note = ""
+        if walmart_monitor and walmart_monitor.is_rate_limited():
+            remaining = walmart_monitor.rate_limit_remaining()
+            status_note = f" (note: Walmart monitor is cooling down — {remaining:.0f}s remaining)"
 
-                # Even if not definitively logged in, 200 means cookies aren't expired
-                logger.info("Walmart: session cookies accepted (HTTP 200)")
-                return {"ok": True, "message": f"Walmart session cookies accepted ({len(cookies)} cookies) — if checkout fails, re-import fresh cookies"}
-
-            elif resp.status_code == 403:
-                return {
-                    "ok": False,
-                    "message": "Walmart session cookies expired or blocked (403). Re-import fresh cookies from your browser.",
-                }
-            else:
-                return {
-                    "ok": False,
-                    "message": f"Walmart session check returned HTTP {resp.status_code}. Try re-importing cookies.",
-                }
-
-        except Exception as exc:
-            logger.error("Walmart session validation error: %s", exc)
-            return {"ok": False, "message": f"Could not validate Walmart session: {exc}"}
-        finally:
-            if _close_client:
-                await client.aclose()
+        logger.info("Walmart: %d session cookies validated locally", len(cookies))
+        return {
+            "ok": True,
+            "message": (
+                f"Walmart session configured — {len(cookies)} cookies loaded "
+                f"({len(found_auth)} auth, {len(found_px)} PerimeterX).{status_note}"
+            ),
+        }
 
     async def _test_costco_session(user: dict, email: str, password: str):
         """Test Costco account by validating imported session cookies via API.
