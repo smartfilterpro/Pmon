@@ -234,11 +234,21 @@ export async function testAccount(retailer: string) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10 * 60 * 1000);
   try {
-    return await (await apiFetch('/accounts/test', {
+    const resp = await apiFetch('/accounts/test', {
       method: 'POST',
       body: JSON.stringify({ retailer }),
       signal: controller.signal,
-    })).json();
+    });
+    let data: Record<string, unknown>;
+    try {
+      data = await resp.json();
+    } catch {
+      throw new Error(`Server returned invalid response (HTTP ${resp.status})`);
+    }
+    if (!resp.ok && !data.ok && !data.message) {
+      throw new Error((data.error as string) || `Server error (HTTP ${resp.status})`);
+    }
+    return data;
   } finally {
     clearTimeout(timer);
   }

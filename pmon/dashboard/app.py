@@ -1035,7 +1035,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             raw = await pg.screenshot(type="png")
             return base64.b64encode(raw).decode()
 
-        def ask_vision(img_b64: str, prompt: str) -> str | None:
+        def _ask_vision_sync(img_b64: str, prompt: str) -> str | None:
+            """Synchronous vision call — run via asyncio.to_thread to avoid blocking."""
             if not vision_client:
                 return None
             try:
@@ -1052,9 +1053,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 logger.warning("Vision API call failed in test-login: %s", exc)
                 return None
 
+        async def ask_vision(img_b64: str, prompt: str) -> str | None:
+            return await asyncio.to_thread(_ask_vision_sync, img_b64, prompt)
+
         async def vision_click(pg, description: str) -> bool:
             img = await screenshot_b64(pg)
-            answer = ask_vision(
+            answer = await ask_vision(
                 img,
                 f'I need to click the "{description}" button/link on this page. '
                 f'Return ONLY a JSON object with the x,y pixel coordinates: '
@@ -1078,7 +1082,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         async def vision_fill(pg, description: str, value: str) -> bool:
             img = await screenshot_b64(pg)
-            answer = ask_vision(
+            answer = await ask_vision(
                 img,
                 f'I need to click the "{description}" input field to type into it. '
                 f'Return ONLY a JSON object with x,y pixel coordinates: '
@@ -1099,7 +1103,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         async def vision_read_page(pg) -> str | None:
             """Ask Claude what's on the page — used to diagnose blocks/errors."""
             img = await screenshot_b64(pg)
-            return ask_vision(
+            return await ask_vision(
                 img,
                 "Describe what you see on this page in 1-2 sentences. "
                 "Is it a login form, an error page, a CAPTCHA, a block page, or something else?",
@@ -2337,7 +2341,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 for cleanup_coro in [page.close(), context.close(), browser.close(), pw.stop()]:
                     try:
                         await cleanup_coro
-                    except Exception:
+                    except BaseException:
                         pass
 
         except Exception as e:
