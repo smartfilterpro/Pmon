@@ -1370,6 +1370,28 @@ class CheckoutEngine:
         except Exception as exc:
             logger.debug("Target delivery selection error (non-fatal): %s", exc)
 
+    async def _target_detect_shipping_minimum(self, page) -> bool:
+        """Check if the checkout button is disabled due to a shipping minimum.
+
+        Returns True if the cart page shows a shipping minimum message
+        (e.g. "$35 minimum", "qualify for shipping").
+        """
+        minimum_indicators = [
+            'text=/ship.+\\$35/i',
+            'text=/qualify for shipping/i',
+            'text=/more to qualify/i',
+            'text=/only ship with/i',
+            'text=/\\$35 minimum/i',
+            'text=/minimum.*order/i',
+        ]
+        for sel in minimum_indicators:
+            try:
+                if await page.locator(sel).first.is_visible(timeout=1500):
+                    return True
+            except Exception:
+                continue
+        return False
+
     async def _target_switch_to_pickup_if_minimum(self, page) -> bool:
         """Switch to Order Pickup if the checkout button is disabled due to a shipping minimum.
 
@@ -1379,30 +1401,17 @@ class CheckoutEngine:
         "These items only ship with $35 orders".  Switching all items to
         Order Pickup (no minimum) enables the checkout button.
 
+        Some items are shipping-only with no pickup option.  In that case
+        this method raises an Exception so the checkout fails fast with a
+        clear message instead of retrying for 25+ seconds.
+
         Returns True if we successfully switched to pickup.
         """
         try:
-            # Detect the shipping minimum message
-            minimum_indicators = [
-                'text=/ship.+\\$35/i',
-                'text=/qualify for shipping/i',
-                'text=/more to qualify/i',
-                'text=/minimum/i',
-                'text=/only ship with/i',
-            ]
-            has_minimum_block = False
-            for sel in minimum_indicators:
-                try:
-                    if await page.locator(sel).first.is_visible(timeout=1500):
-                        has_minimum_block = True
-                        break
-                except Exception:
-                    continue
-
-            if not has_minimum_block:
+            if not await self._target_detect_shipping_minimum(page):
                 return False
 
-            logger.info("Target: cart below shipping minimum — switching to Order Pickup")
+            logger.info("Target: cart below shipping minimum — attempting to switch to Order Pickup")
 
             # Try clicking "Change all to pickup" or equivalent
             pickup_selectors = [
@@ -1437,11 +1446,18 @@ class CheckoutEngine:
                 await wait_for_page_ready(page, timeout=8000)
                 return True
 
-            logger.warning("Target: detected shipping minimum but could not switch to pickup")
-            return False
+            # No pickup option available — this is a shipping-only item
+            # below the $35 minimum. Checkout is impossible.
+            raise Exception(
+                "Cart below $35 shipping minimum and item is shipping-only — "
+                "cannot checkout (no pickup option available)"
+            )
 
         except Exception as exc:
+            if "shipping minimum" in str(exc):
+                raise  # re-raise our clear error message
             logger.debug("Target pickup switch error (non-fatal): %s", exc)
+            return False
             return False
 
     async def _target_navigate_checkout(self, page, creds: AccountCredentials | None = None):
