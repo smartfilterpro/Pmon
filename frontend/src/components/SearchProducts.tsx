@@ -10,6 +10,7 @@ interface Props {
 const RETAILER_OPTIONS: { value: Retailer; label: string; color: string }[] = [
   { value: 'target', label: 'Target', color: '#cc0000' },
   { value: 'bestbuy', label: 'Best Buy', color: '#0046be' },
+  { value: 'pokemoncenter', label: 'Pokémon Center', color: '#ffcb05' },
 ];
 
 export default function SearchProducts({ refresh }: Props) {
@@ -233,10 +234,10 @@ export default function SearchProducts({ refresh }: Props) {
                     <span className={`search-result-status status-${statusClass(r)}`}>
                       {statusLabel(r)}
                     </span>
-                    <span className={`search-result-seller ${r.sold_by === 'Target' || r.sold_by === 'Best Buy' ? 'seller-1p' : 'seller-3p'}`}>
+                    <span className={`search-result-seller ${r.sold_by === 'Target' || r.sold_by === 'Best Buy' || r.sold_by === 'Pokemon Center' ? 'seller-1p' : 'seller-3p'}`}>
                       {r.sold_by || 'Unknown seller'}
                     </span>
-                    <span className="search-result-tcin">{r.retailer === 'target' ? `TCIN ${r.tcin}` : `SKU ${r.tcin}`}</span>
+                    <span className="search-result-tcin">{r.retailer === 'target' ? `TCIN ${r.tcin}` : r.retailer === 'pokemoncenter' ? r.tcin : `SKU ${r.tcin}`}</span>
                   </div>
                 </div>
                 <div className="search-result-actions">
