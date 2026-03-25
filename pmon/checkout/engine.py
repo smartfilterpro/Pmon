@@ -813,25 +813,49 @@ class CheckoutEngine:
             # health-related products and it blocks all page interaction.
             await self._dismiss_health_consent_modal(page)
 
+            # Nuke persistent floating-ui popups via JS before interacting.
+            # Clicking "Close" on these is unreliable — they respawn immediately.
+            await self._nuke_floating_ui_portals(page)
+
             # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
             add_to_cart_sel = (
                 'button[data-test="shipItButton"], button[data-test="shippingButton"], '
                 'button:has-text("Ship it"), button:has-text("Add to cart")'
             )
-            add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
+
+            # Retry add-to-cart up to 3 times with popup clearing between attempts
+            add_to_cart_clicked = False
+            for attempt in range(3):
+                if attempt > 0:
+                    logger.info("Target: add-to-cart attempt %d/3", attempt + 1)
+                    await self._nuke_floating_ui_portals(page)
+                    await sweep_popups(page)
+                    await self._dismiss_health_consent_modal(page)
+                    await random_delay(page, 500, 1000)
+
+                add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
+                if add_to_cart_clicked:
+                    await random_delay(page, 1500, 2500)
+                    # Verify item was actually added — check for confirmation modal or cart count
+                    if await self._verify_target_add_to_cart(page):
+                        logger.info("Target: item confirmed added to cart")
+                        break
+                    else:
+                        logger.warning("Target: add-to-cart click succeeded but item not confirmed in cart")
+                        add_to_cart_clicked = False
+                else:
+                    # Popup may have blocked the click
+                    await self._dismiss_health_consent_modal(page)
+                    await sweep_popups(page)
+
             if not add_to_cart_clicked:
-                # Popup may have blocked the click — sweep and retry
-                await self._dismiss_health_consent_modal(page)
-                if await sweep_popups(page):
-                    add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
-                if not add_to_cart_clicked:
-                    error = await self._smart_read_error(page)
-                    if error:
-                        raise Exception(f"Cannot add to cart: {error}")
-                    raise Exception("Add to cart button not found")
-            await random_delay(page, 1000, 2000)
+                error = await self._smart_read_error(page)
+                if error:
+                    raise Exception(f"Cannot add to cart: {error}")
+                raise Exception("Add to cart button not found or item not added after 3 attempts")
 
             # Sweep popups after add-to-cart (health consent, coverage offers, etc.)
+            await self._nuke_floating_ui_portals(page)
             await sweep_popups(page)
 
             # Decline optional coverage/warranty if modal appears
@@ -853,20 +877,41 @@ class CheckoutEngine:
                 await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                 await wait_for_page_ready(page, timeout=15000)
 
-            # Sweep popups on cart page and browse briefly
+            # Aggressively clear popups on cart page before interacting
+            await self._nuke_floating_ui_portals(page)
             await sweep_popups(page)
             await random_mouse_jitter(page)
             await random_delay(page, 300, 800)
+
+            # Verify cart is not empty before proceeding
+            cart_empty = await self._is_target_cart_empty(page)
+            if cart_empty:
+                logger.warning("Target: cart is empty after add-to-cart — checkout will fail")
+                raise Exception("Cart is empty — item was not successfully added")
 
             # --- Handle delivery method selection on cart page ---
             # Target requires choosing "Shipping" or "Pickup" for each item.
             # If there's a "Choose delivery method" prompt, select shipping.
             await self._target_select_delivery(page)
 
+            # Clear popups again before waiting for checkout button
+            await self._nuke_floating_ui_portals(page)
+            await sweep_popups(page)
+
             # Wait for checkout button to be enabled (it's grayed out until
             # delivery method is selected and cart is validated)
             checkout_sel = 'button[data-test="checkout-button"]'
-            await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+            button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+
+            if not button_enabled:
+                # Last resort: nuke overlays and retry wait
+                logger.info("Target: checkout button still disabled — clearing overlays and retrying")
+                await self._nuke_floating_ui_portals(page)
+                await sweep_popups(page)
+                # Try selecting delivery method again in case it didn't stick
+                await self._target_select_delivery(page)
+                button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
+
             await random_delay(page, 200, 500)
 
             # Click checkout
@@ -951,6 +996,87 @@ class CheckoutEngine:
         finally:
             await page.close()
             await context.close()
+
+    async def _nuke_floating_ui_portals(self, page) -> int:
+        """Remove floating-ui portal overlays via JS instead of clicking Close.
+
+        These portals respawn when dismissed via the Close button on Target.
+        Removing them from the DOM is more reliable. Preserves login/sign-in panels.
+        """
+        js = """() => {
+            let removed = 0;
+            document.querySelectorAll('[data-floating-ui-portal]').forEach(el => {
+                const hasForm = el.querySelector('form, input[type="password"], input[type="email"], #username');
+                const hasSignIn = (el.textContent || '').includes('Sign in');
+                if (hasForm || hasSignIn) return;
+                el.remove();
+                removed++;
+            });
+            document.querySelectorAll('[data-floating-ui-inert]').forEach(el => {
+                el.removeAttribute('data-floating-ui-inert');
+                el.removeAttribute('aria-hidden');
+            });
+            return removed;
+        }"""
+        try:
+            removed = await page.evaluate(js)
+            if removed:
+                logger.info("Target: nuked %d floating-ui portal(s) via JS", removed)
+            return removed
+        except Exception:
+            return 0
+
+    async def _verify_target_add_to_cart(self, page) -> bool:
+        """Check that the item was actually added to cart after clicking add-to-cart.
+
+        Looks for:
+        1. "Added to cart" confirmation modal
+        2. Cart count badge showing >= 1
+        3. "View cart & check out" button in modal
+        """
+        # Check for confirmation modal
+        confirmation_selectors = [
+            'button[data-test="addToCartModalViewCartCheckout"]',
+            '[data-test="addToCartModal"]',
+            'h2:has-text("Added to cart")',
+            'div:has-text("Added to cart")',
+            'button:has-text("View cart & check out")',
+            'button:has-text("View cart")',
+        ]
+        for sel in confirmation_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=1500):
+                    return True
+            except Exception:
+                continue
+
+        # Check cart count badge (shows item count like "1" or "2")
+        try:
+            cart_count = page.locator('[data-test="cart-count"], [data-test="cartCount"], #cart-count')
+            text = await cart_count.first.inner_text(timeout=2000)
+            if text.strip() and int(text.strip()) > 0:
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    async def _is_target_cart_empty(self, page) -> bool:
+        """Check if the Target cart page shows an empty cart."""
+        empty_indicators = [
+            'h1:has-text("Your cart is empty")',
+            '[data-test="emptyCart"]',
+            'text="Your cart is empty"',
+        ]
+        for sel in empty_indicators:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=2000):
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def _is_signed_in_target(self, page) -> bool:
         # Check 1: account nav text (works on most Target pages)
