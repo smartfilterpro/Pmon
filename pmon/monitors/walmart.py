@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from pmon.models import StockResult, StockStatus
 from .base import API_HEADERS, BaseMonitor
+from .captcha_solver import solve_px_captcha
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class WalmartMonitor(BaseMonitor):
     # Walmart aggressively rate-limits — enforce at least 5s between requests
     _min_request_interval: float = 5.0
     _cookie_domain: str = ".walmart.com"
+    # Guard against recursive CAPTCHA solve attempts
+    _solving_captcha: bool = False
 
     def _extract_product_id(self, url: str) -> str | None:
         """Extract product/item ID from Walmart URL.
@@ -71,12 +74,23 @@ class WalmartMonitor(BaseMonitor):
             )
 
         if resp.status_code == 403:
-            logger.warning("Walmart: 403 on product page — PerimeterX blocked")
+            if not self._solving_captcha:
+                logger.warning("Walmart: 403 on product page — PerimeterX blocked, attempting CAPTCHA solve")
+                self._solving_captcha = True
+                try:
+                    fresh_cookies = await solve_px_captcha(url, self._session_cookies or None)
+                    if fresh_cookies:
+                        logger.info("Walmart: CAPTCHA solved after 403! Got %d fresh cookies", len(fresh_cookies))
+                        self.load_session_cookies(fresh_cookies)
+                        return await self.check_stock(url, product_name)
+                finally:
+                    self._solving_captcha = False
+
             hint = " Re-import fresh cookies." if self._session_cookies else " Import session cookies to improve reliability."
             return StockResult(
                 url=url, retailer=self.retailer_name, product_name=product_name,
                 status=StockStatus.ERROR,
-                error_message=f"Blocked by Walmart (403).{hint}",
+                error_message=f"Blocked by Walmart (403). Auto-solve failed.{hint}",
             )
 
         resp.raise_for_status()
@@ -86,11 +100,24 @@ class WalmartMonitor(BaseMonitor):
 
         # Check if we got a block page instead of product data
         if "/blocked" in resp.url.path or "press & hold" in html.lower():
-            logger.warning("Walmart: redirected to CAPTCHA block page")
+            if not self._solving_captcha:
+                logger.warning("Walmart: redirected to CAPTCHA block page — attempting auto-solve")
+                self._solving_captcha = True
+                try:
+                    fresh_cookies = await solve_px_captcha(url, self._session_cookies or None)
+                    if fresh_cookies:
+                        logger.info("Walmart: CAPTCHA solved! Got %d fresh cookies", len(fresh_cookies))
+                        self.load_session_cookies(fresh_cookies)
+                        # Retry the stock check with fresh cookies
+                        return await self.check_stock(url, product_name)
+                finally:
+                    self._solving_captcha = False
+
+            logger.warning("Walmart: auto-solve failed — manual cookie import needed")
             return StockResult(
                 url=url, retailer=self.retailer_name, product_name=product_name,
                 status=StockStatus.ERROR,
-                error_message="Walmart CAPTCHA block. Import session cookies via Settings > Session Cookies.",
+                error_message="Walmart CAPTCHA block. Auto-solve failed. Import session cookies via Settings > Session Cookies.",
             )
 
         soup = BeautifulSoup(html, "html.parser")
