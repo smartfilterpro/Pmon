@@ -915,6 +915,10 @@ class CheckoutEngine:
             # Wait for checkout button to be enabled (it's grayed out until
             # delivery method is selected and cart is validated)
             checkout_sel = 'button[data-test="checkout-button"]'
+            checkout_all_sel = (
+                'button[data-test="checkout-button"], button:has-text("Check out"), '
+                'a:has-text("Check out"), button[data-test="checkout-btn"]'
+            )
             button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=15000)
 
             if not button_enabled:
@@ -929,12 +933,45 @@ class CheckoutEngine:
             await random_delay(page, 200, 500)
 
             # Click checkout
-            if not await self._smart_click(
-                page, "Check out",
-                'button[data-test="checkout-button"], button:has-text("Check out"), '
-                'a:has-text("Check out"), button[data-test="checkout-btn"]',
-            ):
-                raise Exception("Checkout button not found")
+            if not await self._smart_click(page, "Check out", checkout_all_sel):
+                # Recovery: checkout button missing likely means we're not
+                # signed in — Target replaces it with a sign-in prompt.
+                logger.warning("Target: checkout button not found — checking if sign-in is required")
+                if not await self._is_signed_in_target(page):
+                    logger.info("Target: not signed in — attempting sign-in recovery from cart page")
+                    await self._sign_in_target(page, creds)
+                    # Navigate back to cart after login
+                    await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+                    await wait_for_page_ready(page, timeout=15000)
+                    await self._nuke_floating_ui_portals(page)
+                    await sweep_popups(page)
+                    await self._target_select_delivery(page)
+                    await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+                    if not await self._smart_click(page, "Check out", checkout_all_sel):
+                        raise Exception("Checkout button not found after sign-in recovery")
+                else:
+                    # Also try clicking a "Sign in to check out" button directly
+                    # as it may navigate to login then back to checkout
+                    sign_in_checkout_sel = (
+                        'button[data-test="checkout-sign-in"], '
+                        'button:has-text("Sign in to check out"), '
+                        'a:has-text("Sign in to check out")'
+                    )
+                    if await self._smart_click(page, "Sign in to check out", sign_in_checkout_sel, timeout=3000):
+                        logger.info("Target: clicked 'Sign in to check out' — completing sign-in")
+                        await wait_for_page_ready(page, timeout=15000)
+                        # Complete the sign-in flow
+                        await self._sign_in_target(page, creds)
+                        await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+                        await wait_for_page_ready(page, timeout=15000)
+                        await self._nuke_floating_ui_portals(page)
+                        await sweep_popups(page)
+                        await self._target_select_delivery(page)
+                        await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+                        if not await self._smart_click(page, "Check out", checkout_all_sel):
+                            raise Exception("Checkout button not found after sign-in recovery")
+                    else:
+                        raise Exception("Checkout button not found")
             await wait_for_page_ready(page, timeout=15000)
 
             # --- Handle checkout page steps ---
@@ -1093,6 +1130,25 @@ class CheckoutEngine:
         return False
 
     async def _is_signed_in_target(self, page) -> bool:
+        # Check 0: cart-page sign-in prompts — Target replaces the checkout
+        # button with a sign-in prompt when not logged in.  These are the
+        # most reliable indicators on the cart page.
+        sign_in_prompts = [
+            'button[data-test="checkout-sign-in"]',
+            'button:has-text("Sign in to check out")',
+            'a:has-text("Sign in to check out")',
+            '[data-test="cart-sign-in"]',
+            'button:has-text("Sign in to save")',
+        ]
+        for sel in sign_in_prompts:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=800):
+                    logger.info("Target: sign-in prompt visible ('%s') — not logged in", sel)
+                    return False
+            except Exception:
+                continue
+
         # Check 1: account nav text (works on most Target pages)
         try:
             account = page.locator('#account, [data-test="accountNav"]')
@@ -1107,7 +1163,7 @@ class CheckoutEngine:
             pass
 
         # Check 2: auth cookies — Target sets accessToken/refreshToken on login
-        # Only trust cookies that haven't expired
+        # Only trust cookies that haven't expired AND whose values are non-empty
         try:
             import time
             cookies = await page.context.cookies("https://www.target.com")
@@ -1119,7 +1175,24 @@ class CheckoutEngine:
                     if c.get("expires", -1) > 0 and c["expires"] < now:
                         logger.info("Target: %s cookie expired — treating as not signed in", c["name"])
                         continue
+                    # Empty or placeholder values are not valid
+                    if not c.get("value") or c["value"] in ("", "undefined", "null"):
+                        logger.info("Target: %s cookie has empty value — treating as not signed in", c["name"])
+                        continue
                     return True
+        except Exception:
+            pass
+
+        # Check 3: page-level sign-in text — look for any generic "Sign in"
+        # buttons/links in the main content area (not just the nav)
+        try:
+            page_text = await page.locator("body").inner_text(timeout=2000)
+            lower = page_text.lower()
+            # If the page prominently says "sign in" and doesn't show any
+            # checkout-related text, likely not logged in
+            if "sign in to check out" in lower:
+                logger.info("Target: page contains 'sign in to check out' — not logged in")
+                return False
         except Exception:
             pass
 
