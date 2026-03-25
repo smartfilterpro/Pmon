@@ -1709,15 +1709,33 @@ class CheckoutEngine:
                 # Fallback: check if URL changed away from login
                 await wait_for_url_change(page, pre_url, timeout=10000)
         else:
-            # Step 2: Submit email — wait for button enabled first
-            await wait_for_button_enabled(page, submit_sel, timeout=15000)
+            # Step 2: Submit email — try to click Continue even if button
+            # appears disabled.  Target often recognises existing session
+            # cookies and redirects to homepage without needing a password.
+            # The test-login flow works this way too.
+            await wait_for_button_enabled(page, submit_sel, timeout=5000)
             await random_delay(page, 100, 300)
 
-            await self._multi_strategy_click(page, "Continue with email", [
-                "Continue with email", "Continue", "Sign in", "Next",
-            ], 'button[type="submit"], button:has-text("Continue")')
+            # Force-click submit button even if disabled — Target may still
+            # process the request and redirect when session cookies are valid.
+            submit_clicked = False
+            for click_sel in [submit_sel, 'button:has-text("Continue")', 'button:has-text("Sign in")']:
+                try:
+                    btn = page.locator(click_sel).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click(force=True)
+                        submit_clicked = True
+                        logger.info("Target sign-in: clicked submit via %s", click_sel)
+                        break
+                except Exception:
+                    continue
 
-            # Wait for the page to respond (not a fixed 3s wait)
+            if not submit_clicked:
+                await self._multi_strategy_click(page, "Continue with email", [
+                    "Continue with email", "Continue", "Sign in", "Next",
+                ], 'button[type="submit"], button:has-text("Continue")')
+
+            # Wait for the page to respond
             await wait_for_page_ready(page, timeout=10000)
 
             # Sweep for any popups that appeared after email submit
@@ -1728,7 +1746,7 @@ class CheckoutEngine:
             post_email_url = page.url
             login_indicators = ["/login", "/signin", "/sign-in", "/identity"]
             if not any(ind in post_email_url.lower() for ind in login_indicators):
-                logger.info("Target sign-in: navigated away from login after email submit (%s) — may already be signed in", post_email_url)
+                logger.info("Target sign-in: navigated away from login after email submit (%s) — already signed in", post_email_url)
                 await net_monitor.stop()
                 return  # Let the caller check success via URL/cookies
 
