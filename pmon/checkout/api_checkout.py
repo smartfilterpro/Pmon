@@ -829,43 +829,57 @@ class ApiCheckout:
 
     async def _wmt_validate_session(self, client: httpx.AsyncClient) -> bool:
         """Validate Walmart session by loading cart via GraphQL."""
-        try:
-            # Try the config bootstrap endpoint (lightweight)
-            resp = await client.get(
-                "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
-                "?configNames=cart,checkout,identity",
-                headers={**HEADERS, "Accept": "application/json"},
-            )
-            if resp.status_code == 200:
-                logger.info("Walmart: session is valid (bootstrap OK)")
-                return True
-            if resp.status_code == 429:
-                logger.warning("Walmart: rate limited (429) during session validation")
-                return False
-
-            # Fallback: try GraphQL cart query
-            cart_resp = await client.post(
-                "https://www.walmart.com/swag/graphql",
-                json={
-                    "query": "query { cart { id itemCount } }",
-                    "variables": {},
-                },
-                headers={
-                    **HEADERS,
-                    "Content-Type": "application/json",
-                    "Origin": "https://www.walmart.com",
-                },
-            )
-            if cart_resp.status_code == 200:
-                data = cart_resp.json()
-                if "errors" not in data:
-                    logger.info("Walmart: session valid (via GraphQL cart)")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Try the config bootstrap endpoint (lightweight)
+                resp = await client.get(
+                    "https://www.walmart.com/orchestra/api/ccm/v3/bootstrap"
+                    "?configNames=cart,checkout,identity",
+                    headers={**HEADERS, "Accept": "application/json"},
+                )
+                if resp.status_code == 200:
+                    logger.info("Walmart: session is valid (bootstrap OK)")
                     return True
+                if resp.status_code == 429:
+                    retry_after = int(resp.headers.get("Retry-After", 2 ** attempt))
+                    wait = min(retry_after, 10)
+                    logger.warning(
+                        "Walmart: rate limited (429) during session validation "
+                        "(attempt %d/%d, retrying in %ds)", attempt + 1, max_retries, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
 
-            return False
-        except Exception as exc:
-            logger.debug("Walmart session validation error: %s", exc)
-            return False
+                # Fallback: try GraphQL cart query
+                cart_resp = await client.post(
+                    "https://www.walmart.com/swag/graphql",
+                    json={
+                        "query": "query { cart { id itemCount } }",
+                        "variables": {},
+                    },
+                    headers={
+                        **HEADERS,
+                        "Content-Type": "application/json",
+                        "Origin": "https://www.walmart.com",
+                    },
+                )
+                if cart_resp.status_code == 200:
+                    try:
+                        data = cart_resp.json()
+                    except (ValueError, TypeError):
+                        logger.warning("Walmart: GraphQL cart returned non-JSON response")
+                        return False
+                    if "errors" not in data:
+                        logger.info("Walmart: session valid (via GraphQL cart)")
+                        return True
+
+                return False
+            except Exception as exc:
+                logger.debug("Walmart session validation error: %s", exc)
+                return False
+        logger.warning("Walmart: session validation failed after %d rate-limit retries", max_retries)
+        return False
 
     async def _wmt_add_to_cart(self, client: httpx.AsyncClient, product_id: str) -> bool:
         """Add item to Walmart cart via GraphQL."""
@@ -909,7 +923,11 @@ class ApiCheckout:
                 headers=headers,
             )
             if resp.status_code == 200:
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except (ValueError, TypeError):
+                    logger.warning("Walmart: GraphQL add-to-cart returned non-JSON response")
+                    return False
                 if "errors" not in data:
                     logger.info("Walmart: added product %s to cart via GraphQL", product_id)
                     return True
