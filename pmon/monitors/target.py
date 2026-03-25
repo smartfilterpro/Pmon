@@ -185,9 +185,19 @@ class TargetMonitor(BaseMonitor):
             await pw.stop()
 
             if captured_keys:
-                logger.info("Target: captured %d fresh API key(s) via browser: ...%s",
-                            len(captured_keys), captured_keys[0][-8:])
-                self._refreshed_keys = captured_keys
+                # Filter out keys we already have hardcoded — those already failed
+                novel_keys = [k for k in captured_keys if k not in self.API_KEYS]
+                if novel_keys:
+                    logger.info("Target: captured %d novel API key(s) via browser: ...%s",
+                                len(novel_keys), novel_keys[0][-8:])
+                    self._refreshed_keys = novel_keys
+                else:
+                    logger.warning(
+                        "Target: browser captured %d key(s) but ALL are already in hardcoded list "
+                        "(keys are stale). Captured: ...%s",
+                        len(captured_keys),
+                        ", ...".join(k[-8:] for k in captured_keys),
+                    )
             else:
                 logger.warning("Target: browser key refresh found no Redsky requests")
 
@@ -413,11 +423,23 @@ class TargetMonitor(BaseMonitor):
                         if result.status != StockStatus.UNKNOWN:
                             logger.info("Target stock for %s: %s (via refreshed key)", product_name, result.status.value)
                             return result
+                        else:
+                            logger.warning(
+                                "Target: refreshed key got 200 but parse returned UNKNOWN for %s "
+                                "— response keys: %s",
+                                product_name,
+                                list(data.keys()) if isinstance(data, dict) else "N/A",
+                            )
+                    else:
+                        logger.warning(
+                            "Target: refreshed key returned HTTP %d for %s",
+                            resp.status_code, product_name,
+                        )
                 except Exception as e:
                     logger.debug("Target: retry with refreshed key failed: %s", e)
 
         # --- Strategy 4: HTML scrape ---
-        logger.debug("Target stock for %s: falling back to page scrape", product_name)
+        logger.info("Target stock for %s: ALL API strategies failed — falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
 
     @staticmethod
@@ -748,7 +770,7 @@ class TargetMonitor(BaseMonitor):
 
         # 6. Check for explicit OOS signals before declaring out of stock
         if fulfillment.get("is_out_of_stock_in_all_store_locations") is True:
-            logger.debug("Target stock: is_out_of_stock_in_all_store_locations=true → OUT_OF_STOCK")
+            logger.info("Target stock: is_out_of_stock_in_all_store_locations=true → OUT_OF_STOCK for %s", product_name)
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
@@ -759,7 +781,7 @@ class TargetMonitor(BaseMonitor):
         shipping = fulfillment.get("shipping_options", {})
         shipping_status = shipping.get("availability_status", "")
         if shipping_status in ("OUT_OF_STOCK", "UNAVAILABLE"):
-            logger.debug("Target stock: shipping availability_status=%s → OUT_OF_STOCK", shipping_status)
+            logger.info("Target stock: shipping availability_status=%s → OUT_OF_STOCK for %s", shipping_status, product_name)
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
@@ -775,7 +797,7 @@ class TargetMonitor(BaseMonitor):
         if product_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
             return _in_stock(f"product.availability.availability_status={product_status}")
         if product_status in ("OUT_OF_STOCK", "UNAVAILABLE"):
-            logger.debug("Target stock: product availability_status=%s → OUT_OF_STOCK", product_status)
+            logger.info("Target stock: product availability_status=%s → OUT_OF_STOCK for %s", product_status, product_name)
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
@@ -875,6 +897,7 @@ class TargetMonitor(BaseMonitor):
                             price = f"${price}" if not str(price).startswith("$") else str(price)
 
                         if "InStock" in avail:
+                            logger.debug("Target scrape: JSON-LD says InStock for %s", product_name)
                             return StockResult(
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
@@ -882,6 +905,7 @@ class TargetMonitor(BaseMonitor):
                                 image_url=ld_image,
                             )
                         elif "OutOfStock" in avail:
+                            logger.info("Target scrape: JSON-LD says OutOfStock for %s (avail=%s)", product_name, avail)
                             return StockResult(
                                 url=url, retailer=self.retailer_name,
                                 product_name=product_name,
@@ -925,7 +949,7 @@ class TargetMonitor(BaseMonitor):
 
             # 2c: Use CDUI OOS signal if fulfillment data wasn't available
             if oos_signal is True:
-                logger.debug("Target: OOS determined via CDUI layout signal for %s", product_name)
+                logger.info("Target scrape: CDUI layout OOS signal (adapt_pdp_oos) for %s", product_name)
                 return StockResult(
                     url=url, retailer=self.retailer_name,
                     product_name=product_name,
@@ -940,7 +964,9 @@ class TargetMonitor(BaseMonitor):
             page_price = price_match.group(1)
 
         # Strategy 4: Text-based out-of-stock detection
-        if re.search(r"(out of stock|sold out|temporarily unavailable)", html, re.I):
+        oos_text_match = re.search(r"(out of stock|sold out|temporarily unavailable)", html, re.I)
+        if oos_text_match:
+            logger.info("Target scrape: text-based OOS for %s — matched '%s'", product_name, oos_text_match.group(0))
             return StockResult(
                 url=url, retailer=self.retailer_name,
                 product_name=product_name,
