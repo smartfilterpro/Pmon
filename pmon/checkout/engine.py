@@ -1868,6 +1868,14 @@ class CheckoutEngine:
             else:
                 logger.warning("Target sign-in: could not find password auth method option")
 
+            # Re-check if we've been redirected away from login
+            # (Target redirects to homepage when session cookies are valid)
+            post_picker_url = page.url
+            if not any(ind in post_picker_url.lower() for ind in login_indicators):
+                logger.info("Target sign-in: already signed in after auth picker step (%s)", post_picker_url)
+                await net_monitor.stop()
+                return
+
             # Step 4: Enter password — human-like, with vision fallback
             pass_found = False
             try:
