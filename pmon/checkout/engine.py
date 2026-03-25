@@ -889,6 +889,20 @@ class CheckoutEngine:
                 logger.warning("Target: cart is empty after add-to-cart — checkout will fail")
                 raise Exception("Cart is empty — item was not successfully added")
 
+            # Re-verify login on cart page — stale session cookies may have let
+            # us add to cart as guest, but checkout requires a real session.
+            # Target often shows "Sign in" on the cart page when session expired.
+            if not await self._is_signed_in_target(page):
+                logger.info("Target: not signed in on cart page — signing in before checkout")
+                await self._sign_in_target(page, creds)
+                # Navigate back to cart after login
+                await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+                await wait_for_page_ready(page, timeout=15000)
+                await self._nuke_floating_ui_portals(page)
+                await sweep_popups(page)
+                if not await self._is_signed_in_target(page):
+                    logger.warning("Target: still not signed in after login attempt on cart page")
+
             # --- Handle delivery method selection on cart page ---
             # Target requires choosing "Shipping" or "Pickup" for each item.
             # If there's a "Choose delivery method" prompt, select shipping.
@@ -1085,15 +1099,27 @@ class CheckoutEngine:
             text = await account.inner_text(timeout=3000)
             if "sign in" not in text.lower():
                 return True
+            # If nav explicitly says "sign in", we're definitely not logged in
+            # — don't fall through to cookie check which may have stale tokens
+            logger.debug("Target: account nav says 'sign in' — not logged in")
+            return False
         except Exception:
             pass
 
         # Check 2: auth cookies — Target sets accessToken/refreshToken on login
+        # Only trust cookies that haven't expired
         try:
+            import time
             cookies = await page.context.cookies("https://www.target.com")
-            cookie_names = {c["name"] for c in cookies}
-            if "accessToken" in cookie_names or "refreshToken" in cookie_names:
-                return True
+            now = time.time()
+            for c in cookies:
+                if c["name"] in ("accessToken", "refreshToken"):
+                    # Check expiry — expires=-1 means session cookie (valid),
+                    # expires>0 means epoch timestamp
+                    if c.get("expires", -1) > 0 and c["expires"] < now:
+                        logger.info("Target: %s cookie expired — treating as not signed in", c["name"])
+                        continue
+                    return True
         except Exception:
             pass
 
