@@ -202,9 +202,33 @@ async def solve_px_captcha(url: str, existing_cookies: dict[str, str] | None = N
 
         # Check if CAPTCHA was solved (page should redirect away from block page)
         solved = False
-        for _ in range(10):
+        for attempt in range(10):
             current_url = page.url
-            html = await page.content()
+            try:
+                html = await page.content()
+            except Exception as content_err:
+                # If page.content() fails because the page is navigating,
+                # that means the CAPTCHA was solved and PerimeterX is
+                # redirecting us — treat this as success.
+                err_msg = str(content_err).lower()
+                if "navigating" in err_msg or "changing" in err_msg:
+                    logger.info(
+                        "CAPTCHA solver: page is navigating after solve — "
+                        "treating as success (attempt %d)", attempt + 1,
+                    )
+                    # Give the navigation time to settle, then extract cookies
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=_REDIRECT_WAIT_MS)
+                    except Exception:
+                        # Even if this times out, the cookies may still be set
+                        await page.wait_for_timeout(3000)
+                    solved = True
+                    break
+                # Some other error — log and keep trying
+                logger.debug("CAPTCHA solver: page.content() error: %s", content_err)
+                await page.wait_for_timeout(1500)
+                continue
+
             if "/blocked" not in current_url and "press & hold" not in html.lower():
                 solved = True
                 break
