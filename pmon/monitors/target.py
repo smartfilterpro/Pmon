@@ -61,6 +61,7 @@ class TargetMonitor(BaseMonitor):
         self._refreshed_keys: list[str] | None = None  # keys discovered at runtime
         self._key_refresh_attempted: float = 0  # timestamp of last browser key refresh
         self._KEY_REFRESH_COOLDOWN = 3600  # don't retry browser refresh more than once per hour
+        self._empty_fulfillment_warned: bool = False  # one-time warning for missing fulfillment data
 
     def _extract_tcin(self, url: str) -> str | None:
         """Extract TCIN (Target product ID) from URL."""
@@ -259,11 +260,14 @@ class TargetMonitor(BaseMonitor):
                             return result
                         fulfillment_result = result
                     else:
-                        logger.warning(
+                        # Log response structure once to help diagnose API changes
+                        resp_keys = list(data.keys()) if isinstance(data, dict) else "N/A"
+                        data_keys = list(data.get("data", {}).keys()) if isinstance(data.get("data"), dict) else "N/A"
+                        product_keys = list(data.get("data", {}).get("product", {}).keys())[:15] if isinstance(data.get("data", {}).get("product"), dict) else "N/A"
+                        logger.debug(
                             "Target: product_fulfillment_v1 returned UNKNOWN for %s — "
-                            "fulfillment keys: %s",
-                            tcin,
-                            list(data.get("data", {}).get("product", {}).get("fulfillment", {}).keys()),
+                            "response keys: %s, data keys: %s, product keys: %s",
+                            tcin, resp_keys, data_keys, product_keys,
                         )
                         fulfillment_result = result  # keep UNKNOWN result for fallback chain
                     break
@@ -415,13 +419,94 @@ class TargetMonitor(BaseMonitor):
         logger.debug("Target stock for %s: falling back to page scrape", product_name)
         return await self._scrape_page(url, product_name, client)
 
+    @staticmethod
+    def _find_fulfillment(data: dict) -> tuple[dict, dict]:
+        """Locate product and fulfillment dicts in a Target API response.
+
+        Target has moved fulfillment data across several response structures.
+        This method probes multiple known paths and returns (product, fulfillment).
+        """
+        # Path 1: data.product.fulfillment (original)
+        product = data.get("data", {}).get("product", {})
+        fulfillment = product.get("fulfillment", {})
+        if fulfillment:
+            return product, fulfillment
+
+        # Path 2: data.product.item.fulfillment (new nesting observed 2026-03)
+        item = product.get("item", {})
+        if isinstance(item, dict):
+            fulfillment = item.get("fulfillment", {})
+            if fulfillment:
+                # Merge item-level fields into product for price/image extraction
+                merged = {**product, **item}
+                return merged, fulfillment
+
+        # Path 3: data.fulfillment (top-level, no product wrapper)
+        fulfillment = data.get("data", {}).get("fulfillment", {})
+        if fulfillment:
+            return product, fulfillment
+
+        # Path 4: data.product.children[0].fulfillment (variant products)
+        children = product.get("children", [])
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    fulfillment = child.get("fulfillment", {})
+                    if fulfillment:
+                        merged = {**product, **child}
+                        return merged, fulfillment
+
+        # Path 5: deep search — walk the response tree for any "fulfillment" key
+        # that contains stock-related sub-keys
+        fulfillment = TargetMonitor._deep_find_fulfillment(data)
+        if fulfillment:
+            return product, fulfillment
+
+        return product, {}
+
+    @staticmethod
+    def _deep_find_fulfillment(obj, depth=0) -> dict | None:
+        """Recursively search for a fulfillment dict with stock data."""
+        if depth > 6 or not isinstance(obj, dict):
+            return None
+        for key, val in obj.items():
+            if key == "fulfillment" and isinstance(val, dict) and val:
+                # Verify it's a real fulfillment dict (has stock-related keys)
+                stock_keys = {"shipping_options", "store_options", "scheduled_delivery",
+                              "is_out_of_stock_in_all_store_locations", "availability_status"}
+                if stock_keys & set(val.keys()):
+                    return val
+            if isinstance(val, dict):
+                result = TargetMonitor._deep_find_fulfillment(val, depth + 1)
+                if result:
+                    return result
+            elif isinstance(val, list):
+                for item in val[:5]:  # limit to avoid huge arrays
+                    result = TargetMonitor._deep_find_fulfillment(item, depth + 1)
+                    if result:
+                        return result
+        return None
+
     def _parse_fulfillment(self, url: str, product_name: str, data: dict) -> StockResult:
         """Parse product_fulfillment_and_variation_hierarchy_v1 response."""
         try:
-            product = data.get("data", {}).get("product", {})
-            fulfillment = product.get("fulfillment", {})
+            product, fulfillment = self._find_fulfillment(data)
             price = self._extract_price_from_product(product)
             image_url = _extract_image_url(product)
+
+            if not fulfillment and not self._empty_fulfillment_warned:
+                self._empty_fulfillment_warned = True
+                # Log the top-level response structure once so we can diagnose
+                # where Target moved the fulfillment data
+                raw_product = data.get("data", {}).get("product", {})
+                logger.warning(
+                    "Target API: fulfillment data not found at any known path. "
+                    "Response top-level keys: %s, data keys: %s, product keys: %s. "
+                    "Falling back to scrape for all products until this is fixed.",
+                    list(data.keys())[:10],
+                    list(data.get("data", {}).keys())[:10] if isinstance(data.get("data"), dict) else "N/A",
+                    list(raw_product.keys())[:15] if isinstance(raw_product, dict) else "N/A",
+                )
 
             logger.debug("Target fulfillment response keys: %s", list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A")
 
@@ -579,8 +664,7 @@ class TargetMonitor(BaseMonitor):
     def _parse_pdp(self, url: str, product_name: str, data: dict) -> StockResult:
         """Parse pdp_client_v1 response for stock status."""
         try:
-            product = data.get("data", {}).get("product", {})
-            fulfillment = product.get("fulfillment", {})
+            product, fulfillment = self._find_fulfillment(data)
             price = self._extract_price_from_product(product)
             image_url = _extract_image_url(product)
 
@@ -700,7 +784,8 @@ class TargetMonitor(BaseMonitor):
 
         # No definitive signals in either direction → UNKNOWN so fallback
         # strategies (scrape, etc.) get a chance to check.
-        logger.warning(
+        # Use debug level to avoid spamming logs every poll cycle for every product
+        logger.debug(
             "Target stock: no availability signals found for %s — returning UNKNOWN "
             "(will fall back to scrape). Fulfillment keys: %s",
             product_name,
