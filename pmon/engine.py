@@ -56,6 +56,7 @@ class PmonEngine:
         self._discord_notifiers: dict[str, DiscordNotifier] = {}
 
         self._running = False
+        self._monitor_task: asyncio.Task | None = None
 
         # All products across all users (synced from DB)
         self._all_products: list[dict] = []
@@ -123,12 +124,20 @@ class PmonEngine:
             self._discord_notifiers[webhook] = DiscordNotifier(webhook)
         return self._discord_notifiers[webhook]
 
-    async def start_monitoring(self):
-        """Start the monitoring loop."""
-        if self._running:
+    def start_monitoring_task(self):
+        """Start monitoring as a background asyncio task.
+
+        Safe to call multiple times — restarts if previously stopped.
+        Used by the CLI and dashboard to start/restart monitoring without
+        blocking the caller.
+        """
+        if self._running and self._monitor_task and not self._monitor_task.done():
             logger.warning("Monitor is already running")
             return
+        self._monitor_task = asyncio.create_task(self._monitoring_loop())
 
+    async def _monitoring_loop(self):
+        """Core monitoring loop. Runs until stop_monitoring() is called."""
         self.sync_products_from_db()
         self._running = True
         self.state.is_running = True
@@ -136,20 +145,34 @@ class PmonEngine:
         logger.info(f"Starting monitor with {len(self.config.products)} products, "
                      f"polling every {self.config.poll_interval}s")
 
-        while self._running:
-            self.sync_products_from_db()
-            await self._check_all()
-            # Add ±20% jitter to poll interval to avoid exact-interval bot fingerprint.
-            # e.g. 30s → sleeps between 24s and 36s each cycle.
-            jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
-            await asyncio.sleep(self.config.poll_interval + jitter)
+        try:
+            while self._running:
+                self.sync_products_from_db()
+                await self._check_all()
+                # Add ±20% jitter to poll interval to avoid exact-interval bot fingerprint.
+                # e.g. 30s → sleeps between 24s and 36s each cycle.
+                jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
+                await asyncio.sleep(self.config.poll_interval + jitter)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._running = False
+            self.state.is_running = False
 
-        self.state.is_running = False
+    async def start_monitoring(self):
+        """Start the monitoring loop (blocking). Kept for backward compat."""
+        if self._running:
+            logger.warning("Monitor is already running")
+            return
+        await self._monitoring_loop()
 
     def stop_monitoring(self):
         """Stop the monitoring loop."""
         self._running = False
         self.state.is_running = False
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            self._monitor_task = None
         logger.info("Monitor stopped")
 
     async def _check_all(self):
