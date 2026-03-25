@@ -209,6 +209,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         """
         from pmon.monitors.redsky_poller import RedSkySearch
         from pmon.monitors.bestbuy_search import BestBuySearch
+        from pmon.monitors.pokemoncenter_search import PokemonCenterSearch
 
         data = await request.json()
         keyword = data.get("keyword", "").strip()
@@ -222,7 +223,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         if isinstance(retailers, str):
             retailers = [retailers]
 
-        VALID_RETAILERS = {"target", "bestbuy"}
+        VALID_RETAILERS = {"target", "bestbuy", "pokemoncenter"}
         retailers = [r for r in retailers if r in VALID_RETAILERS]
         if not retailers:
             retailers = ["target"]
@@ -262,9 +263,30 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 offset=offset,
             )
 
+        async def _search_pokemoncenter():
+            # Reuse the engine's PokemonCenterMonitor client so we
+            # share its WAF cookies and avoid double-fingerprinting.
+            pc_monitor = engine._monitors.get("pokemoncenter")
+            client = None
+            if pc_monitor:
+                try:
+                    client = await pc_monitor.get_client()
+                except Exception:
+                    pass
+            search = PokemonCenterSearch(
+                max_results=max_results,
+                client=client,
+            )
+            return await search.find(
+                keyword,
+                include_out_of_stock=include_out_of_stock,
+                offset=offset,
+            )
+
         search_map = {
             "target": _search_target,
             "bestbuy": _search_bestbuy,
+            "pokemoncenter": _search_pokemoncenter,
         }
 
         # Run all selected retailer searches in parallel

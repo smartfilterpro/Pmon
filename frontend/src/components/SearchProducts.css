@@ -207,6 +207,10 @@ a.search-result-title:hover {
   background: rgba(0, 70, 190, 0.15);
   color: #4d8fec;
 }
+.search-result-retailer.retailer-pokemoncenter {
+  background: rgba(255, 203, 5, 0.15);
+  color: #ffcb05;
+}
 
 .search-result-price {
   font-size: 13px;

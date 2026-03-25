@@ -147,7 +147,7 @@ export async function checkoutNow(url: string) {
 
 // --- Search ---
 
-export type Retailer = 'target' | 'bestbuy';
+export type Retailer = 'target' | 'bestbuy' | 'pokemoncenter';
 
 export interface SearchResult {
   tcin: string;
