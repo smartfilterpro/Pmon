@@ -785,6 +785,16 @@ class CheckoutEngine:
         page = await context.new_page()
 
         try:
+            # Sign in FIRST before any product interaction.
+            # Target session cookies degrade silently — add-to-cart works
+            # as guest but checkout requires a fresh authenticated session.
+            # _sign_in_target navigates to homepage and uses the full sign-in
+            # panel flow (same as test login), which is more reliable than
+            # the cart-page flyout modal.
+            if creds:
+                logger.info("Target: signing in before checkout")
+                await self._sign_in_target(page, creds)
+
             # Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
@@ -796,15 +806,6 @@ class CheckoutEngine:
             # Human-like: glance at the page before interacting
             await idle_scroll(page)
             await random_delay(page, 500, 1500)
-
-            # Check if we need to sign in
-            if not await self._is_signed_in_target(page):
-                await self._sign_in_target(page, creds)
-                # Navigate back to product page — login flow leaves us on homepage
-                await page.goto(url, wait_until="domcontentloaded")
-                await wait_for_page_ready(page, timeout=15000)
-                if not await self._is_signed_in_target(page):
-                    logger.warning("Target: sign-in may have failed — proceeding anyway")
 
             # Sweep popups again after sign-in (welcome back, promos)
             await sweep_popups(page)
@@ -888,23 +889,6 @@ class CheckoutEngine:
             if cart_empty:
                 logger.warning("Target: cart is empty after add-to-cart — checkout will fail")
                 raise Exception("Cart is empty — item was not successfully added")
-
-            # Always sign in on the cart page before checkout.
-            # Session cookies from earlier visits may look valid (accessToken
-            # present, not expired) but Target degrades them to guest-level
-            # after some time.  The checkout button stays disabled for guests
-            # even though add-to-cart works.  Signing in fresh is the only
-            # reliable way to get a checkout-capable session.
-            if creds:
-                logger.info("Target: signing in on cart page before checkout")
-                await self._sign_in_target(page, creds)
-                # Navigate back to cart after login
-                await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
-                await wait_for_page_ready(page, timeout=15000)
-                await self._nuke_floating_ui_portals(page)
-                await sweep_popups(page)
-            else:
-                logger.warning("Target: no credentials available — skipping sign-in")
 
             # --- Handle delivery method selection on cart page ---
             # Target requires choosing "Shipping" or "Pickup" for each item.
