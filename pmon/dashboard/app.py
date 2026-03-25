@@ -2606,7 +2606,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     @app.post("/api/monitor/{action}")
     async def api_monitor_action(action: str, user: dict = Depends(get_current_user)):
         if action == "start":
-            asyncio.create_task(engine.start_monitoring())
+            engine.start_monitoring_task()
             return {"ok": True}
         elif action == "stop":
             engine.stop_monitoring()

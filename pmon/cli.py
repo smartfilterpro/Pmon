@@ -121,10 +121,19 @@ async def _run(config, args):
 
     console.print("[green]Pmon started! Press Ctrl+C to stop.[/green]")
 
+    # Use a shutdown event so that dashboard start/stop doesn't kill the app.
+    # Only Ctrl+C (or SIGINT/SIGTERM) triggers a full shutdown.
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (__import__("signal").SIGINT, __import__("signal").SIGTERM):
+        loop.add_signal_handler(sig, shutdown_event.set)
+
+    # Start monitoring as a background task so the dashboard can
+    # freely stop and restart it without tearing down the process.
+    engine.start_monitoring_task()
+
     try:
-        await engine.start_monitoring()
-    except KeyboardInterrupt:
-        pass
+        await shutdown_event.wait()
     finally:
         console.print("\n[yellow]Shutting down...[/yellow]")
         engine.stop_monitoring()
