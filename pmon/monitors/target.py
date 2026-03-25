@@ -54,6 +54,8 @@ class TargetMonitor(BaseMonitor):
     DEFAULT_LAT = "39.282024"
     DEFAULT_LNG = "-76.569695"
 
+    _cookie_domain = ".target.com"
+
     def __init__(self):
         super().__init__()
         self._visitor_id: str = uuid.uuid4().hex
@@ -62,6 +64,7 @@ class TargetMonitor(BaseMonitor):
         self._key_refresh_attempted: float = 0  # timestamp of last browser key refresh
         self._KEY_REFRESH_COOLDOWN = 3600  # don't retry browser refresh more than once per hour
         self._empty_fulfillment_warned: bool = False  # one-time warning for missing fulfillment data
+        self._browser_api_cache: dict[str, dict] = {}  # tcin → response data captured from browser
 
     def _extract_tcin(self, url: str) -> str | None:
         """Extract TCIN (Target product ID) from URL."""
@@ -109,12 +112,13 @@ class TargetMonitor(BaseMonitor):
             logger.info("Target: extracted %d API key(s) from HTML", len(all_keys))
             self._refreshed_keys = all_keys
 
-    async def _refresh_api_keys_via_browser(self):
-        """Use Playwright to visit Target and intercept Redsky API keys.
+    async def _refresh_api_keys_via_browser(self, target_url: str | None = None):
+        """Use Playwright to visit Target, intercept Redsky keys AND response data.
 
         Opens a real browser (with stealth), navigates to a product page,
-        waits for the frontend to make Redsky API calls, and captures the
-        key= parameter from the request URLs.
+        intercepts both the API keys from request URLs AND the fulfillment
+        response data.  Also transfers PerimeterX cookies to the httpx client
+        so subsequent API calls are authenticated.
 
         Respects a cooldown to avoid hammering Target with browser sessions.
         """
@@ -130,8 +134,10 @@ class TargetMonitor(BaseMonitor):
             logger.debug("Target: playwright not installed — cannot refresh API keys via browser")
             return
 
+        visit_url = target_url or "https://www.target.com/p/-/A-89315228"
         logger.info("Target: refreshing API keys via browser (intercepting Redsky requests)...")
         captured_keys: list[str] = []
+        captured_responses: dict[str, dict] = {}  # tcin → response JSON
 
         try:
             pw = await async_playwright().start()
@@ -158,7 +164,7 @@ class TargetMonitor(BaseMonitor):
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             """)
 
-            # Intercept requests to redsky.target.com and capture API keys
+            # Intercept requests AND responses to redsky.target.com
             def on_request(request):
                 url = request.url
                 if "redsky.target.com" in url:
@@ -166,24 +172,64 @@ class TargetMonitor(BaseMonitor):
                     if match and match.group(1) not in captured_keys:
                         captured_keys.append(match.group(1))
 
-            page.on("request", on_request)
+            async def on_response(response):
+                url = response.url
+                if "redsky.target.com" not in url:
+                    return
+                # Only capture fulfillment/PDP responses
+                if not any(ep in url for ep in ("fulfillment", "pdp_client")):
+                    return
+                try:
+                    if response.status == 200:
+                        body = await response.json()
+                        # Extract TCIN from the URL params
+                        tcin_match = re.search(r'[?&]tcin=(\d+)', url)
+                        if tcin_match:
+                            tcin = tcin_match.group(1)
+                            captured_responses[tcin] = body
+                            logger.debug("Target: browser captured Redsky response for TCIN %s", tcin)
+                    else:
+                        logger.debug("Target: browser saw Redsky %d for %s", response.status, url[:120])
+                except Exception:
+                    pass
 
-            # Visit a known product page to trigger Redsky calls
+            page.on("request", on_request)
+            page.on("response", on_response)
+
+            # Visit the actual product page to trigger Redsky calls
             await page.goto(
-                "https://www.target.com/p/-/A-89315228",
+                visit_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
 
             # Wait for Redsky requests to fire (they happen after DOM load)
-            for _ in range(10):
-                if captured_keys:
+            for _ in range(15):
+                if captured_keys and captured_responses:
                     break
                 await asyncio.sleep(1)
+
+            # Extract PerimeterX cookies from browser and apply to httpx client
+            try:
+                browser_cookies = await context.cookies()
+                px_cookies = {}
+                for cookie in browser_cookies:
+                    domain = cookie.get("domain", "")
+                    if "target.com" in domain:
+                        px_cookies[cookie["name"]] = cookie["value"]
+                if px_cookies:
+                    client = await self.get_client()
+                    for name, value in px_cookies.items():
+                        client.cookies.set(name, value, domain=".target.com")
+                    logger.info("Target: transferred %d browser cookies to httpx client", len(px_cookies))
+                    self._warmed_up = True
+            except Exception as e:
+                logger.debug("Target: failed to transfer browser cookies: %s", e)
 
             await browser.close()
             await pw.stop()
 
+            # Process captured keys
             if captured_keys:
                 # Filter out keys we already have hardcoded — those already failed
                 novel_keys = [k for k in captured_keys if k not in self.API_KEYS]
@@ -192,14 +238,22 @@ class TargetMonitor(BaseMonitor):
                                 len(novel_keys), novel_keys[0][-8:])
                     self._refreshed_keys = novel_keys
                 else:
-                    logger.warning(
-                        "Target: browser captured %d key(s) but ALL are already in hardcoded list "
-                        "(keys are stale). Captured: ...%s",
+                    # Keys are the same, but now we have browser cookies — set them
+                    # anyway so the retry with cookies might succeed
+                    logger.info(
+                        "Target: browser captured %d key(s) (same as hardcoded) but now have "
+                        "browser cookies — retrying with cookie-authenticated session",
                         len(captured_keys),
-                        ", ...".join(k[-8:] for k in captured_keys),
                     )
+                    self._refreshed_keys = captured_keys
             else:
                 logger.warning("Target: browser key refresh found no Redsky requests")
+
+            # Cache any captured API response data
+            if captured_responses:
+                self._browser_api_cache.update(captured_responses)
+                logger.info("Target: cached browser API responses for %d TCIN(s): %s",
+                            len(captured_responses), list(captured_responses.keys()))
 
         except Exception as exc:
             logger.warning("Target: browser key refresh failed: %s", exc)
@@ -384,15 +438,29 @@ class TargetMonitor(BaseMonitor):
         if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
             return fulfillment_result
 
-        # --- Strategy 3: Browser key refresh ---
-        # All API calls failed. If we haven't recently tried, use Playwright
-        # to visit Target and intercept fresh API keys from network requests.
+        # --- Strategy 3: Browser key refresh + intercepted data ---
+        # All API calls failed. Use Playwright to visit the actual product page,
+        # intercept Redsky responses directly, and transfer cookies.
         if not self._refreshed_keys:
-            await self._refresh_api_keys_via_browser()
+            await self._refresh_api_keys_via_browser(target_url=url)
+
+            # 3a: Check if browser intercepted the API response for this TCIN
+            if tcin in self._browser_api_cache:
+                data = self._browser_api_cache.pop(tcin)
+                result = self._parse_fulfillment(url, product_name, data)
+                if result.status != StockStatus.UNKNOWN:
+                    logger.info("Target stock for %s: %s (via browser-intercepted API data)",
+                                product_name, result.status.value)
+                    return result
+                else:
+                    logger.warning("Target: browser-intercepted data for %s parsed as UNKNOWN", product_name)
+
+            # 3b: Retry API with refreshed key + browser cookies
             if self._refreshed_keys:
-                # Got fresh keys — retry the primary endpoint once
                 api_key = self._refreshed_keys[0]
                 try:
+                    # Re-get client to pick up transferred cookies
+                    client = await self.get_client()
                     resp = await client.get(
                         self.FULFILLMENT_URL,
                         params={
@@ -421,7 +489,8 @@ class TargetMonitor(BaseMonitor):
                         data = resp.json()
                         result = self._parse_fulfillment(url, product_name, data)
                         if result.status != StockStatus.UNKNOWN:
-                            logger.info("Target stock for %s: %s (via refreshed key)", product_name, result.status.value)
+                            logger.info("Target stock for %s: %s (via refreshed key + cookies)",
+                                        product_name, result.status.value)
                             return result
                         else:
                             logger.warning(
