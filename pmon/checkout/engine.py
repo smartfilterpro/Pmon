@@ -1374,22 +1374,37 @@ class CheckoutEngine:
         """Check if the checkout button is disabled due to a shipping minimum.
 
         Returns True if the cart page shows a shipping minimum message
-        (e.g. "$35 minimum", "qualify for shipping").
+        (e.g. "$35 minimum", "qualify for shipping") or if the checkout
+        button itself contains "minimum" in its text.
         """
+        # Use simple substring text selectors — Playwright regex with $
+        # signs has escaping issues that cause false negatives.
         minimum_indicators = [
-            'text=/ship.+\\$35/i',
-            'text=/qualify for shipping/i',
-            'text=/more to qualify/i',
-            'text=/only ship with/i',
-            'text=/\\$35 minimum/i',
-            'text=/minimum.*order/i',
+            ':text("only ship with $35")',
+            ':text("only ships with $35")',
+            ':text("qualify for shipping")',
+            ':text("more to qualify")',
+            ':text("$35 minimum")',
+            ':text("$35 order")',
         ]
         for sel in minimum_indicators:
             try:
-                if await page.locator(sel).first.is_visible(timeout=1500):
+                if await page.locator(sel).first.is_visible(timeout=1000):
+                    logger.debug("Target: detected shipping minimum via %s", sel)
                     return True
             except Exception:
                 continue
+
+        # Fallback: check the checkout button text itself for "minimum"
+        try:
+            btn = page.locator('button[data-test="checkout-button"]').first
+            btn_text = await btn.text_content(timeout=2000)
+            if btn_text and "minimum" in btn_text.lower():
+                logger.debug("Target: detected shipping minimum in button text: %s", btn_text.strip())
+                return True
+        except Exception:
+            pass
+
         return False
 
     async def _target_switch_to_pickup_if_minimum(self, page) -> bool:
