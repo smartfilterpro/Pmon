@@ -14,6 +14,8 @@ const RETAILER_LABELS: Record<string, string> = {
   target: 'Target',
   bestbuy: 'Best Buy',
   walmart: 'Walmart',
+  costco: 'Costco',
+  samsclub: "Sam's Club",
 };
 
 const STATUS_LABELS: Record<string, string> = {
