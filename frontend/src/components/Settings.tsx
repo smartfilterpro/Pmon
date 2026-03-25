@@ -138,14 +138,19 @@ export default function Settings({ user, onOtpRequired }: Props) {
           ...prev,
           [retailerId]: {
             ok: false,
-            message: data.message || 'Verification code needed — enter it in the banner above.',
+            message: (data.message as string) || 'Verification code needed — enter it in the banner above.',
           },
         }));
       } else {
-        setTestResult(prev => ({ ...prev, [retailerId]: { ok: data.ok, message: data.message } }));
+        setTestResult(prev => ({ ...prev, [retailerId]: { ok: !!data.ok, message: (data.message as string) || '' } }));
       }
-    } catch {
-      setTestResult(prev => ({ ...prev, [retailerId]: { ok: false, message: 'Request failed' } }));
+    } catch (err) {
+      const msg = err instanceof DOMException && err.name === 'AbortError'
+        ? 'Request timed out'
+        : err instanceof Error && err.message
+          ? `Request failed: ${err.message}`
+          : 'Request failed';
+      setTestResult(prev => ({ ...prev, [retailerId]: { ok: false, message: msg } }));
     } finally {
       setTestLoading(prev => ({ ...prev, [retailerId]: false }));
     }
