@@ -147,7 +147,7 @@ class TargetMonitor(BaseMonitor):
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/146.0.7680.80 Safari/537.36"
                 ),
                 viewport={"width": 1920, "height": 1080},
             )
@@ -229,15 +229,18 @@ class TargetMonitor(BaseMonitor):
                 "key": api_key,
                 "tcin": tcin,
                 "is_bot": "false",
+                "required_store_id": store_id,
                 "store_id": store_id,
-                "store_positions_store_id": store_id,
                 "pricing_store_id": store_id,
                 "has_pricing_store_id": "true",
-                "has_store_positions_store_id": "true",
+                "scheduled_delivery_store_id": store_id,
                 "latitude": self.DEFAULT_LAT,
                 "longitude": self.DEFAULT_LNG,
                 "state": self.DEFAULT_STATE,
                 "zip": self.DEFAULT_ZIP,
+                "paid_membership": "false",
+                "base_membership": "false",
+                "card_membership": "false",
                 "visitor_id": self._visitor_id,
                 "channel": "WEB",
                 "page": f"/p/A-{tcin}",
@@ -277,12 +280,7 @@ class TargetMonitor(BaseMonitor):
                     logger.debug("Target: product_fulfillment_v1 returned %d, trying legacy endpoint for %s", resp.status_code, tcin)
                     legacy_resp = await client.get(
                         self.FULFILLMENT_URL_LEGACY,
-                        params={**fulfillment_params,
-                                "required_store_id": store_id,
-                                "scheduled_delivery_store_id": store_id,
-                                "paid_membership": "false",
-                                "base_membership": "true",
-                                "card_membership": "false"},
+                        params=fulfillment_params,
                         headers=self._redsky_headers(url),
                     )
                     if legacy_resp.status_code == 200:
@@ -318,7 +316,7 @@ class TargetMonitor(BaseMonitor):
                 "pricing_store_id": store_id,
                 "has_pricing_store_id": "true",
                 "has_financing_options": "true",
-                "include_obsolete": "true",
+                "include_obsolete": "false",
                 "skip_personalized": "true",
                 "skip_variation_hierarchy": "true",
                 "visitor_id": self._visitor_id,
@@ -391,15 +389,18 @@ class TargetMonitor(BaseMonitor):
                             "key": api_key,
                             "tcin": tcin,
                             "is_bot": "false",
+                            "required_store_id": store_id,
                             "store_id": store_id,
-                            "store_positions_store_id": store_id,
                             "pricing_store_id": store_id,
                             "has_pricing_store_id": "true",
-                            "has_store_positions_store_id": "true",
+                            "scheduled_delivery_store_id": store_id,
                             "latitude": self.DEFAULT_LAT,
                             "longitude": self.DEFAULT_LNG,
                             "state": self.DEFAULT_STATE,
                             "zip": self.DEFAULT_ZIP,
+                            "paid_membership": "false",
+                            "base_membership": "false",
+                            "card_membership": "false",
                             "visitor_id": self._visitor_id,
                             "channel": "WEB",
                             "page": f"/p/A-{tcin}",
