@@ -259,7 +259,13 @@ class TargetMonitor(BaseMonitor):
                             return result
                         fulfillment_result = result
                     else:
-                        logger.debug("Target: product_fulfillment_v1 returned UNKNOWN for %s", tcin)
+                        logger.warning(
+                            "Target: product_fulfillment_v1 returned UNKNOWN for %s — "
+                            "fulfillment keys: %s",
+                            tcin,
+                            list(data.get("data", {}).get("product", {}).get("fulfillment", {}).keys()),
+                        )
+                        fulfillment_result = result  # keep UNKNOWN result for fallback chain
                     break
                 elif resp.status_code in (404, 410):
                     # 404 = endpoint not found, 410 = gone/deprecated key
@@ -362,7 +368,8 @@ class TargetMonitor(BaseMonitor):
             self._warmed_up = False
 
         # If fulfillment got a definitive status but PDP couldn't add price, return it anyway
-        if fulfillment_result:
+        # Don't short-circuit on UNKNOWN — let scrape fallback handle it
+        if fulfillment_result and fulfillment_result.status != StockStatus.UNKNOWN:
             return fulfillment_result
 
         # --- Strategy 3: Browser key refresh ---
@@ -654,17 +661,55 @@ class TargetMonitor(BaseMonitor):
         #   - Broad string searches matched unrelated fields
         # Only the fulfillment-specific checks above (1-5) are reliable.
 
-        # Nothing found → OUT_OF_STOCK
-        logger.debug(
-            "Target stock: no availability signals found for %s — returning OUT_OF_STOCK. "
-            "Fulfillment keys: %s",
+        # 6. Check for explicit OOS signals before declaring out of stock
+        if fulfillment.get("is_out_of_stock_in_all_store_locations") is True:
+            logger.debug("Target stock: is_out_of_stock_in_all_store_locations=true → OUT_OF_STOCK")
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.OUT_OF_STOCK, price=price, image_url=image_url,
+                stock_quantity=stock_qty,
+            )
+
+        shipping = fulfillment.get("shipping_options", {})
+        shipping_status = shipping.get("availability_status", "")
+        if shipping_status in ("OUT_OF_STOCK", "UNAVAILABLE"):
+            logger.debug("Target stock: shipping availability_status=%s → OUT_OF_STOCK", shipping_status)
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.OUT_OF_STOCK, price=price, image_url=image_url,
+                stock_quantity=stock_qty,
+            )
+
+        # 7. Check product-level availability as a last resort — while this is
+        #    catalog-level and not fulfillment-specific, it prevents false OOS
+        #    when the fulfillment data structure changes.
+        product_avail = product.get("availability", {})
+        product_status = product_avail.get("availability_status", "")
+        if product_status in ("IN_STOCK", "LIMITED_STOCK", "PRE_ORDER"):
+            return _in_stock(f"product.availability.availability_status={product_status}")
+        if product_status in ("OUT_OF_STOCK", "UNAVAILABLE"):
+            logger.debug("Target stock: product availability_status=%s → OUT_OF_STOCK", product_status)
+            return StockResult(
+                url=url, retailer=self.retailer_name,
+                product_name=product_name,
+                status=StockStatus.OUT_OF_STOCK, price=price, image_url=image_url,
+                stock_quantity=stock_qty,
+            )
+
+        # No definitive signals in either direction → UNKNOWN so fallback
+        # strategies (scrape, etc.) get a chance to check.
+        logger.warning(
+            "Target stock: no availability signals found for %s — returning UNKNOWN "
+            "(will fall back to scrape). Fulfillment keys: %s",
             product_name,
             list(fulfillment.keys()) if isinstance(fulfillment, dict) else "N/A",
         )
         return StockResult(
             url=url, retailer=self.retailer_name,
             product_name=product_name,
-            status=StockStatus.OUT_OF_STOCK, price=price, image_url=image_url,
+            status=StockStatus.UNKNOWN, price=price, image_url=image_url,
             stock_quantity=stock_qty,
         )
 
