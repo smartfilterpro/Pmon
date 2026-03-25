@@ -1621,6 +1621,370 @@ class ApiCheckout:
 
         return False
 
+    # ------------------------------------------------------------------
+    # Sam's Club API checkout
+    # ------------------------------------------------------------------
+
+    async def _checkout_samsclub(
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials
+    ) -> CheckoutResult:
+        """Sam's Club API checkout flow.
+
+        Sam's Club (owned by Walmart) uses similar patterns:
+        - Auth: Session cookies required (Akamai bot protection blocks programmatic login)
+        - Cart: POST to /api/cart via GraphQL-like JSON
+        - Checkout: Multi-step via /api/checkout endpoints
+
+        Session cookie import is the ONLY reliable auth method.
+        """
+        client = self._get_client("samsclub")
+        retailer = "samsclub"
+
+        # Extract product ID from URL
+        product_id = None
+        match = re.search(r"(prod\d+)", url)
+        if match:
+            product_id = match.group(1)
+        if not product_id:
+            match = re.search(r"/(\d{8,})(?:\?|$|#)", url)
+            if match:
+                product_id = match.group(1)
+        # Try item number as fallback
+        item_number = None
+        match = re.search(r"/p/[^/]+/(\d{4,8})(?:\?|$|#)", url)
+        if match:
+            item_number = match.group(1)
+
+        if not product_id and not item_number:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Could not extract product ID from Sam's Club URL",
+            )
+
+        # Session cookies are required — Sam's Club uses Akamai + membership auth
+        has_session = bool(self._session_cookies.get("samsclub"))
+        if not has_session:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message=(
+                    "Sam's Club requires session cookies (membership login cannot be automated). "
+                    "Import cookies via Dashboard > Accounts > Sam's Club > Import Cookies"
+                ),
+            )
+
+        # Step 1: Validate session
+        session_valid = await self._sams_validate_session(client)
+        if not session_valid:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Sam's Club session expired — re-import cookies via Dashboard",
+            )
+
+        # Step 2: Add to cart
+        cart_ok = await self._sams_add_to_cart(client, product_id or item_number, url)
+        if not cart_ok:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Failed to add item to Sam's Club cart",
+            )
+
+        # Step 3: Set shipping address
+        await self._sams_set_shipping(client, profile)
+
+        # Step 4: Initiate checkout
+        checkout_ok = await self._sams_checkout(client, creds)
+        if checkout_ok:
+            return CheckoutResult(
+                url=url, retailer=retailer, product_name=product_name,
+                status=CheckoutStatus.SUCCESS,
+                error_message="Checkout initiated — check your Sam's Club account for order confirmation",
+            )
+
+        return CheckoutResult(
+            url=url, retailer=retailer, product_name=product_name,
+            status=CheckoutStatus.FAILED,
+            error_message="Sam's Club checkout failed",
+        )
+
+    async def _sams_validate_session(self, client: httpx.AsyncClient) -> bool:
+        """Validate Sam's Club session by checking account/cart state."""
+        try:
+            # Try account endpoint
+            resp = await client.get(
+                "https://www.samsclub.com/api/node/vivaldi/v1/member/profile",
+                headers={
+                    **HEADERS,
+                    "Accept": "application/json",
+                    "Referer": "https://www.samsclub.com/",
+                    "Origin": "https://www.samsclub.com",
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Check if we get a valid member profile
+                payload = data.get("payload", {})
+                if payload.get("membershipNumber") or payload.get("firstName"):
+                    logger.info("Sam's Club: session valid (member profile loaded)")
+                    return True
+
+            # Fallback: try cart endpoint
+            resp = await client.get(
+                "https://www.samsclub.com/api/node/vivaldi/v2/cart",
+                headers={
+                    **HEADERS,
+                    "Accept": "application/json",
+                    "Referer": "https://www.samsclub.com/cart",
+                },
+            )
+            if resp.status_code == 200:
+                logger.info("Sam's Club: session valid (cart accessible)")
+                return True
+
+        except Exception as exc:
+            logger.debug("Sam's Club session validation error: %s", exc)
+
+        return False
+
+    async def _sams_add_to_cart(
+        self, client: httpx.AsyncClient, product_id: str, url: str
+    ) -> bool:
+        """Add item to Sam's Club cart."""
+        cart_headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Referer": url,
+            "Origin": "https://www.samsclub.com",
+            "x-sams-channel": "web",
+        }
+
+        # Try the cart API endpoint
+        payload = {
+            "payload": {
+                "items": [
+                    {
+                        "productId": product_id,
+                        "selectedQuantity": 1,
+                        "fulfillmentType": "SHIPPING",
+                    }
+                ]
+            }
+        }
+
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v2/cart/items",
+                json=payload,
+                headers=cart_headers,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                if data.get("status") == "SUCCESS" or data.get("payload"):
+                    logger.info("Sam's Club: added to cart via v2 API")
+                    return True
+        except Exception as exc:
+            logger.debug("Sam's Club v2 cart add error: %s", exc)
+
+        # Fallback: try alternative cart endpoint
+        alt_payload = {
+            "items": [
+                {
+                    "itemId": product_id,
+                    "quantity": 1,
+                    "type": "SHIPPING",
+                }
+            ]
+        }
+
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/soa/services/v1/cart/addItem",
+                json=alt_payload,
+                headers=cart_headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Sam's Club: added to cart via SOA API")
+                return True
+        except Exception as exc:
+            logger.debug("Sam's Club SOA cart add error: %s", exc)
+
+        # Another fallback: GraphQL-style endpoint
+        graphql_payload = {
+            "productId": product_id,
+            "quantity": 1,
+            "fulfillmentOption": "SHIPPING",
+        }
+
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v1/cart/item",
+                json=graphql_payload,
+                headers=cart_headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Sam's Club: added to cart via v1 API")
+                return True
+        except Exception as exc:
+            logger.debug("Sam's Club v1 cart add error: %s", exc)
+
+        return False
+
+    async def _sams_set_shipping(
+        self, client: httpx.AsyncClient, profile: Profile
+    ) -> bool:
+        """Set shipping address on Sam's Club cart."""
+        if not profile.address_line1:
+            logger.debug("Sam's Club: no shipping address in profile, skipping")
+            return True  # Hope the default address is set on the account
+
+        shipping_headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Referer": "https://www.samsclub.com/cart",
+            "Origin": "https://www.samsclub.com",
+        }
+
+        address_payload = {
+            "payload": {
+                "address": {
+                    "firstName": profile.first_name,
+                    "lastName": profile.last_name,
+                    "addressLine1": profile.address_line1,
+                    "addressLine2": profile.address_line2,
+                    "city": profile.city,
+                    "state": profile.state,
+                    "postalCode": profile.zip_code,
+                    "country": "US",
+                    "phone": profile.phone,
+                    "email": profile.email,
+                }
+            }
+        }
+
+        try:
+            resp = await client.put(
+                "https://www.samsclub.com/api/node/vivaldi/v2/cart/shipping",
+                json=address_payload,
+                headers=shipping_headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Sam's Club: shipping address set")
+                return True
+            logger.debug("Sam's Club: set shipping returned %d", resp.status_code)
+        except Exception as exc:
+            logger.debug("Sam's Club set shipping error: %s", exc)
+
+        # Continue anyway — account may have default address
+        return True
+
+    async def _sams_checkout(self, client: httpx.AsyncClient, creds: AccountCredentials) -> bool:
+        """Initiate Sam's Club checkout."""
+        checkout_headers = {
+            **HEADERS,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Origin": "https://www.samsclub.com",
+            "Referer": "https://www.samsclub.com/cart",
+        }
+
+        # Step 1: Initialize checkout (get checkout session)
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v2/checkout",
+                json={"payload": {"type": "SHIPPING"}},
+                headers=checkout_headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Sam's Club: checkout initiated")
+
+                # Step 2: Submit payment if CVV provided
+                if creds.card_cvv:
+                    await self._sams_submit_payment(client, creds, checkout_headers)
+
+                # Step 3: Place order
+                return await self._sams_place_order(client, checkout_headers)
+        except Exception as exc:
+            logger.debug("Sam's Club checkout init error: %s", exc)
+
+        # Fallback: try direct order submission
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v1/checkout/submit",
+                json={"payload": {"orderType": "ONLINE"}},
+                headers=checkout_headers,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                if data.get("status") == "SUCCESS" or data.get("payload", {}).get("orderId"):
+                    logger.info("Sam's Club: order placed via v1 submit")
+                    return True
+        except Exception as exc:
+            logger.debug("Sam's Club v1 submit error: %s", exc)
+
+        return False
+
+    async def _sams_submit_payment(
+        self, client: httpx.AsyncClient, creds: AccountCredentials, headers: dict
+    ) -> bool:
+        """Submit payment verification (CVV) for Sam's Club checkout."""
+        try:
+            payment_payload = {
+                "payload": {
+                    "cvv": creds.card_cvv,
+                }
+            }
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v2/checkout/payment",
+                json=payment_payload,
+                headers=headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Sam's Club: payment CVV submitted")
+                return True
+            logger.debug("Sam's Club: payment submission returned %d", resp.status_code)
+        except Exception as exc:
+            logger.debug("Sam's Club payment error: %s", exc)
+        return False
+
+    async def _sams_place_order(self, client: httpx.AsyncClient, headers: dict) -> bool:
+        """Place the Sam's Club order."""
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v2/checkout/placeOrder",
+                json={"payload": {}},
+                headers=headers,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                order_id = data.get("payload", {}).get("orderId", "")
+                if order_id:
+                    logger.info("Sam's Club: order placed! ID: %s", order_id)
+                else:
+                    logger.info("Sam's Club: order placed (no order ID in response)")
+                return True
+        except Exception as exc:
+            logger.debug("Sam's Club place order error: %s", exc)
+
+        # Fallback endpoint
+        try:
+            resp = await client.post(
+                "https://www.samsclub.com/api/node/vivaldi/v2/checkout/submit",
+                json={},
+                headers=headers,
+            )
+            if resp.status_code in (200, 201):
+                logger.info("Sam's Club: order placed via submit endpoint")
+                return True
+        except Exception as exc:
+            logger.debug("Sam's Club submit order error: %s", exc)
+
+        return False
+
     async def close(self):
         for client in self._clients.values():
             if not client.is_closed:

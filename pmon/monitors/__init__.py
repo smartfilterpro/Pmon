@@ -6,6 +6,7 @@ from .target import TargetMonitor
 from .bestbuy import BestBuyMonitor
 from .walmart import WalmartMonitor
 from .costco import CostcoMonitor
+from .samsclub import SamsClubMonitor
 from .redsky_poller import RedSkyPoller, RedSkyProductData, RedSkySearch, SearchResult
 from .bestbuy_search import BestBuySearch
 
@@ -15,6 +16,7 @@ MONITORS: dict[str, type[BaseMonitor]] = {
     "bestbuy": BestBuyMonitor,
     "walmart": WalmartMonitor,
     "costco": CostcoMonitor,
+    "samsclub": SamsClubMonitor,
 }
 
 

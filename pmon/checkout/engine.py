@@ -3411,3 +3411,362 @@ class CheckoutEngine:
         finally:
             await page.close()
             await context.close()
+
+    # ------------------------------------------------------------------
+    # Sam's Club browser checkout
+    # ------------------------------------------------------------------
+
+    async def _checkout_samsclub(
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
+        dry_run: bool = False, **kwargs,
+    ) -> CheckoutResult:
+        """Sam's Club browser checkout flow.
+
+        Sam's Club is a membership-only warehouse club. The browser checkout:
+        1. Load product page
+        2. Sign in (if needed)
+        3. Add to cart
+        4. Navigate to checkout
+        5. Submit payment (CVV if card on file)
+        6. Place order
+
+        Session cookies are preferred — import via Dashboard to skip login.
+        """
+        context = await self._get_context("samsclub", load_cookies=True)
+        page = await context.new_page()
+
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await wait_for_page_ready(page, timeout=15000)
+
+            # Human-like: browse the page briefly
+            await idle_scroll(page, scrolls=2)
+            await random_delay(1.0, 2.5)
+            await sweep_popups(page)
+
+            # Check if we need to sign in
+            if await self._sams_needs_login(page):
+                login_ok = await self._sign_in_samsclub(page, creds)
+                if not login_ok:
+                    await self._save_context(context, "samsclub")
+                    return CheckoutResult(
+                        url=url, retailer="samsclub", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=(
+                            "Sam's Club sign-in failed. Import session cookies via "
+                            "Dashboard > Accounts > Sam's Club > Import Cookies"
+                        ),
+                    )
+                await page.goto(url, wait_until="domcontentloaded")
+                await wait_for_page_ready(page, timeout=15000)
+                await sweep_popups(page)
+
+            # Add to cart
+            add_ok = await self._sams_add_to_cart_browser(page)
+            if not add_ok:
+                await self._save_context(context, "samsclub")
+                return CheckoutResult(
+                    url=url, retailer="samsclub", product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Could not add item to cart — may be out of stock or membership-restricted",
+                )
+
+            await random_delay(1.5, 3.0)
+
+            # Navigate to checkout
+            checkout_ok = await self._sams_navigate_to_checkout(page)
+            if not checkout_ok:
+                await self._save_context(context, "samsclub")
+                return CheckoutResult(
+                    url=url, retailer="samsclub", product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Could not navigate to Sam's Club checkout",
+                )
+
+            await random_delay(2.0, 4.0)
+            await sweep_popups(page)
+
+            if dry_run:
+                logger.info("DRY RUN: stopping before placing order at Sam's Club")
+                await self._save_context(context, "samsclub")
+                return CheckoutResult(
+                    url=url, retailer="samsclub", product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Dry run — stopped before placing order",
+                )
+
+            # Place order
+            order_placed = await self._sams_place_order_browser(page, creds)
+            await self._save_context(context, "samsclub")
+
+            if order_placed:
+                return CheckoutResult(
+                    url=url, retailer="samsclub", product_name=product_name,
+                    status=CheckoutStatus.SUCCESS,
+                    error_message="Order placed — check your Sam's Club account for confirmation",
+                )
+
+            return CheckoutResult(
+                url=url, retailer="samsclub", product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Sam's Club checkout flow failed — check order status manually",
+            )
+
+        except Exception as e:
+            try:
+                await self._save_context(context, "samsclub")
+            except Exception:
+                pass
+            return CheckoutResult(
+                url=url, retailer="samsclub", product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message=str(e),
+            )
+        finally:
+            await page.close()
+            await context.close()
+
+    async def _sams_needs_login(self, page) -> bool:
+        """Check if Sam's Club page shows a logged-out state."""
+        try:
+            sign_in_btn = await page.query_selector(
+                'a[href*="login"], a[href*="signin"], '
+                'button:has-text("Sign in"), button:has-text("Log in"), '
+                '[data-automation="sign-in"]'
+            )
+            if sign_in_btn and await sign_in_btn.is_visible():
+                member_el = await page.query_selector(
+                    '[data-automation="member-name"], '
+                    '.member-greeting, '
+                    'text="Hi, "'
+                )
+                if not member_el:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _sign_in_samsclub(self, page, creds: AccountCredentials) -> bool:
+        """Sign in to Sam's Club."""
+        if not creds.email or not creds.password:
+            logger.warning("Sam's Club: no credentials provided for login")
+            return False
+
+        try:
+            await page.goto(
+                "https://www.samsclub.com/login",
+                wait_until="domcontentloaded",
+            )
+            await wait_for_page_ready(page, timeout=15000)
+            await sweep_popups(page)
+            await random_delay(1.0, 2.0)
+
+            # Enter email
+            email_input = await page.wait_for_selector(
+                'input[type="email"], input[name="email"], input[id="email"], '
+                'input[autocomplete="email"], input[data-automation="email-input"]',
+                timeout=10000,
+            )
+            if email_input:
+                await human_click_element(page, email_input)
+                await human_type(page, creds.email)
+                await random_delay(0.5, 1.0)
+
+            # Enter password
+            password_input = await page.wait_for_selector(
+                'input[type="password"], input[name="password"], '
+                'input[data-automation="password-input"]',
+                timeout=5000,
+            )
+            if password_input:
+                await human_click_element(page, password_input)
+                await human_type(page, creds.password)
+                await random_delay(0.5, 1.5)
+
+            # Click sign in
+            sign_in_btn = await page.query_selector(
+                'button[type="submit"], button:has-text("Sign in"), '
+                'button:has-text("Log in"), button[data-automation="login-btn"]'
+            )
+            if sign_in_btn:
+                await human_click_element(page, sign_in_btn)
+
+            await wait_for_url_change(page, timeout=15000)
+            await wait_for_page_ready(page, timeout=10000)
+
+            if "login" not in page.url.lower() and "signin" not in page.url.lower():
+                logger.info("Sam's Club: sign-in successful")
+                return True
+
+            logger.warning("Sam's Club: sign-in may have failed (still on login page)")
+            return False
+
+        except Exception as e:
+            logger.error("Sam's Club sign-in error: %s", e)
+            return False
+
+    async def _sams_add_to_cart_browser(self, page) -> bool:
+        """Click 'Add to Cart' on a Sam's Club product page."""
+        try:
+            selectors = [
+                'button[data-automation="add-to-cart"]',
+                'button:has-text("Add to cart")',
+                'button:has-text("Add to Cart")',
+                'button[id*="addToCart"]',
+                'button[class*="addToCart"]',
+                '[data-automation="ship-it-cta"]',
+                'button:has-text("Ship this item")',
+            ]
+
+            for selector in selectors:
+                btn = await page.query_selector(selector)
+                if btn and await btn.is_visible():
+                    if not await btn.is_disabled():
+                        await human_click_element(page, btn)
+                        await random_delay(1.5, 3.0)
+
+                        # Wait for cart confirmation
+                        try:
+                            await page.wait_for_selector(
+                                '[data-automation="cart-confirm"], '
+                                '.sc-cart-notification, '
+                                'text="Added to cart", '
+                                'text="added to your cart", '
+                                '[class*="cartConfirm"]',
+                                timeout=8000,
+                            )
+                            logger.info("Sam's Club: item added to cart")
+                            return True
+                        except Exception:
+                            if "/cart" in page.url:
+                                logger.info("Sam's Club: navigated to cart after add")
+                                return True
+                            logger.debug("Sam's Club: no cart confirmation, continuing")
+                            return True
+
+            # Fallback: vision-based click
+            try:
+                clicked = await self._smart_click(page, "Add to Cart button")
+                if clicked:
+                    await random_delay(2.0, 3.5)
+                    return True
+            except Exception:
+                pass
+
+            logger.warning("Sam's Club: could not find Add to Cart button")
+            return False
+
+        except Exception as e:
+            logger.error("Sam's Club add-to-cart error: %s", e)
+            return False
+
+    async def _sams_navigate_to_checkout(self, page) -> bool:
+        """Navigate from cart confirmation to checkout."""
+        try:
+            checkout_selectors = [
+                'a:has-text("Checkout")',
+                'button:has-text("Checkout")',
+                'a:has-text("Check out")',
+                'button:has-text("Check out")',
+                '[data-automation="checkout-btn"]',
+                'a[href*="checkout"]',
+                'a:has-text("View cart")',
+                'button:has-text("View cart")',
+            ]
+
+            for selector in checkout_selectors:
+                btn = await page.query_selector(selector)
+                if btn and await btn.is_visible():
+                    await human_click_element(page, btn)
+                    await wait_for_page_ready(page, timeout=15000)
+                    if "checkout" in page.url.lower() or "cart" in page.url.lower():
+                        break
+
+            if "checkout" not in page.url.lower():
+                if "cart" not in page.url.lower():
+                    await page.goto(
+                        "https://www.samsclub.com/cart",
+                        wait_until="domcontentloaded",
+                    )
+                    await wait_for_page_ready(page, timeout=10000)
+
+                await random_delay(1.0, 2.0)
+                checkout_btn = await page.query_selector(
+                    'button:has-text("Checkout"), button:has-text("Check out"), '
+                    'a:has-text("Checkout"), [data-automation="checkout-btn"]'
+                )
+                if checkout_btn and await checkout_btn.is_visible():
+                    await human_click_element(page, checkout_btn)
+                    await wait_for_page_ready(page, timeout=15000)
+
+            if "checkout" in page.url.lower() or "order" in page.url.lower():
+                logger.info("Sam's Club: on checkout page")
+                return True
+
+            logger.warning("Sam's Club: could not reach checkout (URL: %s)", page.url)
+            return False
+
+        except Exception as e:
+            logger.error("Sam's Club checkout navigation error: %s", e)
+            return False
+
+    async def _sams_place_order_browser(self, page, creds: AccountCredentials) -> bool:
+        """Complete the Sam's Club checkout and place the order."""
+        try:
+            await wait_for_page_ready(page, timeout=10000)
+            await sweep_popups(page)
+
+            # Enter CVV if needed
+            cvv_input = await page.query_selector(
+                'input[name="cvv"], input[id*="cvv"], input[name="securityCode"], '
+                'input[autocomplete="cc-csc"], input[data-automation="cvv-input"]'
+            )
+            if cvv_input and await cvv_input.is_visible() and creds.card_cvv:
+                await human_click_element(page, cvv_input)
+                await human_type(page, creds.card_cvv)
+                await random_delay(0.5, 1.0)
+
+            # Click place order
+            place_order_selectors = [
+                'button:has-text("Place order")',
+                'button:has-text("Place Order")',
+                'button:has-text("Submit order")',
+                'button:has-text("Complete purchase")',
+                '[data-automation="place-order-btn"]',
+                '[data-automation="submit-order"]',
+                'button[type="submit"]:has-text("order")',
+            ]
+
+            for selector in place_order_selectors:
+                btn = await page.query_selector(selector)
+                if btn and await btn.is_visible():
+                    enabled = await wait_for_button_enabled(page, selector, timeout=10000)
+                    if enabled:
+                        await human_click_element(page, btn)
+                        logger.info("Sam's Club: clicked place order button")
+
+                        # Wait for order confirmation
+                        try:
+                            await page.wait_for_selector(
+                                'text="Order confirmed", text="order number", '
+                                'text="Thank you", text="Order placed", '
+                                '[data-automation="order-confirmation"]',
+                                timeout=30000,
+                            )
+                            logger.info("Sam's Club: order confirmed!")
+                            return True
+                        except Exception:
+                            await random_delay(3.0, 5.0)
+                            if "confirmation" in page.url.lower() or "thankyou" in page.url.lower():
+                                logger.info("Sam's Club: on order confirmation page")
+                                return True
+
+                        logger.warning("Sam's Club: order may have been placed — check account")
+                        return True
+
+            logger.warning("Sam's Club: could not find place order button")
+            return False
+
+        except Exception as e:
+            logger.error("Sam's Club place order error: %s", e)
+            return False

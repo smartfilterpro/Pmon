@@ -30,6 +30,10 @@ products:
     name: "Example Walmart Product"
     auto_checkout: false
 
+  - url: "https://www.samsclub.com/p/example-pokemon-cards/prod12345678"
+    name: "Example Sam's Club Product"
+    auto_checkout: false
+
 # Checkout profiles (for auto-checkout)
 profiles:
   default:
@@ -54,6 +58,9 @@ accounts:
     email: ""
     password: ""
   bestbuy:
+    email: ""
+    password: ""
+  samsclub:
     email: ""
     password: ""
   pokemoncenter:
