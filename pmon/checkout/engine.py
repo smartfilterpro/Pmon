@@ -922,6 +922,14 @@ class CheckoutEngine:
             button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=15000)
 
             if not button_enabled:
+                # Check if checkout is blocked by a shipping minimum (e.g. $35).
+                # Target disables the checkout button when the cart total is below
+                # the shipping threshold.  Switching to Order Pickup bypasses this.
+                switched_to_pickup = await self._target_switch_to_pickup_if_minimum(page)
+                if switched_to_pickup:
+                    button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
+
+            if not button_enabled:
                 # Last resort: nuke overlays and retry wait
                 logger.info("Target: checkout button still disabled — clearing overlays and retrying")
                 await self._nuke_floating_ui_portals(page)
@@ -1361,6 +1369,80 @@ class CheckoutEngine:
 
         except Exception as exc:
             logger.debug("Target delivery selection error (non-fatal): %s", exc)
+
+    async def _target_switch_to_pickup_if_minimum(self, page) -> bool:
+        """Switch to Order Pickup if the checkout button is disabled due to a shipping minimum.
+
+        Target requires a $35 minimum for shipping orders. When the cart total
+        is below that threshold the checkout button is disabled and the page
+        shows a message like "Add $31.01 more to qualify for shipping" or
+        "These items only ship with $35 orders".  Switching all items to
+        Order Pickup (no minimum) enables the checkout button.
+
+        Returns True if we successfully switched to pickup.
+        """
+        try:
+            # Detect the shipping minimum message
+            minimum_indicators = [
+                'text=/ship.+\\$35/i',
+                'text=/qualify for shipping/i',
+                'text=/more to qualify/i',
+                'text=/minimum/i',
+                'text=/only ship with/i',
+            ]
+            has_minimum_block = False
+            for sel in minimum_indicators:
+                try:
+                    if await page.locator(sel).first.is_visible(timeout=1500):
+                        has_minimum_block = True
+                        break
+                except Exception:
+                    continue
+
+            if not has_minimum_block:
+                return False
+
+            logger.info("Target: cart below shipping minimum — switching to Order Pickup")
+
+            # Try clicking "Change all to pickup" or equivalent
+            pickup_selectors = [
+                'button:has-text("Change all to pickup")',
+                'a:has-text("Change all to pickup")',
+                'button:has-text("switch items to pickup")',
+                'a:has-text("switch items to pickup")',
+                'button:has-text("Switch to pickup")',
+                'button:has-text("Pickup")',
+                'button:has-text("Order Pickup")',
+                'button[data-test="fulfillmentOptionPickup"]',
+                '[data-test="pickup-option"]',
+            ]
+            for sel in pickup_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.is_visible(timeout=1500):
+                        await human_click_element(page, loc)
+                        logger.info("Target: switched to pickup via %s", sel)
+                        await wait_for_page_ready(page, timeout=8000)
+                        return True
+                except Exception:
+                    continue
+
+            # Vision fallback
+            if await self._smart_click(
+                page, "Change all to pickup or Switch to pickup button",
+                "",
+                timeout=3000,
+            ):
+                logger.info("Target: switched to pickup via vision fallback")
+                await wait_for_page_ready(page, timeout=8000)
+                return True
+
+            logger.warning("Target: detected shipping minimum but could not switch to pickup")
+            return False
+
+        except Exception as exc:
+            logger.debug("Target pickup switch error (non-fatal): %s", exc)
+            return False
 
     async def _target_navigate_checkout(self, page, creds: AccountCredentials | None = None):
         """Navigate through Target's multi-step checkout pages.
