@@ -889,19 +889,22 @@ class CheckoutEngine:
                 logger.warning("Target: cart is empty after add-to-cart — checkout will fail")
                 raise Exception("Cart is empty — item was not successfully added")
 
-            # Re-verify login on cart page — stale session cookies may have let
-            # us add to cart as guest, but checkout requires a real session.
-            # Target often shows "Sign in" on the cart page when session expired.
-            if not await self._is_signed_in_target(page):
-                logger.info("Target: not signed in on cart page — signing in before checkout")
+            # Always sign in on the cart page before checkout.
+            # Session cookies from earlier visits may look valid (accessToken
+            # present, not expired) but Target degrades them to guest-level
+            # after some time.  The checkout button stays disabled for guests
+            # even though add-to-cart works.  Signing in fresh is the only
+            # reliable way to get a checkout-capable session.
+            if creds:
+                logger.info("Target: signing in on cart page before checkout")
                 await self._sign_in_target(page, creds)
                 # Navigate back to cart after login
                 await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                 await wait_for_page_ready(page, timeout=15000)
                 await self._nuke_floating_ui_portals(page)
                 await sweep_popups(page)
-                if not await self._is_signed_in_target(page):
-                    logger.warning("Target: still not signed in after login attempt on cart page")
+            else:
+                logger.warning("Target: no credentials available — skipping sign-in")
 
             # --- Handle delivery method selection on cart page ---
             # Target requires choosing "Shipping" or "Pickup" for each item.
