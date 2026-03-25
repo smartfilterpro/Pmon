@@ -925,6 +925,7 @@ class CheckoutEngine:
                 # Check if checkout is blocked by a shipping minimum (e.g. $35).
                 # Target disables the checkout button when the cart total is below
                 # the shipping threshold.  Switching to Order Pickup bypasses this.
+                logger.info("Target: checkout button disabled — checking for shipping minimum")
                 switched_to_pickup = await self._target_switch_to_pickup_if_minimum(page)
                 if switched_to_pickup:
                     button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
@@ -1472,7 +1473,6 @@ class CheckoutEngine:
             if "shipping minimum" in str(exc):
                 raise  # re-raise our clear error message
             logger.debug("Target pickup switch error (non-fatal): %s", exc)
-            return False
             return False
 
     async def _target_navigate_checkout(self, page, creds: AccountCredentials | None = None):
