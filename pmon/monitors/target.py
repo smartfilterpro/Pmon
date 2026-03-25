@@ -33,10 +33,10 @@ class TargetMonitor(BaseMonitor):
 
     # Target's Redsky API endpoints (same base, different aggregation paths)
     REDSKY_BASE = "https://redsky.target.com/redsky_aggregations/v1/web"
-    # Current endpoint (as of 2026-03) — Target renamed from pdp_client_v1
-    FULFILLMENT_URL = f"{REDSKY_BASE}/product_fulfillment_v1"
-    # Fallback: older endpoint names that may still work on some products
-    FULFILLMENT_URL_LEGACY = f"{REDSKY_BASE}/product_fulfillment_and_variation_hierarchy_v1"
+    # Primary endpoint — confirmed from network capture (2026-03-25)
+    FULFILLMENT_URL = f"{REDSKY_BASE}/product_fulfillment_and_variation_hierarchy_v1"
+    # Fallback endpoints
+    FULFILLMENT_URL_ALT = f"{REDSKY_BASE}/product_fulfillment_v1"
     PDP_URL = f"{REDSKY_BASE}/pdp_client_v1"
 
     # API keys observed from Target's real frontend (2026-03-17)
@@ -276,10 +276,10 @@ class TargetMonitor(BaseMonitor):
                     break
                 elif resp.status_code in (404, 410):
                     # 404 = endpoint not found, 410 = gone/deprecated key
-                    # Either way, try legacy endpoint as fallback
-                    logger.debug("Target: product_fulfillment_v1 returned %d, trying legacy endpoint for %s", resp.status_code, tcin)
+                    # Either way, try alternate endpoint as fallback
+                    logger.debug("Target: fulfillment returned %d, trying alt endpoint for %s", resp.status_code, tcin)
                     legacy_resp = await client.get(
-                        self.FULFILLMENT_URL_LEGACY,
+                        self.FULFILLMENT_URL_ALT,
                         params=fulfillment_params,
                         headers=self._redsky_headers(url),
                     )

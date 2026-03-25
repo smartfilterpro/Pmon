@@ -75,10 +75,10 @@ class RedSkyPoller:
         Override the default RedSky API key.
     """
 
-    REDSKY_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1"
-    # pdp_fulfillment_v1 — documented in the LumaDevelopment gist as the
-    # primary fulfillment endpoint Target exposes publicly.
-    REDSKY_PDP_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_fulfillment_v1"
+    # Primary endpoint — confirmed from network capture (2026-03-25)
+    REDSKY_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_and_variation_hierarchy_v1"
+    # Fallback endpoints
+    REDSKY_PDP_FULFILLMENT = "https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1"
     REDSKY_PDP_LEGACY = "https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1"
 
     # Observed from Target's real frontend — rotated on 403.
