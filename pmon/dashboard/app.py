@@ -1591,6 +1591,25 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                             await human_type(page, email)
                             await random_delay(page, 200, 400)
 
+                    # Dispatch native events so React/controlled-component forms
+                    # recognise the programmatically-entered value and enable submit.
+                    try:
+                        await page.evaluate("""(sel) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return;
+                            // Set via native setter to bypass React's synthetic wrapper
+                            const nativeSetter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value'
+                            )?.set;
+                            if (nativeSetter) nativeSetter.call(el, el.value);
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                            el.dispatchEvent(new Event('blur', {bubbles: true}));
+                        }""", email_sel.split(",")[0].strip())
+                        await random_delay(page, 200, 400)
+                    except Exception:
+                        pass
+
                 # Check if password field is visible yet (single-step) or needs submit first (multi-step)
                 pass_visible = False
                 try:
@@ -1614,7 +1633,9 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     except Exception:
                         pass
                     # Wait for submit button to be enabled (grayed-out fix)
-                    await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                    _wait_submit_sel_sp = submit_sel.split(",")[0].strip() if submit_sel else 'button[type="submit"]'
+                    if not await wait_for_button_enabled(page, _wait_submit_sel_sp, timeout=15000):
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=3000)
                     await random_delay(page, 100, 300)
                     # Try selector click, then get_by_role, then vision
                     single_submit_clicked = await click_visible_button(page, submit_sel)
@@ -1653,8 +1674,33 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # Multi-step: submit email/phone first (unless auth picker already showing)
                     if not auth_picker_already_visible:
                         # Wait for submit button to be enabled (grayed-out fix)
-                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        # Use the retailer's actual first submit selector when possible
+                        _wait_submit_sel = submit_sel.split(",")[0].strip() if submit_sel else 'button[type="submit"]'
+                        btn_became_enabled = await wait_for_button_enabled(page, _wait_submit_sel, timeout=15000)
+                        if not btn_became_enabled:
+                            # Fallback: also try the generic type=submit
+                            btn_became_enabled = await wait_for_button_enabled(page, 'button[type="submit"]', timeout=3000)
                         await random_delay(page, 100, 300)
+
+                        # Try JS-based enable: force-remove disabled state from submit buttons
+                        # Target's React form may keep the button disabled due to stale internal state
+                        if not btn_became_enabled:
+                            try:
+                                await page.evaluate("""() => {
+                                    for (const btn of document.querySelectorAll('button[type="submit"], button')) {
+                                        const text = (btn.textContent || '').toLowerCase();
+                                        if (text.includes('continue') || text.includes('sign in') || btn.type === 'submit') {
+                                            btn.disabled = false;
+                                            btn.removeAttribute('aria-disabled');
+                                            btn.style.pointerEvents = 'auto';
+                                        }
+                                    }
+                                }""")
+                                logger.info("Test login %s: force-enabled submit buttons via JS", retailer_name)
+                                await random_delay(page, 200, 400)
+                            except Exception:
+                                pass
+
                         # Use multiple strategies to find and click the submit/continue button
                         submit_clicked = await click_visible_button(page, submit_sel)
                         if submit_clicked:
@@ -1665,7 +1711,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 try:
                                     btn = page.get_by_role("button", name=btn_text, exact=False)
                                     if await btn.first.is_visible(timeout=500):
-                                        await btn.first.click()
+                                        await btn.first.click(force=True)
                                         submit_clicked = True
                                         logger.info("Test login %s: clicked submit via get_by_role('%s')", retailer_name, btn_text)
                                         break
@@ -1677,12 +1723,22 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                 try:
                                     link = page.get_by_text(link_text, exact=False)
                                     if await link.first.is_visible(timeout=500):
-                                        await link.first.click()
+                                        await link.first.click(force=True)
                                         submit_clicked = True
                                         logger.info("Test login %s: clicked submit via get_by_text('%s')", retailer_name, link_text)
                                         break
                                 except Exception:
                                     continue
+                        if not submit_clicked:
+                            # Try pressing Enter on the email field as fallback
+                            try:
+                                email_loc = page.locator(email_sel).first
+                                if await email_loc.is_visible(timeout=500):
+                                    await email_loc.press("Enter")
+                                    submit_clicked = True
+                                    logger.info("Test login %s: pressed Enter on email field as submit fallback", retailer_name)
+                            except Exception:
+                                pass
                         if not submit_clicked:
                             # Last resort: vision
                             logger.info("Test login %s: all selectors failed, trying vision click for submit button", retailer_name)
@@ -1793,7 +1849,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                                         await human_type(page, email)
                                         await random_delay(page, 300, 600)
                                         # Re-use the same multi-strategy click
-                                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=10000)
+                                        _retry_sel = submit_sel.split(",")[0].strip() if submit_sel else 'button[type="submit"]'
+                                        await wait_for_button_enabled(page, _retry_sel, timeout=10000)
                                         for btn_text in ["Continue with email", "Continue", "Sign in"]:
                                             try:
                                                 btn = page.get_by_role("button", name=btn_text, exact=False)
