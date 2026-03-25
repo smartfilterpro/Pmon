@@ -24,7 +24,8 @@ from pmon.monitors.redsky_poller import SearchResult
 logger = logging.getLogger(__name__)
 
 _BASE = "https://www.pokemoncenter.com"
-_SEARCH_URL = f"{_BASE}/search"
+# Pokemon Center uses path-based search: /search/{query}
+_SEARCH_PATH = f"{_BASE}/search"
 
 # Headers that mimic a browser navigating to the search page.
 _SEARCH_HEADERS = {
@@ -41,7 +42,7 @@ _API_HEADERS = {
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-origin",
     "Referer": f"{_BASE}/",
-    "x-application-name": "pokemon-center",
+    "x-application-name": "tempo",
 }
 
 
@@ -177,12 +178,15 @@ class PokemonCenterSearch:
 
         try:
             page = (offset // self.max_results) + 1
-            params = {"q": keyword}
+            # Pokemon Center uses path-based search: /search/{query}
+            # Also try query param fallback in case the path format changes.
+            search_url = f"{_SEARCH_PATH}/{quote_plus(keyword)}"
+            params = {}
             if page > 1:
                 params["page"] = str(page)
 
             resp = await client.get(
-                _SEARCH_URL,
+                search_url,
                 params=params,
                 headers=_SEARCH_HEADERS,
             )
