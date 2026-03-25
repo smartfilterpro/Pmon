@@ -339,7 +339,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         name = data.get("name", "")
         retailer = detect_retailer(url)
         if retailer == "unknown":
-            return JSONResponse({"error": "Unsupported retailer. Supported: Pokemon Center, Target, Best Buy, Walmart"}, 400)
+            return JSONResponse({"error": "Unsupported retailer. Supported: Pokemon Center, Target, Best Buy, Walmart, Costco, Sam's Club"}, 400)
         quantity = max(1, int(data.get("quantity", 1)))
         auto = bool(data.get("auto_checkout", False))
 
@@ -438,7 +438,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         card_cvv = data.get("card_cvv", "").strip()
         phone_last4 = data.get("phone_last4", "").strip()
         account_last_name = data.get("account_last_name", "").strip()
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv,
                                 phone_last4=phone_last4, account_last_name=account_last_name)
@@ -453,7 +453,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         data = await request.json()
         retailer = data.get("retailer", "").strip()
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
 
         accounts = db.get_retailer_accounts(user["id"])
@@ -1134,6 +1134,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             # Costco: direct navigation to /LogonForm or signin.costco.com
             # gets blocked. Must go to homepage and click the account link.
             "costco": None,
+            # Sam's Club: direct login page works
+            "samsclub": "https://www.samsclub.com/login",
         }
 
         # Fallback: navigate to homepage and click sign-in link if direct URL fails
@@ -1143,6 +1145,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "bestbuy": "https://www.bestbuy.com",
             "pokemoncenter": "https://www.pokemoncenter.com",
             "costco": "https://www.costco.com",
+            "samsclub": "https://www.samsclub.com",
         }
 
         SIGNIN_LINK_SELECTORS = {
@@ -1151,6 +1154,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
             "bestbuy": 'a[href*="/signin"], a[href*="/identity"], a:has-text("Sign In"), .account-button',
             "pokemoncenter": 'a[href*="/account/login"], a[href*="/account"], a:has-text("Sign In"), a:has-text("Log In")',
             "costco": 'a:has-text("Sign In / Register"), button:has-text("Sign In / Register"), span:has-text("Sign In / Register"), a:has-text("Sign in / Register"), button:has-text("Sign in / Register"), #header_sign_in, #header-sign-in, a[href*="/LogonForm"], a[href*="/login"], a[href*="/AccountManagementView"], a[href*="/myaccount"], [id*="header" i][id*="sign" i], [id*="header" i][id*="account" i], a:has-text("Sign In")',
+            "samsclub": 'a[href*="/login"], a[href*="/signin"], a:has-text("Sign in"), button:has-text("Sign in"), [data-automation="sign-in"], a:has-text("Log in")',
         }
 
         # Selectors for each retailer's login form
@@ -1190,10 +1194,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "success": 'a[href*="/myaccount"], a[href*="/AccountStatusView"], [id*="myaccount" i], a:has-text("My Account"), a:has-text("Account"), a:has-text("My Orders")',
                 "error": '.error-message, [class*="error" i], [role="alert"], .field-error, #claimVerificationServerError, .pageLevel-error',
             },
+            "samsclub": {
+                "email": 'input[type="email"], input[name="email"], input[id="email"], input[autocomplete="email"], input[data-automation="email-input"]',
+                "password": 'input[type="password"], input[name="password"], input[data-automation="password-input"]',
+                "submit": 'button[type="submit"], button:has-text("Sign in"), button:has-text("Log in"), button[data-automation="login-btn"]',
+                "success": '[data-automation="member-name"], .member-greeting, a[href*="/account"], a:has-text("My Account"), a:has-text("Hi, ")',
+                "error": '.error-message, [class*="error" i], [role="alert"], [data-automation*="error"]',
+            },
         }
 
         sel = SELECTORS[retailer]
-        retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center", "costco": "Costco"}[retailer]
+        retailer_name = {"target": "Target", "walmart": "Walmart", "bestbuy": "Best Buy", "pokemoncenter": "Pokemon Center", "costco": "Costco", "samsclub": "Sam's Club"}[retailer]
 
         # Import shared stealth JS and Chrome version from checkout engine
         from pmon.checkout.engine import STEALTH_JS
@@ -2436,7 +2447,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     async def api_get_sessions(user: dict = Depends(get_current_user)):
         """List which retailers have imported session cookies."""
         result = {}
-        for retailer in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
+        for retailer in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
             session = db.get_retailer_session(user["id"], retailer)
             if session:
                 import json as _json
@@ -2471,7 +2482,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         retailer = data.get("retailer", "").strip()
         cookies_raw = data.get("cookies")
 
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
 
         if not cookies_raw:
@@ -2516,7 +2527,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.delete("/api/sessions/{retailer}")
     async def api_delete_session(retailer: str, user: dict = Depends(get_current_user)):
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.delete_retailer_session(user["id"], retailer)
         return {"ok": True}
