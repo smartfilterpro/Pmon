@@ -818,146 +818,148 @@ class CheckoutEngine:
             # Clicking "Close" on these is unreliable — they respawn immediately.
             await self._nuke_floating_ui_portals(page)
 
-            # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
-            add_to_cart_sel = (
-                'button[data-test="shipItButton"], button[data-test="shippingButton"], '
-                'button:has-text("Ship it"), button:has-text("Add to cart")'
+            # --- Try "Buy now" first — skips cart entirely and goes straight
+            # to the order confirmation page.  Falls back to add-to-cart flow
+            # if "Buy now" isn't available (e.g. pickup-only items).
+            buy_now_sel = (
+                'button:has-text("Buy now"), '
+                'button[data-test="buyNowButton"], '
+                'a:has-text("Buy now")'
+            )
+            buy_now_clicked = await self._smart_click(
+                page, "Buy now", buy_now_sel, timeout=3000
             )
 
-            # Retry add-to-cart up to 3 times with popup clearing between attempts
-            add_to_cart_clicked = False
-            for attempt in range(3):
-                if attempt > 0:
-                    logger.info("Target: add-to-cart attempt %d/3", attempt + 1)
-                    await self._nuke_floating_ui_portals(page)
-                    await sweep_popups(page)
-                    await self._dismiss_health_consent_modal(page)
-                    await random_delay(page, 500, 1000)
-
-                add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
-                if add_to_cart_clicked:
-                    await random_delay(page, 1500, 2500)
-                    # Verify item was actually added — check for confirmation modal or cart count
-                    if await self._verify_target_add_to_cart(page):
-                        logger.info("Target: item confirmed added to cart")
-                        break
-                    else:
-                        logger.warning("Target: add-to-cart click succeeded but item not confirmed in cart")
-                        add_to_cart_clicked = False
-                else:
-                    # Popup may have blocked the click
-                    await self._dismiss_health_consent_modal(page)
-                    await sweep_popups(page)
-
-            if not add_to_cart_clicked:
-                error = await self._smart_read_error(page)
-                if error:
-                    raise Exception(f"Cannot add to cart: {error}")
-                raise Exception("Add to cart button not found or item not added after 3 attempts")
-
-            # Sweep popups after add-to-cart (health consent, coverage offers, etc.)
-            await self._nuke_floating_ui_portals(page)
-            await sweep_popups(page)
-
-            # Decline optional coverage/warranty if modal appears
-            await self._smart_click(
-                page, "No thanks / Decline coverage",
-                'button[data-test="espModalContent-declineCoverageButton"], button:has-text("No thanks"), '
-                'button:has-text("No, thanks")',
-                timeout=2000,
-            )
-            await random_delay(page, 300, 700)
-
-            # Go to cart via modal button or direct navigation
-            if not await self._smart_click(
-                page, "View cart & check out",
-                'button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"], '
-                'button:has-text("View cart"), button:has-text("View cart & check out")',
-                timeout=3000,
-            ):
-                await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+            if buy_now_clicked:
+                logger.info("Target: clicked 'Buy now' — skipping cart")
                 await wait_for_page_ready(page, timeout=15000)
+                await sweep_popups(page)
+                await self._nuke_floating_ui_portals(page)
 
-            # Aggressively clear popups on cart page before interacting
-            await self._nuke_floating_ui_portals(page)
-            await sweep_popups(page)
-            await random_mouse_jitter(page)
-            await random_delay(page, 300, 800)
+                # "Buy now" may land on a "Confirm your order" page directly
+                # or go through abbreviated checkout steps.
+                await self._target_navigate_checkout(page, creds)
+            else:
+                logger.info("Target: 'Buy now' not available — using add-to-cart flow")
+                # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
+                add_to_cart_sel = (
+                    'button[data-test="shipItButton"], button[data-test="shippingButton"], '
+                    'button:has-text("Ship it"), button:has-text("Add to cart")'
+                )
 
-            # Verify cart is not empty before proceeding
-            cart_empty = await self._is_target_cart_empty(page)
-            if cart_empty:
-                logger.warning("Target: cart is empty after add-to-cart — checkout will fail")
-                raise Exception("Cart is empty — item was not successfully added")
+                # Retry add-to-cart up to 3 times with popup clearing between attempts
+                add_to_cart_clicked = False
+                for attempt in range(3):
+                    if attempt > 0:
+                        logger.info("Target: add-to-cart attempt %d/3", attempt + 1)
+                        await self._nuke_floating_ui_portals(page)
+                        await sweep_popups(page)
+                        await self._dismiss_health_consent_modal(page)
+                        await random_delay(page, 500, 1000)
 
-            # --- Handle delivery method selection on cart page ---
-            # Target requires choosing "Shipping" or "Pickup" for each item.
-            # If there's a "Choose delivery method" prompt, select shipping.
-            await self._target_select_delivery(page)
+                    add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
+                    if add_to_cart_clicked:
+                        await random_delay(page, 1500, 2500)
+                        # Verify item was actually added — check for confirmation modal or cart count
+                        if await self._verify_target_add_to_cart(page):
+                            logger.info("Target: item confirmed added to cart")
+                            break
+                        else:
+                            logger.warning("Target: add-to-cart click succeeded but item not confirmed in cart")
+                            add_to_cart_clicked = False
+                    else:
+                        # Popup may have blocked the click
+                        await self._dismiss_health_consent_modal(page)
+                        await sweep_popups(page)
 
-            # Clear popups again before waiting for checkout button
-            await self._nuke_floating_ui_portals(page)
-            await sweep_popups(page)
+                if not add_to_cart_clicked:
+                    error = await self._smart_read_error(page)
+                    if error:
+                        raise Exception(f"Cannot add to cart: {error}")
+                    raise Exception("Add to cart button not found or item not added after 3 attempts")
 
-            # Wait for checkout button to be enabled (it's grayed out until
-            # delivery method is selected and cart is validated)
-            checkout_sel = 'button[data-test="checkout-button"]'
-            checkout_all_sel = (
-                'button[data-test="checkout-button"], button:has-text("Check out"), '
-                'a:has-text("Check out"), button[data-test="checkout-btn"]'
-            )
-            button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=15000)
-
-            if not button_enabled:
-                # Check if checkout is blocked by a shipping minimum (e.g. $35).
-                # Target disables the checkout button when the cart total is below
-                # the shipping threshold.  Switching to Order Pickup bypasses this.
-                logger.info("Target: checkout button disabled — checking for shipping minimum")
-                switched_to_pickup = await self._target_switch_to_pickup_if_minimum(page)
-                if switched_to_pickup:
-                    button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
-
-            if not button_enabled:
-                # Last resort: nuke overlays and retry wait
-                logger.info("Target: checkout button still disabled — clearing overlays and retrying")
+                # Sweep popups after add-to-cart (health consent, coverage offers, etc.)
                 await self._nuke_floating_ui_portals(page)
                 await sweep_popups(page)
-                # Try selecting delivery method again in case it didn't stick
-                await self._target_select_delivery(page)
-                button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
 
-            await random_delay(page, 200, 500)
+                # Decline optional coverage/warranty if modal appears
+                await self._smart_click(
+                    page, "No thanks / Decline coverage",
+                    'button[data-test="espModalContent-declineCoverageButton"], button:has-text("No thanks"), '
+                    'button:has-text("No, thanks")',
+                    timeout=2000,
+                )
+                await random_delay(page, 300, 700)
 
-            # Click checkout
-            if not await self._smart_click(page, "Check out", checkout_all_sel):
-                # Recovery: checkout button missing likely means we're not
-                # signed in — Target replaces it with a sign-in prompt.
-                logger.warning("Target: checkout button not found — checking if sign-in is required")
-                if not await self._is_signed_in_target(page):
-                    logger.info("Target: not signed in — attempting sign-in recovery from cart page")
-                    await self._sign_in_target(page, creds)
-                    # Navigate back to cart after login
+                # Go to cart via modal button or direct navigation
+                if not await self._smart_click(
+                    page, "View cart & check out",
+                    'button[data-test="addToCartModalViewCartCheckout"], a[href*="/cart"], '
+                    'button:has-text("View cart"), button:has-text("View cart & check out")',
+                    timeout=3000,
+                ):
                     await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                     await wait_for_page_ready(page, timeout=15000)
+
+                # Aggressively clear popups on cart page before interacting
+                await self._nuke_floating_ui_portals(page)
+                await sweep_popups(page)
+                await random_mouse_jitter(page)
+                await random_delay(page, 300, 800)
+
+                # Verify cart is not empty before proceeding
+                cart_empty = await self._is_target_cart_empty(page)
+                if cart_empty:
+                    logger.warning("Target: cart is empty after add-to-cart — checkout will fail")
+                    raise Exception("Cart is empty — item was not successfully added")
+
+                # --- Handle delivery method selection on cart page ---
+                # Target requires choosing "Shipping" or "Pickup" for each item.
+                # If there's a "Choose delivery method" prompt, select shipping.
+                await self._target_select_delivery(page)
+
+                # Clear popups again before waiting for checkout button
+                await self._nuke_floating_ui_portals(page)
+                await sweep_popups(page)
+
+                # Wait for checkout button to be enabled (it's grayed out until
+                # delivery method is selected and cart is validated)
+                checkout_sel = 'button[data-test="checkout-button"]'
+                checkout_all_sel = (
+                    'button[data-test="checkout-button"], button:has-text("Check out"), '
+                    'a:has-text("Check out"), button[data-test="checkout-btn"]'
+                )
+                button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+
+                if not button_enabled:
+                    # Check if checkout is blocked by a shipping minimum (e.g. $35).
+                    # Target disables the checkout button when the cart total is below
+                    # the shipping threshold.  Switching to Order Pickup bypasses this.
+                    logger.info("Target: checkout button disabled — checking for shipping minimum")
+                    switched_to_pickup = await self._target_switch_to_pickup_if_minimum(page)
+                    if switched_to_pickup:
+                        button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
+
+                if not button_enabled:
+                    # Last resort: nuke overlays and retry wait
+                    logger.info("Target: checkout button still disabled — clearing overlays and retrying")
                     await self._nuke_floating_ui_portals(page)
                     await sweep_popups(page)
+                    # Try selecting delivery method again in case it didn't stick
                     await self._target_select_delivery(page)
-                    await wait_for_button_enabled(page, checkout_sel, timeout=15000)
-                    if not await self._smart_click(page, "Check out", checkout_all_sel):
-                        raise Exception("Checkout button not found after sign-in recovery")
-                else:
-                    # Also try clicking a "Sign in to check out" button directly
-                    # as it may navigate to login then back to checkout
-                    sign_in_checkout_sel = (
-                        'button[data-test="checkout-sign-in"], '
-                        'button:has-text("Sign in to check out"), '
-                        'a:has-text("Sign in to check out")'
-                    )
-                    if await self._smart_click(page, "Sign in to check out", sign_in_checkout_sel, timeout=3000):
-                        logger.info("Target: clicked 'Sign in to check out' — completing sign-in")
-                        await wait_for_page_ready(page, timeout=15000)
-                        # Complete the sign-in flow
+                    button_enabled = await wait_for_button_enabled(page, checkout_sel, timeout=10000)
+
+                await random_delay(page, 200, 500)
+
+                # Click checkout
+                if not await self._smart_click(page, "Check out", checkout_all_sel):
+                    # Recovery: checkout button missing likely means we're not
+                    # signed in — Target replaces it with a sign-in prompt.
+                    logger.warning("Target: checkout button not found — checking if sign-in is required")
+                    if not await self._is_signed_in_target(page):
+                        logger.info("Target: not signed in — attempting sign-in recovery from cart page")
                         await self._sign_in_target(page, creds)
+                        # Navigate back to cart after login
                         await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
                         await wait_for_page_ready(page, timeout=15000)
                         await self._nuke_floating_ui_portals(page)
@@ -967,13 +969,34 @@ class CheckoutEngine:
                         if not await self._smart_click(page, "Check out", checkout_all_sel):
                             raise Exception("Checkout button not found after sign-in recovery")
                     else:
-                        raise Exception("Checkout button not found")
-            await wait_for_page_ready(page, timeout=15000)
+                        # Also try clicking a "Sign in to check out" button directly
+                        # as it may navigate to login then back to checkout
+                        sign_in_checkout_sel = (
+                            'button[data-test="checkout-sign-in"], '
+                            'button:has-text("Sign in to check out"), '
+                            'a:has-text("Sign in to check out")'
+                        )
+                        if await self._smart_click(page, "Sign in to check out", sign_in_checkout_sel, timeout=3000):
+                            logger.info("Target: clicked 'Sign in to check out' — completing sign-in")
+                            await wait_for_page_ready(page, timeout=15000)
+                            # Complete the sign-in flow
+                            await self._sign_in_target(page, creds)
+                            await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
+                            await wait_for_page_ready(page, timeout=15000)
+                            await self._nuke_floating_ui_portals(page)
+                            await sweep_popups(page)
+                            await self._target_select_delivery(page)
+                            await wait_for_button_enabled(page, checkout_sel, timeout=15000)
+                            if not await self._smart_click(page, "Check out", checkout_all_sel):
+                                raise Exception("Checkout button not found after sign-in recovery")
+                        else:
+                            raise Exception("Checkout button not found")
+                await wait_for_page_ready(page, timeout=15000)
 
-            # --- Handle checkout page steps ---
-            # Target's checkout can have multiple pages: delivery, payment, review.
-            # We need to navigate through them to reach "Place your order".
-            await self._target_navigate_checkout(page, creds)
+                # --- Handle checkout page steps ---
+                # Target's checkout can have multiple pages: delivery, payment, review.
+                # We need to navigate through them to reach "Place your order".
+                await self._target_navigate_checkout(page, creds)
 
             # Place order — assumes saved payment on Target account
             place_order_sel = (
