@@ -1653,7 +1653,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                     # Multi-step: submit email/phone first (unless auth picker already showing)
                     if not auth_picker_already_visible:
                         # Wait for submit button to be enabled (grayed-out fix)
-                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=15000)
+                        # Target's button often stays disabled (valid cookies → instant redirect),
+                        # so use a short timeout to avoid hitting HTTP proxy time limits.
+                        _submit_wait = 3000 if retailer == "target" else 15000
+                        await wait_for_button_enabled(page, 'button[type="submit"]', timeout=_submit_wait)
                         await random_delay(page, 100, 300)
                         # Use multiple strategies to find and click the submit/continue button
                         submit_clicked = await click_visible_button(page, submit_sel)
