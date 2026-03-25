@@ -484,10 +484,10 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         """Test Walmart account by validating imported session cookies via API.
 
         Walmart uses aggressive PerimeterX bot protection with a press-and-hold
-        CAPTCHA that cannot be solved by headless browsers.  Instead of attempting
-        browser login (which always fails), we validate that the user's imported
-        session cookies are still valid by making an API call to Walmart's
-        lightweight config endpoint.
+        CAPTCHA.  The monitor now attempts to auto-solve these CAPTCHAs using
+        a headless browser, but if that fails, manual cookie import is needed.
+        This function validates that the user's session cookies are still valid
+        by making an API call to Walmart's lightweight config endpoint.
 
         This function coordinates with the shared WalmartMonitor rate-limit
         state so the dashboard and monitor loop don't pile requests on top of
