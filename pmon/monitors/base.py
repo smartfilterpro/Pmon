@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 # Current Chrome version — MUST match the actual Playwright Chromium binary.
 # Mismatch between UA string and real browser version is a top bot signal.
 # Run: ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome --version
-_CHROME_MAJOR = "141"
-_CHROME_FULL = "141.0.7390.37"
+_CHROME_MAJOR = "146"
+_CHROME_FULL = "146.0.7680.80"
 
 # Realistic browser headers that match the actual Playwright Chromium version.
 # Includes Sec-Ch-Ua and Sec-Fetch-* headers that modern browsers always send.

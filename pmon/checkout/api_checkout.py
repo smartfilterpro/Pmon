@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from urllib.parse import urljoin, urlparse
 
@@ -263,14 +264,24 @@ class ApiCheckout:
                 logger.warning("Target: PerimeterX blocked login page")
                 return False
 
-            # Step 2: Submit email via GSP auth endpoint
+            # Step 2: Submit email via GSP SPA auth endpoint
+            # Target moved from auth_codes to spa_auth_codes with additional
+            # params (acr, trident, signin_amr) as of 2026-03.
+            spa_auth_url = (
+                f"https://gsp.target.com/gsp/authentications/v1/spa_auth_codes"
+                f"?client_id={self._TGT_CLIENT_ID}"
+                f"&keep_me_signed_in=false"
+                f"&state={int(time.time() * 1000)}"
+                f"&acr=create_session_request_username"
+                f"&trident=true"
+                f"&signin_amr=true"
+            )
             auth_resp = await client.post(
-                f"https://gsp.target.com/gsp/authentications/v1/auth_codes"
-                f"?client_id={self._TGT_CLIENT_ID}",
+                spa_auth_url,
                 json={
                     "username": creds.email,
                     "credential_type_code": "email",
-                    "keep_me_signed_in": True,
+                    "keep_me_signed_in": False,
                 },
                 headers={
                     **HEADERS,
@@ -286,13 +297,12 @@ class ApiCheckout:
 
             # Step 3: Submit password
             pwd_resp = await client.post(
-                f"https://gsp.target.com/gsp/authentications/v1/auth_codes"
-                f"?client_id={self._TGT_CLIENT_ID}",
+                spa_auth_url,
                 json={
                     "username": creds.email,
                     "password": creds.password,
                     "credential_type_code": "password",
-                    "keep_me_signed_in": True,
+                    "keep_me_signed_in": False,
                 },
                 headers={
                     **HEADERS,
