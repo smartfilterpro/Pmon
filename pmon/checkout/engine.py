@@ -231,6 +231,41 @@ class CheckoutEngine:
         raw = await page.screenshot(type="png")
         return base64.b64encode(raw).decode()
 
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """Extract JSON from a vision response that may contain markdown fences or prose."""
+        stripped = text.strip()
+        # Remove markdown code fences (```json ... ``` or ``` ... ```)
+        if stripped.startswith("```"):
+            lines = stripped.split("\n")
+            # Drop first line (```json or ```) and last line (```)
+            inner_lines = []
+            for line in lines[1:]:
+                if line.strip() == "```":
+                    break
+                inner_lines.append(line)
+            if inner_lines:
+                stripped = "\n".join(inner_lines).strip()
+        # If it still doesn't look like JSON, try to find a JSON object in the text
+        if not stripped.startswith(("{", "[")):
+            start = stripped.find("{")
+            if start == -1:
+                start = stripped.find("[")
+            if start != -1:
+                # Find the matching closing brace/bracket
+                open_char = stripped[start]
+                close_char = "}" if open_char == "{" else "]"
+                depth = 0
+                for i in range(start, len(stripped)):
+                    if stripped[i] == open_char:
+                        depth += 1
+                    elif stripped[i] == close_char:
+                        depth -= 1
+                        if depth == 0:
+                            stripped = stripped[start:i + 1]
+                            break
+        return stripped
+
     def _ask_vision(self, screenshot_b64: str, prompt: str) -> str | None:
         """Send a screenshot to Claude and get a response. Returns None on failure."""
         if not self._vision_available:
@@ -254,7 +289,11 @@ class CheckoutEngine:
                     ],
                 }],
             )
-            return resp.content[0].text
+            raw = resp.content[0].text
+            if not raw or not raw.strip():
+                logger.warning("Vision API returned empty response")
+                return None
+            return self._extract_json(raw)
         except Exception as e:
             logger.warning(f"Vision API call failed: {e}")
             return None
