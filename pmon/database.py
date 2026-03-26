@@ -162,6 +162,9 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE user_settings ADD COLUMN spend_limit REAL DEFAULT 0")
 
     # Add card fields to retailer_accounts
+    # REVIEWED [Mission 4A] — CVV MUST NEVER BE STORED per PCI-DSS requirements.
+    # The card_cvv column is kept for backward compat but wiped on migration.
+    # CVV is now accepted as a transient runtime parameter only.
     acct_cols = {row[1] for row in conn.execute("PRAGMA table_info(retailer_accounts)").fetchall()}
     if "card_cvv" not in acct_cols:
         conn.execute("ALTER TABLE retailer_accounts ADD COLUMN card_cvv TEXT DEFAULT ''")
@@ -187,6 +190,20 @@ def _migrate(conn: sqlite3.Connection):
     product_cols = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
     if "last_in_stock_at" not in product_cols:
         conn.execute("ALTER TABLE products ADD COLUMN last_in_stock_at TEXT")
+
+    # REVIEWED [Mission 4A] — Wipe any stored CVV values (PCI-DSS compliance).
+    # CVV must never be persisted; it is now accepted as a runtime-only parameter.
+    try:
+        wiped = conn.execute(
+            "UPDATE retailer_accounts SET card_cvv = '' WHERE card_cvv != ''"
+        ).rowcount
+        if wiped:
+            logger.warning(
+                "PCI-DSS migration: wiped %d stored CVV value(s). "
+                "Users must re-enter CVV at checkout time.", wiped
+            )
+    except Exception:
+        pass  # Column may not exist yet on brand new databases
 
     conn.commit()
 

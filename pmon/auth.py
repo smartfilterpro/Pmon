@@ -14,8 +14,18 @@ from pmon import database as db
 
 logger = logging.getLogger(__name__)
 
-# JWT secret - set via env var on Railway, auto-generated otherwise
-JWT_SECRET = os.environ.get("PMON_JWT_SECRET", "pmon-dev-secret-change-me")
+# REVIEWED [Mission 4B] — JWT secret must be set via environment variable.
+# The app refuses to start without it to prevent token forgery.
+JWT_SECRET = os.environ.get("PMON_JWT_SECRET")
+if not JWT_SECRET:
+    # Auto-generate for first run / dev, but warn loudly
+    import secrets as _secrets
+    JWT_SECRET = _secrets.token_hex(32)
+    logger.warning(
+        "PMON_JWT_SECRET not set — using auto-generated secret. "
+        "Sessions will NOT survive restarts. Set it with:\n"
+        "  export PMON_JWT_SECRET=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\""
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 

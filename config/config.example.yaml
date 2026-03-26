@@ -1,5 +1,10 @@
 # Pmon Configuration
 # Copy this file to config.yaml and fill in your details
+#
+# IMPORTANT: Set the PMON_JWT_SECRET environment variable before running:
+#   export PMON_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+#
+# CVV is never stored on disk — enter it at checkout time via the dashboard.
 
 # How often to check for stock (seconds)
 poll_interval: 30
