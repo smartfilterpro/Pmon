@@ -19,7 +19,6 @@ from pmon.checkout_flows.base import (
 )
 from pmon.models import CheckoutResult
 from pmon.models import CheckoutStatus as LegacyCheckoutStatus
-from pmon.queue.detector import detect_queue
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +136,8 @@ class CheckoutRunner:
         )
 
         for step_name in _STEP_ORDER:
-            # Queue detection between steps
+            # Queue detection between steps (lazy import to avoid circular deps)
+            from pmon.queue.detector import detect_queue
             queue_result = await detect_queue(page, retailer)
             if queue_result.in_queue:
                 logger.warning("%s: queue detected before %s — aborting", retailer, step_name)
