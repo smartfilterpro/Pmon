@@ -162,30 +162,21 @@ class PokemonCenterCheckoutHandler(BaseCheckoutHandler):
         state = getattr(self._profile, "state", None)
         if state:
             try:
-                state_elem = page.locator(_STATE_SEL).first
-                if await state_elem.is_visible(timeout=1000):
-                    current = await state_elem.input_value(timeout=500)
-                    if not current:
-                        await state_elem.select_option(value=state)
-                        await random_delay(page, 200, 400)
+                se = page.locator(_STATE_SEL).first
+                if await se.is_visible(timeout=1000) and not await se.input_value(timeout=500):
+                    await se.select_option(value=state)
             except Exception:
                 pass
-
         # Email field
         email = getattr(self._profile, "email", None)
         if email:
-            email_sel = '#email, input[name="email"][autocomplete="email"]'
             try:
-                email_elem = page.locator(email_sel).first
-                if await email_elem.is_visible(timeout=1000):
-                    current = await email_elem.input_value(timeout=500)
-                    if not current:
-                        await human_click_element(page, email_elem)
-                        await random_delay(page, 100, 250)
-                        await human_type(page, email)
+                ee = page.locator('#email, input[name="email"][autocomplete="email"]').first
+                if await ee.is_visible(timeout=1000) and not await ee.input_value(timeout=500):
+                    await human_click_element(page, ee)
+                    await human_type(page, email)
             except Exception:
                 pass
-
         # Click Continue to proceed to payment
         try:
             cont_btn = page.locator(_CONTINUE_SEL)
