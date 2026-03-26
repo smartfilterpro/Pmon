@@ -371,6 +371,50 @@ CLI with commands:
 
 ---
 
+## Additional Critical Findings
+
+### Security Issues
+
+| Issue | Severity | Location | Details |
+|-------|----------|----------|---------|
+| **CVV stored in plaintext** | **CRITICAL** | `database.py:166` | `card_cvv TEXT DEFAULT ''` — PCI-DSS violation. CVV should never be persisted; use tokenized payment. |
+| **JWT default secret** | **HIGH** | `auth.py:18` | `JWT_SECRET = os.environ.get("PMON_JWT_SECRET", "pmon-dev-secret-change-me")` — weak default allows token forgery if env var missing. |
+| **No auth rate limiting** | **HIGH** | `dashboard/app.py:67-96` | `/api/auth/login` and `/api/auth/register` have no rate limiting. Brute-force attacks possible. |
+| **TOTP window too permissive** | **MEDIUM** | `auth.py:104` | `valid_window=1` allows codes ±60 seconds. Should use `valid_window=0`. |
+
+### Thread Safety Issues
+
+| Issue | Location | Details |
+|-------|----------|---------|
+| **Unprotected mutable sets** | `engine.py:43-47` | `_notified: set` and `_purchased: set` accessed concurrently from monitoring loop and dashboard API calls with no locking. |
+| **Client recreation race** | `monitors/base.py:97-99` | `load_session_cookies()` creates a task to close the old client without awaiting it. Concurrent requests may use a closing client. |
+| **Discord notifier leak** | `engine.py:56` | `_discord_notifiers` dict grows unbounded — if user updates webhook 100 times, 100 httpx clients leak. |
+
+### Checkout Notification Bug
+
+**BUG CONFIRMED**: In `engine.py:270-335`, `_auto_checkout_for_user()` DOES call `notify_checkout()` (lines 331-335). However, the exploration agent initially flagged this because the notification is sent regardless of whether it's a true terminal state. The `notify()` helper from Mission 3 addresses this by validating terminal status before dispatch.
+
+### Missing Safeguards
+
+| Issue | Impact | Fix |
+|-------|--------|-----|
+| **No max_price guard** | Bot places orders at any price — dangerous during price spikes | Add `max_price` to Product dataclass; check before "Place order" |
+| **No per-user store_id** | All users default to store 2845 (Baltimore, MD) | Add `store_id` to Profile; use in Redsky API calls |
+| **No request size limits** | httpx clients have no body size cap — could OOM on large responses | Add `limits=httpx.Limits(max_connections=10)` |
+| **No circuit breaker** | If Target API is down, bot makes hundreds of failed requests | Add consecutive-failure detection and graceful backoff |
+| **No checkout failure screenshots** | `_screenshot_b64()` exists but only used for vision API, not debugging | Save screenshots at each major step for post-mortem |
+
+### Resource Leak
+
+**File**: `checkout/api_checkout.py:108-110`
+```python
+def reset_client(self, retailer):
+    asyncio.get_event_loop().create_task(self._clients[retailer].aclose())
+```
+Creates fire-and-forget close tasks. If app exits before task completes, connections leak. Should be `async def` and awaited.
+
+---
+
 ## New Dependencies
 
 No new dependencies were introduced. All new modules use only:
