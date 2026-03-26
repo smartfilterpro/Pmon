@@ -1,7 +1,6 @@
 """PokemonCenter.com checkout flow handler.
 
-CREATED [Mission 3] — Extracted from _checkout_pokemoncenter() and
-_pkc_fill_checkout_form() in checkout/engine.py.  PKC requires full
+CREATED [Mission 3] — Extracted from checkout/engine.py. PKC requires full
 payment entry on every checkout (no saved cards).
 """
 
@@ -35,66 +34,29 @@ _CONFIRM_TEXT_PATTERNS = [
     "order confirmation",
 ]
 
-# Shipping address form selectors (PKC may require filling these)
 _SHIPPING_FIELDS = [
-    ('#firstName, input[name="firstName"], input[name="first_name"], '
-     'input[autocomplete="given-name"]', "first_name"),
-    ('#lastName, input[name="lastName"], input[name="last_name"], '
-     'input[autocomplete="family-name"]', "last_name"),
-    ('#address1, input[name="address1"], input[name="address_line1"], '
-     'input[autocomplete="address-line1"]', "address_line1"),
-    ('#address2, input[name="address2"], input[name="address_line2"], '
-     'input[autocomplete="address-line2"]', "address_line2"),
+    ('#firstName, input[name="firstName"], input[autocomplete="given-name"]', "first_name"),
+    ('#lastName, input[name="lastName"], input[autocomplete="family-name"]', "last_name"),
+    ('#address1, input[name="address1"], input[autocomplete="address-line1"]', "address_line1"),
+    ('#address2, input[name="address2"], input[autocomplete="address-line2"]', "address_line2"),
     ('#city, input[name="city"], input[autocomplete="address-level2"]', "city"),
-    ('#zipCode, input[name="zipCode"], input[name="zip"], input[name="postalCode"], '
-     'input[autocomplete="postal-code"]', "zip_code"),
-    ('#phone, input[name="phone"], input[type="tel"], '
-     'input[autocomplete="tel"]', "phone"),
+    ('#zipCode, input[name="zipCode"], input[name="zip"], input[autocomplete="postal-code"]', "zip_code"),
+    ('#phone, input[name="phone"], input[type="tel"]', "phone"),
 ]
-
-_STATE_SEL = '#state, select[name="state"], select[name="region"], select[autocomplete="address-level1"]'
-
-# Card input selectors (direct on-page)
-_CARD_NUMBER_SEL = (
-    '#cardNumber, input[name="cardNumber"], input[name="card_number"], '
-    'input[name="ccnumber"], input[autocomplete="cc-number"], '
-    'input[data-testid*="card-number" i], input[placeholder*="Card number" i]'
-)
-
-# Payment iframe selectors (Stripe, Braintree, etc.)
-_IFRAME_SELS = [
-    'iframe[name*="card" i]', 'iframe[name*="payment" i]',
-    'iframe[src*="braintree" i]', 'iframe[src*="stripe" i]',
-    'iframe[title*="card" i]', 'iframe[title*="payment" i]',
-    'iframe[id*="card" i]', 'iframe[id*="braintree" i]',
-]
-
-_IFRAME_CARD_SEL = (
-    'input[name="cardnumber"], input[name="card-number"], '
-    'input[autocomplete="cc-number"], input[name="number"], '
-    'input[data-fieldtype="encryptedCardNumber"], '
-    'input[placeholder*="Card" i]'
-)
-
-_IFRAME_EXP_SEL = (
-    'input[name="exp-date"], input[name="expiryDate"], '
-    'input[autocomplete="cc-exp"], '
-    'input[data-fieldtype="encryptedExpiryDate"], '
-    'input[placeholder*="MM" i]'
-)
-
-_IFRAME_CVV_SEL = (
-    'input[name="cvc"], input[name="cvv"], '
-    'input[autocomplete="cc-csc"], '
-    'input[data-fieldtype="encryptedSecurityCode"], '
-    'input[placeholder*="CVV" i], input[placeholder*="CVC" i]'
-)
-
-_CONTINUE_SEL = (
-    'button:has-text("Continue"), button:has-text("Next"), '
-    'button:has-text("Continue to Payment"), '
-    'button:has-text("Save & Continue")'
-)
+_STATE_SEL = '#state, select[name="state"], select[name="region"]'
+_CARD_NUMBER_SEL = ('#cardNumber, input[name="cardNumber"], input[name="card_number"], '
+                    'input[autocomplete="cc-number"], input[placeholder*="Card number" i]')
+_IFRAME_SELS = ['iframe[name*="card" i]', 'iframe[name*="payment" i]',
+                'iframe[src*="braintree" i]', 'iframe[src*="stripe" i]',
+                'iframe[title*="card" i]', 'iframe[id*="card" i]']
+_IFRAME_CARD_SEL = ('input[name="cardnumber"], input[name="card-number"], '
+                    'input[autocomplete="cc-number"], input[name="number"], input[placeholder*="Card" i]')
+_IFRAME_EXP_SEL = ('input[name="exp-date"], input[name="expiryDate"], '
+                   'input[autocomplete="cc-exp"], input[placeholder*="MM" i]')
+_IFRAME_CVV_SEL = ('input[name="cvc"], input[name="cvv"], '
+                   'input[autocomplete="cc-csc"], input[placeholder*="CVV" i]')
+_CONTINUE_SEL = ('button:has-text("Continue"), button:has-text("Next"), '
+                 'button:has-text("Continue to Payment"), button:has-text("Save & Continue")')
 
 
 class PokemonCenterCheckoutHandler(BaseCheckoutHandler):
@@ -274,36 +236,26 @@ class PokemonCenterCheckoutHandler(BaseCheckoutHandler):
         """Try filling card number inside a payment iframe."""
         for iframe_sel in _IFRAME_SELS:
             try:
-                iframe_elem = page.locator(iframe_sel).first
-                if not await iframe_elem.is_visible(timeout=2000):
+                if not await page.locator(iframe_sel).first.is_visible(timeout=2000):
                     continue
-
                 frame = page.frame_locator(iframe_sel)
-
-                # Card number
                 card_in_frame = frame.locator(_IFRAME_CARD_SEL).first
                 await card_in_frame.wait_for(state="visible", timeout=3000)
                 await card_in_frame.click()
-                await random_delay(page, 100, 250)
                 await card_in_frame.type(creds.card_number, delay=50)
-
                 # Expiry
                 try:
                     exp_input = frame.locator(_IFRAME_EXP_SEL).first
                     if await exp_input.is_visible(timeout=1000):
                         exp_val = f"{creds.card_exp_month}/{creds.card_exp_year[-2:]}" if creds.card_exp_year else creds.card_exp_month
                         await exp_input.click()
-                        await random_delay(page, 100, 200)
                         await exp_input.type(exp_val, delay=50)
                 except Exception:
                     pass
-
-                # CVV
                 try:
                     cvv_input = frame.locator(_IFRAME_CVV_SEL).first
                     if await cvv_input.is_visible(timeout=1000):
                         await cvv_input.click()
-                        await random_delay(page, 100, 200)
                         await cvv_input.type(creds.card_cvv, delay=50)
                 except Exception:
                     pass
