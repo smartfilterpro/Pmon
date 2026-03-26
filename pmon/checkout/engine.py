@@ -83,6 +83,9 @@ from pmon.checkout.human_behavior import (
     wait_for_url_change,
 )
 from pmon.checkout.network_monitor import NetworkMonitor
+# REVIEWED [Mission 2] — Queue detection before checkout
+from pmon.queue.detector import detect_queue
+from pmon.queue.handler import QueueHandler
 
 logger = logging.getLogger(__name__)
 
@@ -754,6 +757,7 @@ class CheckoutEngine:
             logger.debug("Quick stock check failed for %s: %s", url, exc)
             return None
 
+    # DEPRECATED [Mission 3] — now handled by pmon/checkout_flows/target.py
     async def _checkout_target(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
         dry_run: bool = False, **kwargs,
@@ -798,6 +802,20 @@ class CheckoutEngine:
             # Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
+
+            # REVIEWED [Mission 2] — Check for virtual queue before proceeding
+            queue_result = await detect_queue(page, "target")
+            if queue_result.in_queue:
+                logger.info("Target: virtual queue detected — waiting...")
+                queue_handler = QueueHandler()
+                exit_result = await queue_handler.wait_in_queue(page, "target")
+                if not exit_result.admitted:
+                    return CheckoutResult(
+                        url=url, retailer="target", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=f"Queue timeout after {exit_result.wait_duration_seconds}s",
+                    )
+                logger.info("Target: admitted from queue after %ds", exit_result.wait_duration_seconds)
 
             # Sweep all popups/overlays (cookie consent, promos, health consent, etc.)
             await sweep_popups(page)
@@ -1595,6 +1613,7 @@ class CheckoutEngine:
                 break
 
     async def _sign_in_target(self, page, creds: AccountCredentials):
+        # DEPRECATED [Mission 1] — now handled by pmon/login/target.py
         # Target has NO dedicated /login page — it redirects to homepage.
         # Login is triggered by clicking the account icon on the homepage,
         # which opens a side panel with "Sign in or create account".
@@ -1960,6 +1979,7 @@ class CheckoutEngine:
         if "/login" in final_url or "/signin" in final_url or "/identity" in final_url:
             logger.warning("Target sign-in may have failed — still on login page: %s", final_url)
 
+    # DEPRECATED [Mission 3] — now handled by pmon/checkout_flows/walmart.py
     async def _checkout_walmart(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
         dry_run: bool = False, **kwargs,
@@ -1974,6 +1994,20 @@ class CheckoutEngine:
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=10000)
+
+            # REVIEWED [Mission 2] — Check for virtual queue before proceeding
+            queue_result = await detect_queue(page, "walmart")
+            if queue_result.in_queue:
+                logger.info("Walmart: virtual queue detected — waiting...")
+                queue_handler = QueueHandler()
+                exit_result = await queue_handler.wait_in_queue(page, "walmart")
+                if not exit_result.admitted:
+                    return CheckoutResult(
+                        url=url, retailer="walmart", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=f"Queue timeout after {exit_result.wait_duration_seconds}s",
+                    )
+                logger.info("Walmart: admitted from queue after %ds", exit_result.wait_duration_seconds)
 
             # Human-like: browse the product page before interacting
             await sweep_popups(page)
@@ -2014,6 +2048,7 @@ class CheckoutEngine:
 
             await sweep_popups(page)
 
+            # DEPRECATED [Mission 1] — now handled by pmon/login/walmart.py
             # Sign in if needed — try selectors first, then vision
             sign_in_visible = False
             try:
@@ -2199,6 +2234,7 @@ class CheckoutEngine:
             await context.close()
 
     async def _sign_in_pokemoncenter(self, page, creds: AccountCredentials):
+        # DEPRECATED [Mission 1] — now handled by pmon/login/pokemoncenter.py
         """Pokemon Center sign-in via homepage modal.
 
         Mirrors the Target login approach: navigate to homepage first to
@@ -2528,6 +2564,7 @@ class CheckoutEngine:
         else:
             logger.info("PKC login: completed (final URL: %s)", final_url)
 
+    # DEPRECATED [Mission 3] — now handled by pmon/checkout_flows/pokemoncenter.py
     async def _checkout_pokemoncenter(
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
         dry_run: bool = False, **kwargs,
@@ -2549,6 +2586,21 @@ class CheckoutEngine:
             # Step 2: Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
+
+            # REVIEWED [Mission 2] — Check for virtual queue before proceeding
+            queue_result = await detect_queue(page, "pokemoncenter")
+            if queue_result.in_queue:
+                logger.info("PokemonCenter: virtual queue detected — waiting...")
+                queue_handler = QueueHandler()
+                exit_result = await queue_handler.wait_in_queue(page, "pokemoncenter")
+                if not exit_result.admitted:
+                    return CheckoutResult(
+                        url=url, retailer="pokemoncenter", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=f"Queue timeout after {exit_result.wait_duration_seconds}s",
+                    )
+                logger.info("PokemonCenter: admitted from queue after %ds", exit_result.wait_duration_seconds)
+
             await sweep_popups(page)
 
             # Human-like: brief page browse before adding to cart

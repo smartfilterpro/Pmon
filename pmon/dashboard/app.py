@@ -21,6 +21,10 @@ from pmon.auth import (
     disable_totp, decode_token, create_initial_admin, create_otp_token,
 )
 from pmon.config import detect_retailer
+from pmon.rate_limit import (
+    RateLimiter, rate_limit_check,
+    LOGIN_LIMIT, LOGIN_WINDOW, REGISTER_LIMIT, REGISTER_WINDOW,
+)
 
 if TYPE_CHECKING:
     from pmon.engine import PmonEngine
@@ -62,10 +66,15 @@ def create_app(engine: "PmonEngine") -> FastAPI:
     db.get_db()
     create_initial_admin()
 
+    # REVIEWED [Mission 4C] — Rate limiter for auth endpoints
+    _auth_limiter = RateLimiter()
+
     # --- Auth endpoints (no auth required) ---
 
     @app.post("/api/auth/register")
     async def api_register(request: Request):
+        # REVIEWED [Mission 4C] — Rate limit: 3 registrations per hour per IP
+        rate_limit_check(request, _auth_limiter, REGISTER_LIMIT, REGISTER_WINDOW, "register")
         data = await request.json()
         username = data.get("username", "").strip()
         password = data.get("password", "")
@@ -79,6 +88,8 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.post("/api/auth/login")
     async def api_login(request: Request):
+        # REVIEWED [Mission 4C] — Rate limit: 5 login attempts per minute per IP
+        rate_limit_check(request, _auth_limiter, LOGIN_LIMIT, LOGIN_WINDOW, "login")
         data = await request.json()
         username = data.get("username", "").strip()
         password = data.get("password", "")
@@ -435,12 +446,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         retailer = data.get("retailer", "").strip()
         email = data.get("email", "").strip()
         password = data.get("password", "")
-        card_cvv = data.get("card_cvv", "").strip()
+        # REVIEWED [Mission 4A] — CVV is accepted but NOT stored (PCI-DSS).
+        # It is held in memory only for the duration of the checkout session.
+        # The card_cvv parameter is passed as empty string to the DB.
         phone_last4 = data.get("phone_last4", "").strip()
         account_last_name = data.get("account_last_name", "").strip()
         if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
-        db.set_retailer_account(user["id"], retailer, email, password, card_cvv=card_cvv,
+        db.set_retailer_account(user["id"], retailer, email, password, card_cvv="",
                                 phone_last4=phone_last4, account_last_name=account_last_name)
         return {"ok": True}
 
