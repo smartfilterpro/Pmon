@@ -87,6 +87,8 @@ class Config:
     accounts: dict[str, AccountCredentials] = field(default_factory=dict)
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8888
+    headless: bool = True
+    chrome_profile_dir: str = ""
 
 
 def detect_retailer(url: str) -> str:
@@ -142,6 +144,19 @@ def load_config(path: Path | None = None) -> Config:
     notif = raw.get("notifications", {})
     dash = raw.get("dashboard", {})
 
+    # Browser mode: default to headless=True for servers, but allow override
+    # PMON_HEADLESS=0 or headless: false in config to run visible Chrome
+    env_headless = os.environ.get("PMON_HEADLESS")
+    if env_headless is not None:
+        headless = env_headless.lower() not in ("0", "false", "no")
+    else:
+        headless = raw.get("headless", True)
+
+    chrome_profile_dir = os.environ.get(
+        "PMON_CHROME_PROFILE",
+        raw.get("chrome_profile_dir", ""),
+    )
+
     return Config(
         poll_interval=int(os.environ.get("PMON_POLL_INTERVAL", raw.get("poll_interval", 30))),
         discord_webhook=os.environ.get("PMON_DISCORD_WEBHOOK", notif.get("discord_webhook", "")),
@@ -151,6 +166,8 @@ def load_config(path: Path | None = None) -> Config:
         accounts=accounts,
         dashboard_host=dash.get("host", "127.0.0.1"),
         dashboard_port=dash.get("port", 8888),
+        headless=headless,
+        chrome_profile_dir=chrome_profile_dir,
     )
 
 
@@ -186,6 +203,8 @@ def save_config(config: Config, path: Path | None = None):
             name: {"email": a.email, "password": a.password}
             for name, a in config.accounts.items()
         },
+        "headless": config.headless,
+        "chrome_profile_dir": config.chrome_profile_dir,
         "dashboard": {
             "host": config.dashboard_host,
             "port": config.dashboard_port,

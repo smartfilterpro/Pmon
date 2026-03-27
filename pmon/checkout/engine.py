@@ -480,32 +480,109 @@ class CheckoutEngine:
         return await self._smart_click(page, description, "", timeout=1000)
 
     async def start(self):
-        """Try to launch the browser for fallback. Not required."""
+        """Try to launch the browser for fallback. Not required.
+
+        In visible mode (config.headless=False), launches a real Chrome window
+        that the user can see and interact with. This lets you:
+        - Log in manually once and reuse the session
+        - Watch the checkout process in real time
+        - Intervene for CAPTCHAs / 2FA prompts
+        - Use an existing Chrome profile with saved cookies/passwords
+
+        Use --visible on the CLI or set headless: false in config.yaml.
+        """
         try:
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
+
+            headless = self.config.headless
+            chrome_profile = self.config.chrome_profile_dir
+
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--no-first-run",
+            ]
+
+            if headless:
+                # Server/cloud mode: fully headless with extra stealth
+                launch_args.extend([
                     "--disable-features=VizDisplayCompositor",
-                    "--disable-infobars",
                     "--disable-background-networking",
                     "--disable-component-update",
                     "--disable-default-apps",
                     "--disable-extensions",
-                    "--no-first-run",
                     "--use-gl=angle",
                     "--use-angle=d3d11",
-                ],
-            )
+                ])
+                self._browser = await self._playwright.chromium.launch(
+                    headless=True,
+                    args=launch_args,
+                )
+                logger.info("Browser fallback available (headless)")
+            else:
+                # Desktop/visible mode: real Chrome window the user can see
+                launch_kwargs = {
+                    "headless": False,
+                    "args": launch_args,
+                }
+
+                # Use system Chrome instead of Playwright's bundled Chromium
+                # for a more authentic browser fingerprint
+                chrome_path = self._find_system_chrome()
+                if chrome_path:
+                    launch_kwargs["executable_path"] = chrome_path
+                    logger.info("Using system Chrome: %s", chrome_path)
+
+                self._browser = await self._playwright.chromium.launch(
+                    **launch_kwargs,
+                )
+                logger.info("Browser running in VISIBLE mode — you can see and interact with it")
+
             self._browser_available = True
-            logger.info("Browser fallback available (headless)")
         except Exception as e:
             logger.info(f"Browser fallback unavailable: {e}")
             logger.info("API-only checkout mode — this is fine for most retailers")
+
+    @staticmethod
+    def _find_system_chrome() -> str | None:
+        """Find the system Chrome/Chromium executable path."""
+        import shutil
+        import platform
+
+        candidates = []
+        system = platform.system()
+
+        if system == "Windows":
+            # Common Windows Chrome paths
+            for base in [
+                os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                os.path.expandvars(r"%LOCALAPPDATA%"),
+            ]:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+            candidates.append(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"))
+        elif system == "Darwin":
+            candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        else:
+            # Linux
+            candidates.extend([
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium-browser",
+                "chromium",
+            ])
+
+        for candidate in candidates:
+            found = shutil.which(candidate)
+            if found:
+                return found
+            if os.path.isfile(candidate):
+                return candidate
+
+        return None
 
     async def stop(self):
         """Close resources."""
@@ -658,7 +735,23 @@ class CheckoutEngine:
         )
         if load_cookies and storage_path.exists():
             ctx_kwargs["storage_state"] = str(storage_path)
-        context = await self._browser.new_context(**ctx_kwargs)
+
+        # In visible mode, use a persistent context backed by the Chrome
+        # profile directory so that existing logins, cookies, and saved
+        # passwords from real Chrome carry over automatically.
+        if not self.config.headless and self.config.chrome_profile_dir:
+            from playwright.async_api import async_playwright
+            profile_dir = Path(self.config.chrome_profile_dir) / f"pmon_{retailer}"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                **{k: v for k, v in ctx_kwargs.items() if k != "storage_state"},
+            )
+        else:
+            context = await self._browser.new_context(**ctx_kwargs)
+
         await context.add_init_script(STEALTH_JS)
         return context
 
