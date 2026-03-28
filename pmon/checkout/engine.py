@@ -554,9 +554,9 @@ class CheckoutEngine:
                 "--no-default-browser-check",
                 "--disable-infobars",
             ],
-            viewport=None,  # Use Chrome's default viewport (user's window size)
+            viewport=None,
             no_viewport=True,
-            ignore_default_args=["--enable-automation"],
+            ignore_default_args=["--enable-automation", "--no-sandbox"],
         )
         await self._persistent_context.add_init_script(STEALTH_JS)
 
@@ -595,8 +595,8 @@ class CheckoutEngine:
                     stderr=subprocess.DEVNULL,
                     timeout=10,
                 )
-            # Give Chrome time to fully shut down and release profile locks
-            await asyncio.sleep(3)
+            # Windows needs extra time to release profile locks after Chrome dies
+            await asyncio.sleep(5)
             logger.info("Closed existing Chrome to unlock your profile")
         except Exception:
             pass  # Chrome might not be running — that's fine
@@ -929,7 +929,7 @@ class CheckoutEngine:
             context = await self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
                 headless=False,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                args=["--disable-blink-features=AutomationControlled"],
                 **{k: v for k, v in ctx_kwargs.items() if k != "storage_state"},
             )
         else:
