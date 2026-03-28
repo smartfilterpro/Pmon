@@ -751,11 +751,48 @@ class CheckoutEngine:
     ) -> CheckoutResult:
         """Attempt checkout: API first, browser fallback.
 
+        In --my-browser mode, skips API checkout and credential checks entirely.
+        The user is already logged in via their real Chrome — just open a new tab
+        and check out using their saved sessions/passwords/payment.
+
         If dry_run=True, runs the full checkout flow but stops right before
         clicking "Place order". Useful for testing the entire flow without
         actually purchasing.
         """
         profile = self.config.profiles.get(profile_name) or Profile()
+
+        # In --my-browser mode, skip credential checks and API checkout.
+        # The user's Chrome already has their logins, saved passwords, and
+        # payment methods — just go straight to browser checkout.
+        if self.config.use_my_browser:
+            if self._browser_available:
+                logger.info(f"Opening new tab in your Chrome for {product_name}...")
+                creds = self._load_user_credentials(retailer, user_id) or AccountCredentials()
+                try:
+                    handler = getattr(self, f"_checkout_{retailer}", None)
+                    if handler:
+                        return await handler(url, product_name, profile, creds, dry_run=dry_run, user_id=user_id)
+                    else:
+                        return CheckoutResult(
+                            url=url, retailer=retailer, product_name=product_name,
+                            status=CheckoutStatus.FAILED,
+                            error_message=f"No browser checkout flow for {retailer} yet",
+                        )
+                except Exception as e:
+                    logger.error(f"Browser checkout failed: {e}")
+                    return CheckoutResult(
+                        url=url, retailer=retailer, product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=f"Browser checkout failed: {e}",
+                    )
+            else:
+                return CheckoutResult(
+                    url=url, retailer=retailer, product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Browser not available. Is Chrome running?",
+                )
+
+        # --- Standard mode (headless / visible): needs credentials ---
 
         # Load credentials from DB (dashboard) first, then fall back to config.yaml
         creds = self._load_user_credentials(retailer, user_id)
