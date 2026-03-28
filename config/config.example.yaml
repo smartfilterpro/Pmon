@@ -72,6 +72,20 @@ accounts:
     email: ""
     password: ""
 
+# Browser mode
+# Set headless: false to open a real Chrome window on your PC.
+# This lets you log in manually, see the checkout happen, and handle CAPTCHAs.
+# When running on a server (Railway, Docker), keep headless: true.
+headless: true
+
+# Optional: path to a Chrome user data directory to reuse existing logins.
+# Each retailer gets a sub-folder (e.g., pmon_target, pmon_walmart).
+# On Windows: "C:/Users/YourName/AppData/Local/Google/Chrome/User Data"
+# On Mac: "/Users/YourName/Library/Application Support/Google/Chrome"
+# On Linux: "/home/yourname/.config/google-chrome"
+# Leave empty to use a fresh profile managed by Pmon.
+chrome_profile_dir: ""
+
 # Dashboard settings
 dashboard:
   host: "127.0.0.1"

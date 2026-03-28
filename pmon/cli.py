@@ -49,6 +49,13 @@ def main():
     parser.add_argument("--no-checkout", action="store_true", help="Disable auto-checkout (monitor only)")
     parser.add_argument("--host", default=None, help="Dashboard host")
     parser.add_argument("--port", type=int, default=None, help="Dashboard port")
+    parser.add_argument("--visible", action="store_true",
+                        help="Run Chrome in visible (non-headless) mode so you can see and interact with the browser")
+    parser.add_argument("--chrome-profile", type=str, default=None,
+                        help="Path to Chrome user data directory to reuse existing login sessions")
+    parser.add_argument("--my-browser", action="store_true",
+                        help="Launch YOUR real Chrome with your saved passwords, cookies, and logins. "
+                             "Pmon opens new tabs in it for checkout. Close Chrome first before using this.")
 
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -92,6 +99,15 @@ def cmd_run(args):
     elif env_port:
         config.dashboard_port = int(env_port)
 
+    # Visible Chrome mode (--visible flag overrides config)
+    if args.visible:
+        config.headless = False
+    if args.chrome_profile:
+        config.chrome_profile_dir = args.chrome_profile
+    if args.my_browser:
+        config.use_my_browser = True
+        config.headless = False
+
     asyncio.run(_run(config, args))
 
 
@@ -101,7 +117,14 @@ async def _run(config, args):
     # Initialize checkout engine (API-first, browser is optional fallback)
     if not args.no_checkout:
         await engine.init_checkout()
-        console.print("[green]Checkout engine ready (API-first)[/green]")
+        if config.use_my_browser:
+            console.print("[green]Checkout engine ready (YOUR Chrome — saved passwords & logins active)[/green]")
+            console.print("[blue]Use Chrome normally. When items drop, Pmon opens a new tab and checks out.[/blue]")
+        elif config.headless:
+            console.print("[green]Checkout engine ready (API-first, headless browser fallback)[/green]")
+        else:
+            console.print("[green]Checkout engine ready (VISIBLE Chrome mode)[/green]")
+            console.print("[blue]Chrome will open visibly — you can log in manually and the session persists.[/blue]")
 
     # Start dashboard in background thread
     if not args.no_dashboard:
@@ -125,8 +148,17 @@ async def _run(config, args):
     # Only Ctrl+C (or SIGINT/SIGTERM) triggers a full shutdown.
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (__import__("signal").SIGINT, __import__("signal").SIGTERM):
-        loop.add_signal_handler(sig, shutdown_event.set)
+    import signal as _signal
+    import sys as _sys
+    if _sys.platform != "win32":
+        for sig in (_signal.SIGINT, _signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_event.set)
+    else:
+        # Windows doesn't support add_signal_handler; use a thread-based fallback
+        def _win_signal_handler(signum, frame):
+            loop.call_soon_threadsafe(shutdown_event.set)
+        _signal.signal(_signal.SIGINT, _win_signal_handler)
+        _signal.signal(_signal.SIGTERM, _win_signal_handler)
 
     # Start monitoring as a background task so the dashboard can
     # freely stop and restart it without tearing down the process.

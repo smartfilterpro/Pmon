@@ -210,6 +210,7 @@ class CheckoutEngine:
         self._browser = None
         self._playwright = None
         self._browser_available = False
+        self._chrome_process = None
         self._anthropic = None
         self._vision_available = False
         SESSION_DIR.mkdir(exist_ok=True)
@@ -480,38 +481,213 @@ class CheckoutEngine:
         return await self._smart_click(page, description, "", timeout=1000)
 
     async def start(self):
-        """Try to launch the browser for fallback. Not required."""
+        """Try to launch the browser for fallback. Not required.
+
+        Three modes:
+        1. --my-browser: Launches YOUR real Chrome (with saved passwords,
+           cookies, extensions) via remote debugging. Pmon connects to it
+           and opens new tabs for checkout. You can browse normally.
+        2. --visible: Launches a separate visible Chrome window via Playwright.
+        3. Default (headless): Invisible browser for server deployments.
+        """
         try:
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-features=VizDisplayCompositor",
-                    "--disable-infobars",
-                    "--disable-background-networking",
-                    "--disable-component-update",
-                    "--disable-default-apps",
-                    "--disable-extensions",
-                    "--no-first-run",
-                    "--use-gl=angle",
-                    "--use-angle=d3d11",
-                ],
-            )
+
+            if self.config.use_my_browser:
+                await self._start_my_browser()
+            elif self.config.headless:
+                await self._start_headless()
+            else:
+                await self._start_visible()
+
             self._browser_available = True
-            logger.info("Browser fallback available (headless)")
         except Exception as e:
             logger.info(f"Browser fallback unavailable: {e}")
             logger.info("API-only checkout mode — this is fine for most retailers")
+
+    async def _start_my_browser(self):
+        """Launch the user's real Chrome with remote debugging and connect via CDP.
+
+        This gives Pmon access to the user's saved passwords, cookies,
+        logins, autofill, and extensions. Pmon opens new tabs in this
+        browser for checkout.
+        """
+        import subprocess
+        import time
+
+        chrome_path = self._find_system_chrome()
+        if not chrome_path:
+            raise RuntimeError(
+                "Could not find Chrome on your system. "
+                "Install Google Chrome or pass --chrome-profile instead."
+            )
+
+        debug_port = self.config.chrome_debug_port
+
+        # Find the user's default Chrome profile directory
+        profile_dir = self.config.chrome_profile_dir
+        if not profile_dir:
+            profile_dir = self._find_default_chrome_profile()
+            if not profile_dir:
+                raise RuntimeError(
+                    "Could not find your Chrome profile directory. "
+                    "Pass it explicitly: --chrome-profile \"C:\\Users\\YourName\\AppData\\Local\\Google\\Chrome\\User Data\""
+                )
+
+        logger.info("Launching YOUR Chrome from: %s", chrome_path)
+        logger.info("Using your profile: %s", profile_dir)
+        logger.info("Remote debugging on port %d", debug_port)
+
+        # Launch Chrome with remote debugging enabled
+        self._chrome_process = subprocess.Popen(
+            [
+                chrome_path,
+                f"--remote-debugging-port={debug_port}",
+                f"--user-data-dir={profile_dir}",
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Wait for Chrome to start and the debug port to be ready
+        cdp_url = f"http://127.0.0.1:{debug_port}"
+        for attempt in range(15):
+            try:
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{cdp_url}/json/version", timeout=2.0)
+                    if resp.status_code == 200:
+                        break
+            except Exception:
+                await asyncio.sleep(1)
+        else:
+            raise RuntimeError(
+                f"Chrome started but debug port {debug_port} not responding. "
+                "Make sure Chrome is fully closed before running --my-browser."
+            )
+
+        # Connect Playwright to the running Chrome via CDP
+        self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+        logger.info("Connected to YOUR Chrome — saved passwords, cookies, and logins are active")
+
+    async def _start_headless(self):
+        """Launch headless Chromium for server/cloud deployments."""
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--no-first-run",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--use-gl=angle",
+            "--use-angle=d3d11",
+        ]
+        self._browser = await self._playwright.chromium.launch(
+            headless=True,
+            args=launch_args,
+        )
+        logger.info("Browser fallback available (headless)")
+
+    async def _start_visible(self):
+        """Launch a visible Chrome window via Playwright (separate from user's Chrome)."""
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--no-first-run",
+        ]
+        launch_kwargs = {
+            "headless": False,
+            "args": launch_args,
+        }
+
+        chrome_path = self._find_system_chrome()
+        if chrome_path:
+            launch_kwargs["executable_path"] = chrome_path
+            logger.info("Using system Chrome: %s", chrome_path)
+
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+        logger.info("Browser running in VISIBLE mode — you can see and interact with it")
+
+    @staticmethod
+    def _find_system_chrome() -> str | None:
+        """Find the system Chrome/Chromium executable path."""
+        import shutil
+        import platform
+
+        candidates = []
+        system = platform.system()
+
+        if system == "Windows":
+            for base in [
+                os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                os.path.expandvars(r"%LOCALAPPDATA%"),
+            ]:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+            candidates.append(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"))
+        elif system == "Darwin":
+            candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        else:
+            candidates.extend([
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium-browser",
+                "chromium",
+            ])
+
+        for candidate in candidates:
+            found = shutil.which(candidate)
+            if found:
+                return found
+            if os.path.isfile(candidate):
+                return candidate
+
+        return None
+
+    @staticmethod
+    def _find_default_chrome_profile() -> str | None:
+        """Find the default Chrome user data directory on this OS."""
+        import platform
+
+        system = platform.system()
+        if system == "Windows":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            if local_app_data:
+                path = os.path.join(local_app_data, "Google", "Chrome", "User Data")
+                if os.path.isdir(path):
+                    return path
+        elif system == "Darwin":
+            path = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+            if os.path.isdir(path):
+                return path
+        else:
+            path = os.path.expanduser("~/.config/google-chrome")
+            if os.path.isdir(path):
+                return path
+        return None
 
     async def stop(self):
         """Close resources."""
         await self._api.close()
         if self._browser:
-            await self._browser.close()
+            # In --my-browser mode, just disconnect — don't kill the user's Chrome
+            if self.config.use_my_browser:
+                try:
+                    self._browser.close()
+                except Exception:
+                    pass
+            else:
+                await self._browser.close()
         if self._playwright:
             await self._playwright.stop()
 
@@ -638,6 +814,16 @@ class CheckoutEngine:
         """Get or create a browser context with persistent cookies and stealth."""
         from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
 
+        # In --my-browser mode, use the browser's default context which
+        # already has the user's saved passwords, cookies, and logins.
+        # No need to create isolated contexts or inject fake user agents.
+        if self.config.use_my_browser:
+            contexts = self._browser.contexts
+            if contexts:
+                context = contexts[0]
+                await context.add_init_script(STEALTH_JS)
+                return context
+
         storage_path = SESSION_DIR / f"{retailer}.json"
         ctx_kwargs = dict(
             user_agent=(
@@ -658,7 +844,22 @@ class CheckoutEngine:
         )
         if load_cookies and storage_path.exists():
             ctx_kwargs["storage_state"] = str(storage_path)
-        context = await self._browser.new_context(**ctx_kwargs)
+
+        # In visible mode, use a persistent context backed by the Chrome
+        # profile directory so that existing logins, cookies, and saved
+        # passwords from real Chrome carry over automatically.
+        if not self.config.headless and self.config.chrome_profile_dir:
+            profile_dir = Path(self.config.chrome_profile_dir) / f"pmon_{retailer}"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                **{k: v for k, v in ctx_kwargs.items() if k != "storage_state"},
+            )
+        else:
+            context = await self._browser.new_context(**ctx_kwargs)
+
         await context.add_init_script(STEALTH_JS)
         return context
 
