@@ -854,10 +854,13 @@ class CheckoutEngine:
         # In --my-browser mode, use the browser's default context which
         # already has the user's saved passwords, cookies, and logins.
         # No need to create isolated contexts or inject fake user agents.
+        # IMPORTANT: Mark it so checkout flows do NOT close this context —
+        # closing it would kill the entire browser connection.
         if self.config.use_my_browser:
             contexts = self._browser.contexts
             if contexts:
                 context = contexts[0]
+                context._pmon_shared = True  # type: ignore[attr-defined]
                 await context.add_init_script(STEALTH_JS)
                 return context
 
@@ -899,6 +902,18 @@ class CheckoutEngine:
 
         await context.add_init_script(STEALTH_JS)
         return context
+
+    @staticmethod
+    async def _close_context(context):
+        """Close a browser context unless it's the shared --my-browser context.
+
+        In --my-browser mode, the default context is shared across all
+        checkout flows. Closing it would kill the CDP connection and make
+        the browser unusable. Only close pages (tabs), not the context.
+        """
+        if getattr(context, "_pmon_shared", False):
+            return  # Don't close — this is the user's real browser session
+        await context.close()
 
     async def _save_context(self, context, retailer: str):
         """Save browser cookies/state for reuse."""
@@ -1321,7 +1336,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _nuke_floating_ui_portals(self, page) -> int:
         """Remove floating-ui portal overlays via JS instead of clicking Close.
@@ -2391,7 +2406,7 @@ class CheckoutEngine:
                 if login_blocked and storage_path.exists():
                     logger.info("Walmart: fresh session sign-in blocked — retrying with saved cookies")
                     await page.close()
-                    await context.close()
+                    await self._close_context(context)
                     context = await self._get_context("walmart", load_cookies=True)
                     page = await context.new_page()
                     await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
@@ -2469,7 +2484,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _sign_in_pokemoncenter(self, page, creds: AccountCredentials):
         # DEPRECATED [Mission 1] — now handled by pmon/login/pokemoncenter.py
@@ -2942,7 +2957,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _pkc_fill_checkout_form(self, page, profile: Profile, creds: AccountCredentials):
         """Fill the Pokemon Center checkout form (shipping + payment).
@@ -4113,7 +4128,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     # ------------------------------------------------------------------
     # Sam's Club browser checkout
@@ -4227,7 +4242,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _sams_needs_login(self, page) -> bool:
         """Check if Sam's Club page shows a logged-out state."""
@@ -4625,7 +4640,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     @staticmethod
     def _extract_amazon_asin(url: str) -> str | None:
