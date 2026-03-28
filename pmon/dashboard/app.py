@@ -176,6 +176,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
                 "retailer": p["retailer"],
                 "quantity": p["quantity"],
                 "auto_checkout": bool(p["auto_checkout"]),
+                "max_price": p.get("max_price", 0) or 0,
                 "status": stock.status.value if stock else "unknown",
                 "price": stock.price if stock else "",
                 "image_url": stock.image_url if stock else "",
@@ -350,11 +351,12 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         name = data.get("name", "")
         retailer = detect_retailer(url)
         if retailer == "unknown":
-            return JSONResponse({"error": "Unsupported retailer. Supported: Pokemon Center, Target, Best Buy, Walmart, Costco, Sam's Club"}, 400)
+            return JSONResponse({"error": "Unsupported retailer. Supported: Pokemon Center, Target, Best Buy, Walmart, Costco, Sam's Club, Amazon"}, 400)
         quantity = max(1, int(data.get("quantity", 1)))
         auto = bool(data.get("auto_checkout", False))
+        max_price = max(0, float(data.get("max_price", 0)))
 
-        db.add_product(user["id"], url, name, retailer, quantity, auto)
+        db.add_product(user["id"], url, name, retailer, quantity, auto, max_price)
         engine.sync_products_from_db()
         return {"ok": True}
 
@@ -380,6 +382,14 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         db.update_product_quantity(user["id"], data["url"], qty)
         engine.sync_products_from_db()
         return {"ok": True, "quantity": qty}
+
+    @app.post("/api/products/set_max_price")
+    async def api_set_max_price(request: Request, user: dict = Depends(get_current_user)):
+        data = await request.json()
+        max_price = max(0, float(data.get("max_price", 0)))
+        db.update_product_max_price(user["id"], data["url"], max_price)
+        engine.sync_products_from_db()
+        return {"ok": True, "max_price": max_price}
 
     @app.post("/api/products/checkout_now")
     async def api_checkout_now(request: Request, user: dict = Depends(get_current_user)):
@@ -451,7 +461,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         # The card_cvv parameter is passed as empty string to the DB.
         phone_last4 = data.get("phone_last4", "").strip()
         account_last_name = data.get("account_last_name", "").strip()
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub", "amazon"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.set_retailer_account(user["id"], retailer, email, password, card_cvv="",
                                 phone_last4=phone_last4, account_last_name=account_last_name)
@@ -466,7 +476,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
         data = await request.json()
         retailer = data.get("retailer", "").strip()
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub", "amazon"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
 
         accounts = db.get_retailer_accounts(user["id"])
@@ -2502,7 +2512,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         retailer = data.get("retailer", "").strip()
         cookies_raw = data.get("cookies")
 
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub", "amazon"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
 
         if not cookies_raw:
@@ -2547,7 +2557,7 @@ def create_app(engine: "PmonEngine") -> FastAPI:
 
     @app.delete("/api/sessions/{retailer}")
     async def api_delete_session(retailer: str, user: dict = Depends(get_current_user)):
-        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub"):
+        if retailer not in ("target", "walmart", "bestbuy", "pokemoncenter", "costco", "samsclub", "amazon"):
             return JSONResponse({"error": "Invalid retailer"}, 400)
         db.delete_retailer_session(user["id"], retailer)
         return {"ok": True}

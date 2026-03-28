@@ -4,6 +4,7 @@ export interface Product {
   retailer: string;
   quantity: number;
   auto_checkout: boolean;
+  max_price: number;
   status: 'in_stock' | 'out_of_stock' | 'unknown' | 'error';
   price: string;
   image_url: string;

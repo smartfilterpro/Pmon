@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { removeProduct, toggleAutoCheckout, checkoutNow, setQuantity } from '../hooks/useApi';
-import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus, AlertTriangle, DollarSign } from 'lucide-react';
+import { removeProduct, toggleAutoCheckout, checkoutNow, setQuantity, setMaxPrice } from '../hooks/useApi';
+import { ExternalLink, Trash2, ShoppingCart, Zap, ZapOff, Minus, Plus, AlertTriangle, DollarSign, Shield } from 'lucide-react';
 import type { Product } from '../types';
 import './ProductList.css';
 
@@ -16,6 +16,7 @@ const RETAILER_LABELS: Record<string, string> = {
   walmart: 'Walmart',
   costco: 'Costco',
   samsclub: "Sam's Club",
+  amazon: 'Amazon',
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -28,6 +29,8 @@ const STATUS_LABELS: Record<string, string> = {
 export default function ProductList({ products, refresh }: Props) {
   const [checkoutFailed, setCheckoutFailed] = useState<Record<string, string>>({});
   const [checkoutLoading, setCheckoutLoading] = useState<Record<string, boolean>>({});
+  const [editingMaxPrice, setEditingMaxPrice] = useState<string | null>(null);
+  const [maxPriceValue, setMaxPriceValue] = useState('');
 
   const handleRemove = async (url: string) => {
     await removeProduct(url);
@@ -62,6 +65,13 @@ export default function ProductList({ products, refresh }: Props) {
   const handleQty = async (url: string, current: number, delta: number) => {
     const newQty = Math.max(1, current + delta);
     await setQuantity(url, newQty);
+    refresh();
+  };
+
+  const handleMaxPriceSave = async (url: string) => {
+    const val = Math.max(0, parseFloat(maxPriceValue) || 0);
+    await setMaxPrice(url, val);
+    setEditingMaxPrice(null);
     refresh();
   };
 
@@ -104,6 +114,12 @@ export default function ProductList({ products, refresh }: Props) {
                 <DollarSign size={12} />
                 {p.price || 'Price unavailable'}
               </span>
+              {p.max_price > 0 && (
+                <span className="max-price-tag" title="Max price guard — auto-buy skipped if price exceeds this">
+                  <Shield size={12} />
+                  Max ${p.max_price.toFixed(2)}
+                </span>
+              )}
               {p.stock_quantity != null && (
                 <span className="stock-qty-tag">
                   {p.stock_quantity > 10 ? '10+' : p.stock_quantity} in stock
@@ -143,6 +159,33 @@ export default function ProductList({ products, refresh }: Props) {
                 <Plus size={12} />
               </button>
             </div>
+
+            {editingMaxPrice === p.url ? (
+              <div className="max-price-edit">
+                <span>$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={maxPriceValue}
+                  onChange={(e) => setMaxPriceValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleMaxPriceSave(p.url); if (e.key === 'Escape') setEditingMaxPrice(null); }}
+                  autoFocus
+                  className="max-price-input"
+                />
+                <button className="action-btn" onClick={() => handleMaxPriceSave(p.url)}>Set</button>
+                <button className="action-btn" onClick={() => setEditingMaxPrice(null)}>X</button>
+              </div>
+            ) : (
+              <button
+                className="action-btn max-price-btn"
+                onClick={() => { setEditingMaxPrice(p.url); setMaxPriceValue(p.max_price > 0 ? p.max_price.toString() : ''); }}
+                title="Set max price — auto-buy skipped if price exceeds this"
+              >
+                <Shield size={14} />
+                {p.max_price > 0 ? `$${p.max_price.toFixed(0)}` : 'Max $'}
+              </button>
+            )}
 
             <button
               className={`action-btn auto-btn ${p.auto_checkout ? 'on' : 'off'}`}

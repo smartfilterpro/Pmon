@@ -107,6 +107,8 @@ def detect_retailer(url: str) -> str:
         return "costco"
     if "samsclub.com" in url_lower:
         return "samsclub"
+    if "amazon.com" in url_lower:
+        return "amazon"
     return "unknown"
 
 

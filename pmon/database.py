@@ -186,10 +186,12 @@ def _migrate(conn: sqlite3.Connection):
     if "price_amount" not in checkout_cols:
         conn.execute("ALTER TABLE checkout_log ADD COLUMN price_amount REAL DEFAULT 0")
 
-    # Add last_in_stock_at to products for tracking when a product was last seen in stock
+    # Add last_in_stock_at and max_price to products
     product_cols = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
     if "last_in_stock_at" not in product_cols:
         conn.execute("ALTER TABLE products ADD COLUMN last_in_stock_at TEXT")
+    if "max_price" not in product_cols:
+        conn.execute("ALTER TABLE products ADD COLUMN max_price REAL DEFAULT 0")
 
     # REVIEWED [Mission 4A] — Wipe any stored CVV values (PCI-DSS compliance).
     # CVV must never be persisted; it is now accepted as a runtime-only parameter.
@@ -306,14 +308,16 @@ def get_user_products(user_id: int) -> list[dict]:
 
 
 def add_product(user_id: int, url: str, name: str, retailer: str,
-                quantity: int = 1, auto_checkout: bool = False) -> int:
+                quantity: int = 1, auto_checkout: bool = False,
+                max_price: float = 0) -> int:
     db = get_db()
     cursor = db.execute(
-        """INSERT INTO products (user_id, url, name, retailer, quantity, auto_checkout)
-           VALUES (?, ?, ?, ?, ?, ?)
+        """INSERT INTO products (user_id, url, name, retailer, quantity, auto_checkout, max_price)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(user_id, url) DO UPDATE SET
-             name=excluded.name, quantity=excluded.quantity, auto_checkout=excluded.auto_checkout""",
-        (user_id, url, name, retailer, quantity, int(auto_checkout)),
+             name=excluded.name, quantity=excluded.quantity,
+             auto_checkout=excluded.auto_checkout, max_price=excluded.max_price""",
+        (user_id, url, name, retailer, quantity, int(auto_checkout), max_price),
     )
     db.commit()
     return cursor.lastrowid
@@ -347,6 +351,15 @@ def update_product_quantity(user_id: int, url: str, quantity: int):
     db.execute(
         "UPDATE products SET quantity = ? WHERE user_id = ? AND url = ?",
         (quantity, user_id, url),
+    )
+    db.commit()
+
+
+def update_product_max_price(user_id: int, url: str, max_price: float):
+    db = get_db()
+    db.execute(
+        "UPDATE products SET max_price = ? WHERE user_id = ? AND url = ?",
+        (max_price, user_id, url),
     )
     db.commit()
 

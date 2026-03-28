@@ -109,12 +109,19 @@ export function useStatus(pollInterval = 3000) {
 
 // --- Products ---
 
-export async function addProduct(url: string, name: string, quantity: number, autoCheckout: boolean) {
+export async function addProduct(url: string, name: string, quantity: number, autoCheckout: boolean, maxPrice: number = 0) {
   const resp = await apiFetch('/products', {
     method: 'POST',
-    body: JSON.stringify({ url, name, quantity, auto_checkout: autoCheckout }),
+    body: JSON.stringify({ url, name, quantity, auto_checkout: autoCheckout, max_price: maxPrice }),
   });
   return resp.json();
+}
+
+export async function setMaxPrice(url: string, maxPrice: number) {
+  return (await apiFetch('/products/set_max_price', {
+    method: 'POST',
+    body: JSON.stringify({ url, max_price: maxPrice }),
+  })).json();
 }
 
 export async function removeProduct(url: string) {
