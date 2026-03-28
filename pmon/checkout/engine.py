@@ -1077,13 +1077,12 @@ class CheckoutEngine:
         page = await context.new_page()
 
         try:
-            # Sign in FIRST before any product interaction.
-            # Target session cookies degrade silently — add-to-cart works
-            # as guest but checkout requires a fresh authenticated session.
-            # _sign_in_target navigates to homepage and uses the full sign-in
-            # panel flow (same as test login), which is more reliable than
-            # the cart-page flyout modal.
-            if creds:
+            # In --my-browser mode, skip programmatic sign-in — the user is
+            # already logged in via Chrome's saved passwords/sessions.
+            if self.config.use_my_browser:
+                logger.info("Target: using your saved browser session (--my-browser)")
+            elif creds:
+                # Sign in FIRST before any product interaction.
                 logger.info("Target: signing in before checkout")
                 await self._sign_in_target(page, creds)
 
@@ -4560,18 +4559,41 @@ class CheckoutEngine:
             await page.goto(add_to_cart_url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
 
-            # Check if we got a CAPTCHA or sign-in page
+            # Check if we got a CAPTCHA
             page_text = await page.content()
             if "captcha" in page_text.lower():
-                logger.warning("Amazon: CAPTCHA triggered on add-to-cart")
-                return CheckoutResult(
-                    url=url, retailer="amazon", product_name=product_name,
-                    status=CheckoutStatus.FAILED,
-                    error_message="Amazon CAPTCHA — use --my-browser mode and solve it manually",
-                )
+                logger.warning("Amazon: CAPTCHA triggered — solve it in the browser window")
+                # Wait for user to solve CAPTCHA (up to 60s)
+                try:
+                    await page.wait_for_url("**/cart/**", timeout=60000)
+                except Exception:
+                    return CheckoutResult(
+                        url=url, retailer="amazon", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message="Amazon CAPTCHA timeout — solve it faster next time",
+                    )
 
-            # Wait a moment for the cart to update
-            await random_delay(page, 1000, 2000)
+            # Check if we need to sign in (Amazon redirects to sign-in for cart actions)
+            current_url = page.url
+            if "/ap/signin" in current_url or "/ap/login" in current_url:
+                logger.info("Amazon: sign-in required — please sign in in the browser window")
+                try:
+                    await page.wait_for_url(
+                        lambda url: "/ap/signin" not in url and "/ap/login" not in url,
+                        timeout=120000,
+                    )
+                    logger.info("Amazon: sign-in complete")
+                    # After sign-in, Amazon usually redirects back to cart add
+                    await wait_for_page_ready(page, timeout=10000)
+                except Exception:
+                    return CheckoutResult(
+                        url=url, retailer="amazon", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message="Amazon sign-in timeout — sign into Amazon in your browser first",
+                    )
+
+            # Wait for the cart to update
+            await random_delay(page, 2000, 3000)
 
             # Navigate to checkout
             logger.info("Amazon: proceeding to checkout")
@@ -4583,22 +4605,21 @@ class CheckoutEngine:
 
             current_url = page.url
 
-            # Check if we need to sign in
+            # Check for sign-in again at checkout
             if "/ap/signin" in current_url or "/ap/login" in current_url:
-                logger.info("Amazon: sign-in required — waiting for user to log in (--my-browser mode)")
-                # In --my-browser mode, the user can sign in manually
-                # Wait up to 120 seconds for them to complete sign-in
+                logger.info("Amazon: sign-in needed for checkout — please sign in")
                 try:
                     await page.wait_for_url(
-                        "**/gp/buy/**",
+                        lambda url: "/ap/signin" not in url and "/ap/login" not in url,
                         timeout=120000,
                     )
                     logger.info("Amazon: sign-in complete, on checkout page")
+                    await wait_for_page_ready(page, timeout=10000)
                 except Exception:
                     return CheckoutResult(
                         url=url, retailer="amazon", product_name=product_name,
                         status=CheckoutStatus.FAILED,
-                        error_message="Amazon sign-in timeout — log into Amazon in your browser first",
+                        error_message="Amazon sign-in timeout — sign into Amazon in your browser first",
                     )
 
             # Check for price guard before placing order
