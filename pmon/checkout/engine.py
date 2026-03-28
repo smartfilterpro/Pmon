@@ -503,8 +503,14 @@ class CheckoutEngine:
 
             self._browser_available = True
         except Exception as e:
-            logger.info(f"Browser fallback unavailable: {e}")
-            logger.info("API-only checkout mode — this is fine for most retailers")
+            logger.error(f"Browser startup failed: {e}")
+            if self.config.use_my_browser:
+                logger.error(
+                    "TIP: Close ALL Chrome windows (check system tray too), then restart Pmon. "
+                    "Chrome locks its profile so only one instance can use it."
+                )
+            else:
+                logger.info("API-only checkout mode — this is fine for most retailers")
 
     async def _start_my_browser(self):
         """Launch the user's real Chrome with remote debugging and connect via CDP.
@@ -512,18 +518,29 @@ class CheckoutEngine:
         This gives Pmon access to the user's saved passwords, cookies,
         logins, autofill, and extensions. Pmon opens new tabs in this
         browser for checkout.
+
+        Strategy:
+        1. Try connecting to an already-running Chrome with debugging enabled
+        2. If that fails, kill any existing Chrome and launch a fresh one
+        3. Connect via CDP
         """
         import subprocess
-        import time
 
+        debug_port = self.config.chrome_debug_port
+        cdp_url = f"http://127.0.0.1:{debug_port}"
+
+        # Step 1: Try connecting to an already-running Chrome with debugging
+        if await self._try_cdp_connect(cdp_url):
+            logger.info("Connected to already-running Chrome on port %d", debug_port)
+            return
+
+        # Step 2: Chrome isn't running with debugging — launch it
         chrome_path = self._find_system_chrome()
         if not chrome_path:
             raise RuntimeError(
                 "Could not find Chrome on your system. "
                 "Install Google Chrome or pass --chrome-profile instead."
             )
-
-        debug_port = self.config.chrome_debug_port
 
         # Find the user's default Chrome profile directory
         profile_dir = self.config.chrome_profile_dir
@@ -534,6 +551,9 @@ class CheckoutEngine:
                     "Could not find your Chrome profile directory. "
                     "Pass it explicitly: --chrome-profile \"C:\\Users\\YourName\\AppData\\Local\\Google\\Chrome\\User Data\""
                 )
+
+        # Kill any existing Chrome instances that would lock the profile
+        await self._kill_existing_chrome()
 
         logger.info("Launching YOUR Chrome from: %s", chrome_path)
         logger.info("Using your profile: %s", profile_dir)
@@ -548,31 +568,81 @@ class CheckoutEngine:
                 "--disable-blink-features=AutomationControlled",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--restore-last-session",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
         # Wait for Chrome to start and the debug port to be ready
-        cdp_url = f"http://127.0.0.1:{debug_port}"
-        for attempt in range(15):
-            try:
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"{cdp_url}/json/version", timeout=2.0)
-                    if resp.status_code == 200:
-                        break
-            except Exception:
-                await asyncio.sleep(1)
-        else:
-            raise RuntimeError(
-                f"Chrome started but debug port {debug_port} not responding. "
-                "Make sure Chrome is fully closed before running --my-browser."
-            )
+        for attempt in range(20):
+            if await self._try_cdp_connect(cdp_url):
+                return
+            await asyncio.sleep(1)
 
-        # Connect Playwright to the running Chrome via CDP
-        self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
-        logger.info("Connected to YOUR Chrome — saved passwords, cookies, and logins are active")
+        raise RuntimeError(
+            f"Chrome started but debug port {debug_port} not responding after 20s. "
+            "Close ALL Chrome windows (check system tray), then restart Pmon."
+        )
+
+    async def _try_cdp_connect(self, cdp_url: str) -> bool:
+        """Try to connect to Chrome via CDP. Returns True on success."""
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{cdp_url}/json/version", timeout=2.0)
+                if resp.status_code != 200:
+                    return False
+        except Exception:
+            return False
+
+        try:
+            self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+            logger.info("Connected to YOUR Chrome — saved passwords, cookies, and logins are active")
+            return True
+        except Exception as e:
+            logger.debug("CDP connect failed: %s", e)
+            return False
+
+    @staticmethod
+    async def _kill_existing_chrome():
+        """Kill existing Chrome processes so we can relaunch with debugging.
+
+        On Windows, Chrome often runs in the background (system tray).
+        We need to kill it to unlock the profile directory.
+        """
+        import platform
+        import subprocess
+
+        system = platform.system()
+        try:
+            if system == "Windows":
+                # /F = force, /IM = image name, /T = kill child processes
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+            elif system == "Darwin":
+                subprocess.run(
+                    ["pkill", "-f", "Google Chrome"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "chrome"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+            # Give Chrome a moment to fully shut down and release locks
+            await asyncio.sleep(2)
+            logger.info("Closed existing Chrome instances to unlock your profile")
+        except Exception:
+            pass  # Chrome might not be running — that's fine
 
     async def _start_headless(self):
         """Launch headless Chromium for server/cloud deployments."""
@@ -765,6 +835,22 @@ class CheckoutEngine:
         # The user's Chrome already has their logins, saved passwords, and
         # payment methods — just go straight to browser checkout.
         if self.config.use_my_browser:
+            # Try to reconnect if the CDP connection was lost
+            if not self._browser_available or not self._browser or not self._browser.is_connected():
+                logger.info("Browser connection lost — attempting to reconnect...")
+                try:
+                    cdp_url = f"http://127.0.0.1:{self.config.chrome_debug_port}"
+                    if await self._try_cdp_connect(cdp_url):
+                        self._browser_available = True
+                        logger.info("Reconnected to Chrome successfully")
+                    else:
+                        # Chrome isn't running — relaunch it
+                        await self._start_my_browser()
+                        self._browser_available = True
+                except Exception as e:
+                    logger.error("Failed to reconnect to Chrome: %s", e)
+                    self._browser_available = False
+
             if self._browser_available:
                 logger.info(f"Opening new tab in your Chrome for {product_name}...")
                 creds = self._load_user_credentials(retailer, user_id) or AccountCredentials()
