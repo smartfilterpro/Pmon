@@ -266,7 +266,8 @@ class PmonEngine:
                                         f"Skipping auto-checkout for {product.name}"
                                     )
                                     continue
-                            await self._auto_checkout_for_user(p, user_id)
+                            # Run checkout in background so it doesn't block polling
+                            asyncio.create_task(self._auto_checkout_for_user(p, user_id))
 
         elif result.status == StockStatus.OUT_OF_STOCK:
             self._notified.discard(product.url)
