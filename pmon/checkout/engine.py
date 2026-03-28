@@ -751,11 +751,48 @@ class CheckoutEngine:
     ) -> CheckoutResult:
         """Attempt checkout: API first, browser fallback.
 
+        In --my-browser mode, skips API checkout and credential checks entirely.
+        The user is already logged in via their real Chrome — just open a new tab
+        and check out using their saved sessions/passwords/payment.
+
         If dry_run=True, runs the full checkout flow but stops right before
         clicking "Place order". Useful for testing the entire flow without
         actually purchasing.
         """
         profile = self.config.profiles.get(profile_name) or Profile()
+
+        # In --my-browser mode, skip credential checks and API checkout.
+        # The user's Chrome already has their logins, saved passwords, and
+        # payment methods — just go straight to browser checkout.
+        if self.config.use_my_browser:
+            if self._browser_available:
+                logger.info(f"Opening new tab in your Chrome for {product_name}...")
+                creds = self._load_user_credentials(retailer, user_id) or AccountCredentials()
+                try:
+                    handler = getattr(self, f"_checkout_{retailer}", None)
+                    if handler:
+                        return await handler(url, product_name, profile, creds, dry_run=dry_run, user_id=user_id)
+                    else:
+                        return CheckoutResult(
+                            url=url, retailer=retailer, product_name=product_name,
+                            status=CheckoutStatus.FAILED,
+                            error_message=f"No browser checkout flow for {retailer} yet",
+                        )
+                except Exception as e:
+                    logger.error(f"Browser checkout failed: {e}")
+                    return CheckoutResult(
+                        url=url, retailer=retailer, product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message=f"Browser checkout failed: {e}",
+                    )
+            else:
+                return CheckoutResult(
+                    url=url, retailer=retailer, product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Browser not available. Is Chrome running?",
+                )
+
+        # --- Standard mode (headless / visible): needs credentials ---
 
         # Load credentials from DB (dashboard) first, then fall back to config.yaml
         creds = self._load_user_credentials(retailer, user_id)
@@ -817,10 +854,13 @@ class CheckoutEngine:
         # In --my-browser mode, use the browser's default context which
         # already has the user's saved passwords, cookies, and logins.
         # No need to create isolated contexts or inject fake user agents.
+        # IMPORTANT: Mark it so checkout flows do NOT close this context —
+        # closing it would kill the entire browser connection.
         if self.config.use_my_browser:
             contexts = self._browser.contexts
             if contexts:
                 context = contexts[0]
+                context._pmon_shared = True  # type: ignore[attr-defined]
                 await context.add_init_script(STEALTH_JS)
                 return context
 
@@ -862,6 +902,18 @@ class CheckoutEngine:
 
         await context.add_init_script(STEALTH_JS)
         return context
+
+    @staticmethod
+    async def _close_context(context):
+        """Close a browser context unless it's the shared --my-browser context.
+
+        In --my-browser mode, the default context is shared across all
+        checkout flows. Closing it would kill the CDP connection and make
+        the browser unusable. Only close pages (tabs), not the context.
+        """
+        if getattr(context, "_pmon_shared", False):
+            return  # Don't close — this is the user's real browser session
+        await context.close()
 
     async def _save_context(self, context, retailer: str):
         """Save browser cookies/state for reuse."""
@@ -1284,7 +1336,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _nuke_floating_ui_portals(self, page) -> int:
         """Remove floating-ui portal overlays via JS instead of clicking Close.
@@ -2354,7 +2406,7 @@ class CheckoutEngine:
                 if login_blocked and storage_path.exists():
                     logger.info("Walmart: fresh session sign-in blocked — retrying with saved cookies")
                     await page.close()
-                    await context.close()
+                    await self._close_context(context)
                     context = await self._get_context("walmart", load_cookies=True)
                     page = await context.new_page()
                     await page.goto("https://www.walmart.com/checkout", wait_until="domcontentloaded")
@@ -2432,7 +2484,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _sign_in_pokemoncenter(self, page, creds: AccountCredentials):
         # DEPRECATED [Mission 1] — now handled by pmon/login/pokemoncenter.py
@@ -2905,7 +2957,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _pkc_fill_checkout_form(self, page, profile: Profile, creds: AccountCredentials):
         """Fill the Pokemon Center checkout form (shipping + payment).
@@ -4076,7 +4128,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     # ------------------------------------------------------------------
     # Sam's Club browser checkout
@@ -4190,7 +4242,7 @@ class CheckoutEngine:
             )
         finally:
             await page.close()
-            await context.close()
+            await self._close_context(context)
 
     async def _sams_needs_login(self, page) -> bool:
         """Check if Sam's Club page shows a logged-out state."""
@@ -4436,3 +4488,169 @@ class CheckoutEngine:
         except Exception as e:
             logger.error("Sam's Club place order error: %s", e)
             return False
+
+    # ── Amazon checkout ─────────────────────────────────────────────────
+    #
+    # Uses Amazon's direct add-to-cart URL to skip the product page entirely:
+    #   https://www.amazon.com/gp/aws/cart/add.html?ASIN.1=B0G78HDPPR&Quantity.1=1
+    #
+    # This is faster and more reliable than navigating the product page,
+    # finding the "Add to Cart" button, and clicking it.
+
+    async def _checkout_amazon(
+        self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
+        dry_run: bool = False, **kwargs,
+    ) -> CheckoutResult:
+        """Amazon checkout flow using direct add-to-cart URL."""
+        asin = self._extract_amazon_asin(url)
+        if not asin:
+            return CheckoutResult(
+                url=url, retailer="amazon", product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message=f"Could not extract ASIN from URL: {url}",
+            )
+
+        user_id = kwargs.get("user_id")
+        context = await self._get_context("amazon")
+        page = await context.new_page()
+
+        try:
+            # Go directly to Amazon's add-to-cart endpoint — skips product page
+            add_to_cart_url = (
+                f"https://www.amazon.com/gp/aws/cart/add.html"
+                f"?ASIN.1={asin}&Quantity.1=1"
+            )
+
+            logger.info("Amazon: adding %s to cart via direct URL", product_name)
+            await page.goto(add_to_cart_url, wait_until="domcontentloaded")
+            await wait_for_page_ready(page, timeout=15000)
+
+            # Check if we got a CAPTCHA or sign-in page
+            page_text = await page.content()
+            if "captcha" in page_text.lower():
+                logger.warning("Amazon: CAPTCHA triggered on add-to-cart")
+                return CheckoutResult(
+                    url=url, retailer="amazon", product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Amazon CAPTCHA — use --my-browser mode and solve it manually",
+                )
+
+            # Wait a moment for the cart to update
+            await random_delay(page, 1000, 2000)
+
+            # Navigate to checkout
+            logger.info("Amazon: proceeding to checkout")
+            await page.goto(
+                "https://www.amazon.com/gp/buy/spc/handlers/display.html?hasWorkingJavascript=1",
+                wait_until="domcontentloaded",
+            )
+            await wait_for_page_ready(page, timeout=15000)
+
+            current_url = page.url
+
+            # Check if we need to sign in
+            if "/ap/signin" in current_url or "/ap/login" in current_url:
+                logger.info("Amazon: sign-in required — waiting for user to log in (--my-browser mode)")
+                # In --my-browser mode, the user can sign in manually
+                # Wait up to 120 seconds for them to complete sign-in
+                try:
+                    await page.wait_for_url(
+                        "**/gp/buy/**",
+                        timeout=120000,
+                    )
+                    logger.info("Amazon: sign-in complete, on checkout page")
+                except Exception:
+                    return CheckoutResult(
+                        url=url, retailer="amazon", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message="Amazon sign-in timeout — log into Amazon in your browser first",
+                    )
+
+            # Check for price guard before placing order
+            price_text = ""
+            try:
+                price_el = page.locator("#subtotals-marketplace-table .grand-total-price, .order-summary .grand-total-price, #subtotals .a-color-price").first
+                if await price_el.is_visible(timeout=3000):
+                    price_text = await price_el.text_content()
+            except Exception:
+                pass
+
+            if price_text:
+                logger.info("Amazon: order total: %s", price_text.strip())
+
+            if dry_run:
+                logger.info("DRY RUN: would place Amazon order for %s — stopping here", product_name)
+                await self._save_context(context, "amazon")
+                return CheckoutResult(
+                    url=url, retailer="amazon", product_name=product_name,
+                    status=CheckoutStatus.SUCCESS,
+                    error_message="DRY RUN — order not placed",
+                )
+
+            # Click "Place your order"
+            place_order = page.locator(
+                'input[name="placeYourOrder1"], '
+                '#submitOrderButtonId input, '
+                '#placeYourOrder input, '
+                'input[value*="Place your order"]'
+            ).first
+
+            try:
+                if await place_order.is_visible(timeout=5000):
+                    await human_click_element(page, place_order)
+                    logger.info("Amazon: clicked Place your order!")
+
+                    # Wait for confirmation
+                    try:
+                        await page.wait_for_url(
+                            "**/gp/buy/thankyou/**",
+                            timeout=30000,
+                        )
+                        logger.info("Amazon: order confirmed for %s!", product_name)
+                    except Exception:
+                        # Check if we're on a confirmation-like page
+                        if "thankyou" in page.url.lower() or "confirmation" in page.url.lower():
+                            logger.info("Amazon: order appears confirmed for %s", product_name)
+                        else:
+                            logger.warning("Amazon: order may have been placed — check your account")
+
+                    await self._save_context(context, "amazon")
+                    return CheckoutResult(
+                        url=url, retailer="amazon", product_name=product_name,
+                        status=CheckoutStatus.SUCCESS,
+                    )
+                else:
+                    logger.warning("Amazon: Place your order button not visible")
+            except Exception as e:
+                logger.error("Amazon: error clicking Place order: %s", e)
+
+            await self._save_context(context, "amazon")
+            return CheckoutResult(
+                url=url, retailer="amazon", product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message="Could not complete Amazon checkout — Place order button not found",
+            )
+
+        except Exception as e:
+            logger.error("Amazon checkout error: %s", e)
+            return CheckoutResult(
+                url=url, retailer="amazon", product_name=product_name,
+                status=CheckoutStatus.FAILED,
+                error_message=f"Amazon checkout error: {e}",
+            )
+        finally:
+            await page.close()
+            await self._close_context(context)
+
+    @staticmethod
+    def _extract_amazon_asin(url: str) -> str | None:
+        """Extract ASIN from Amazon URL or Zephyr redirect links."""
+        # Standard Amazon: /dp/B0G78HDPPR or /gp/product/B0G78HDPPR
+        match = _re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", url, _re.I)
+        if match:
+            return match.group(1)
+        # Zephyr-style links: &a=B0G78HDPPR or ?a=B0G78HDPPR
+        match = _re.search(r"[?&]a=([A-Z0-9]{10})", url, _re.I)
+        if match:
+            return match.group(1)
+        return None

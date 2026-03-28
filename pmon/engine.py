@@ -240,6 +240,18 @@ class PmonEngine:
                         # Auto-checkout if enabled and not already purchased
                         purchase_key = f"{user_id}:{product.url}"
                         if p["auto_checkout"] and purchase_key not in self._purchased:
+                            # Check per-product max_price guard
+                            max_price = p.get("max_price", 0)
+                            if max_price and max_price > 0:
+                                price = _parse_price(result.price)
+                                if price > 0 and price > max_price:
+                                    logger.warning(
+                                        f"Price too high for {product.name}: "
+                                        f"${price:.2f} exceeds max ${max_price:.2f}. "
+                                        f"Skipping auto-checkout (likely 3rd-party seller)."
+                                    )
+                                    continue
+
                             # Check spend limit before attempting checkout
                             spend_limit = settings.get("spend_limit", 0)
                             if spend_limit and spend_limit > 0:
