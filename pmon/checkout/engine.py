@@ -211,6 +211,7 @@ class CheckoutEngine:
         self._playwright = None
         self._browser_available = False
         self._chrome_process = None
+        self._persistent_context = None
         self._anthropic = None
         self._vision_available = False
         SESSION_DIR.mkdir(exist_ok=True)
@@ -513,36 +514,18 @@ class CheckoutEngine:
                 logger.info("API-only checkout mode — this is fine for most retailers")
 
     async def _start_my_browser(self):
-        """Launch the user's real Chrome with remote debugging and connect via CDP.
+        """Launch the user's real Chrome with their profile using Playwright.
 
-        This gives Pmon access to the user's saved passwords, cookies,
-        logins, autofill, and extensions. Pmon opens new tabs in this
-        browser for checkout.
-
-        Strategy:
-        1. Try connecting to an already-running Chrome with debugging enabled
-        2. If that fails, kill any existing Chrome and launch a fresh one
-        3. Connect via CDP
+        Uses launch_persistent_context which handles the Chrome lifecycle
+        internally — no manual CDP port management needed. This is much
+        more reliable on Windows where Chrome profile locks are finicky.
         """
-        import subprocess
-
-        debug_port = self.config.chrome_debug_port
-        cdp_url = f"http://127.0.0.1:{debug_port}"
-
-        # Step 1: Try connecting to an already-running Chrome with debugging
-        if await self._try_cdp_connect(cdp_url):
-            logger.info("Connected to already-running Chrome on port %d", debug_port)
-            return
-
-        # Step 2: Chrome isn't running with debugging — launch it
         chrome_path = self._find_system_chrome()
         if not chrome_path:
             raise RuntimeError(
-                "Could not find Chrome on your system. "
-                "Install Google Chrome or pass --chrome-profile instead."
+                "Could not find Chrome on your system. Install Google Chrome."
             )
 
-        # Find the user's default Chrome profile directory
         profile_dir = self.config.chrome_profile_dir
         if not profile_dir:
             profile_dir = self._find_default_chrome_profile()
@@ -552,61 +535,36 @@ class CheckoutEngine:
                     "Pass it explicitly: --chrome-profile \"C:\\Users\\YourName\\AppData\\Local\\Google\\Chrome\\User Data\""
                 )
 
-        # Kill any existing Chrome instances that would lock the profile
+        # Kill any existing Chrome so we can take over the profile
         await self._kill_existing_chrome()
 
         logger.info("Launching YOUR Chrome from: %s", chrome_path)
         logger.info("Using your profile: %s", profile_dir)
-        logger.info("Remote debugging on port %d", debug_port)
 
-        # Launch Chrome with remote debugging enabled
-        self._chrome_process = subprocess.Popen(
-            [
-                chrome_path,
-                f"--remote-debugging-port={debug_port}",
-                f"--user-data-dir={profile_dir}",
+        # launch_persistent_context opens a real Chrome window with the
+        # user's profile (saved passwords, cookies, payment methods, etc.)
+        # and gives Playwright full control to open new tabs for checkout.
+        self._persistent_context = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            executable_path=chrome_path,
+            headless=False,
+            args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-first-run",
                 "--no-default-browser-check",
-                "--restore-last-session",
+                "--disable-infobars",
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            viewport=None,  # Use Chrome's default viewport (user's window size)
+            no_viewport=True,
+            ignore_default_args=["--enable-automation"],
         )
+        await self._persistent_context.add_init_script(STEALTH_JS)
 
-        # Wait for Chrome to start and the debug port to be ready
-        for attempt in range(20):
-            if await self._try_cdp_connect(cdp_url):
-                return
-            await asyncio.sleep(1)
-
-        raise RuntimeError(
-            f"Chrome started but debug port {debug_port} not responding after 20s. "
-            "Close ALL Chrome windows (check system tray), then restart Pmon."
-        )
-
-    async def _try_cdp_connect(self, cdp_url: str) -> bool:
-        """Try to connect to Chrome via CDP. Returns True on success."""
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{cdp_url}/json/version", timeout=2.0)
-                if resp.status_code != 200:
-                    return False
-        except Exception:
-            return False
-
-        try:
-            self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
-            logger.info("Connected to YOUR Chrome — saved passwords, cookies, and logins are active")
-            return True
-        except Exception as e:
-            logger.debug("CDP connect failed: %s", e)
-            return False
+        logger.info("YOUR Chrome is open — saved passwords, cookies, and logins are active")
 
     @staticmethod
     async def _kill_existing_chrome():
-        """Kill existing Chrome processes so we can relaunch with debugging.
+        """Kill existing Chrome processes so we can take over the profile.
 
         On Windows, Chrome often runs in the background (system tray).
         We need to kill it to unlock the profile directory.
@@ -617,7 +575,6 @@ class CheckoutEngine:
         system = platform.system()
         try:
             if system == "Windows":
-                # /F = force, /IM = image name, /T = kill child processes
                 subprocess.run(
                     ["taskkill", "/F", "/IM", "chrome.exe", "/T"],
                     stdout=subprocess.DEVNULL,
@@ -638,9 +595,9 @@ class CheckoutEngine:
                     stderr=subprocess.DEVNULL,
                     timeout=10,
                 )
-            # Give Chrome a moment to fully shut down and release locks
-            await asyncio.sleep(2)
-            logger.info("Closed existing Chrome instances to unlock your profile")
+            # Give Chrome time to fully shut down and release profile locks
+            await asyncio.sleep(3)
+            logger.info("Closed existing Chrome to unlock your profile")
         except Exception:
             pass  # Chrome might not be running — that's fine
 
@@ -749,15 +706,17 @@ class CheckoutEngine:
     async def stop(self):
         """Close resources."""
         await self._api.close()
+        if self._persistent_context:
+            try:
+                await self._persistent_context.close()
+            except Exception:
+                pass
+            self._persistent_context = None
         if self._browser:
-            # In --my-browser mode, just disconnect — don't kill the user's Chrome
-            if self.config.use_my_browser:
-                try:
-                    self._browser.close()
-                except Exception:
-                    pass
-            else:
+            try:
                 await self._browser.close()
+            except Exception:
+                pass
         if self._playwright:
             await self._playwright.stop()
 
@@ -835,20 +794,15 @@ class CheckoutEngine:
         # The user's Chrome already has their logins, saved passwords, and
         # payment methods — just go straight to browser checkout.
         if self.config.use_my_browser:
-            # Try to reconnect if the CDP connection was lost
-            if not self._browser_available or not self._browser or not self._browser.is_connected():
-                logger.info("Browser connection lost — attempting to reconnect...")
+            # Try to relaunch if the browser died
+            if not self._browser_available or not self._persistent_context:
+                logger.info("Browser not available — attempting to relaunch Chrome...")
                 try:
-                    cdp_url = f"http://127.0.0.1:{self.config.chrome_debug_port}"
-                    if await self._try_cdp_connect(cdp_url):
-                        self._browser_available = True
-                        logger.info("Reconnected to Chrome successfully")
-                    else:
-                        # Chrome isn't running — relaunch it
-                        await self._start_my_browser()
-                        self._browser_available = True
+                    await self._start_my_browser()
+                    self._browser_available = True
+                    logger.info("Chrome relaunched successfully")
                 except Exception as e:
-                    logger.error("Failed to reconnect to Chrome: %s", e)
+                    logger.error("Failed to launch Chrome: %s", e)
                     self._browser_available = False
 
             if self._browser_available:
@@ -937,18 +891,13 @@ class CheckoutEngine:
         """Get or create a browser context with persistent cookies and stealth."""
         from pmon.monitors.base import _CHROME_FULL, _CHROME_MAJOR
 
-        # In --my-browser mode, use the browser's default context which
-        # already has the user's saved passwords, cookies, and logins.
-        # No need to create isolated contexts or inject fake user agents.
+        # In --my-browser mode, use the persistent context which IS the
+        # user's real Chrome session with saved passwords, cookies, logins.
         # IMPORTANT: Mark it so checkout flows do NOT close this context —
-        # closing it would kill the entire browser connection.
-        if self.config.use_my_browser:
-            contexts = self._browser.contexts
-            if contexts:
-                context = contexts[0]
-                context._pmon_shared = True  # type: ignore[attr-defined]
-                await context.add_init_script(STEALTH_JS)
-                return context
+        # closing it would kill the entire browser.
+        if self.config.use_my_browser and self._persistent_context:
+            self._persistent_context._pmon_shared = True  # type: ignore[attr-defined]
+            return self._persistent_context
 
         storage_path = SESSION_DIR / f"{retailer}.json"
         ctx_kwargs = dict(
