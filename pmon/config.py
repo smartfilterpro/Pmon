@@ -89,6 +89,8 @@ class Config:
     dashboard_port: int = 8888
     headless: bool = True
     chrome_profile_dir: str = ""
+    use_my_browser: bool = False
+    chrome_debug_port: int = 9222
 
 
 def detect_retailer(url: str) -> str:

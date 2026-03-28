@@ -53,6 +53,9 @@ def main():
                         help="Run Chrome in visible (non-headless) mode so you can see and interact with the browser")
     parser.add_argument("--chrome-profile", type=str, default=None,
                         help="Path to Chrome user data directory to reuse existing login sessions")
+    parser.add_argument("--my-browser", action="store_true",
+                        help="Launch YOUR real Chrome with your saved passwords, cookies, and logins. "
+                             "Pmon opens new tabs in it for checkout. Close Chrome first before using this.")
 
     args = parser.parse_args()
     setup_logging(args.verbose)
@@ -101,6 +104,9 @@ def cmd_run(args):
         config.headless = False
     if args.chrome_profile:
         config.chrome_profile_dir = args.chrome_profile
+    if args.my_browser:
+        config.use_my_browser = True
+        config.headless = False
 
     asyncio.run(_run(config, args))
 
@@ -111,7 +117,10 @@ async def _run(config, args):
     # Initialize checkout engine (API-first, browser is optional fallback)
     if not args.no_checkout:
         await engine.init_checkout()
-        if config.headless:
+        if config.use_my_browser:
+            console.print("[green]Checkout engine ready (YOUR Chrome — saved passwords & logins active)[/green]")
+            console.print("[blue]Use Chrome normally. When items drop, Pmon opens a new tab and checks out.[/blue]")
+        elif config.headless:
             console.print("[green]Checkout engine ready (API-first, headless browser fallback)[/green]")
         else:
             console.print("[green]Checkout engine ready (VISIBLE Chrome mode)[/green]")
