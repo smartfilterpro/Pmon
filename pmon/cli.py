@@ -139,8 +139,17 @@ async def _run(config, args):
     # Only Ctrl+C (or SIGINT/SIGTERM) triggers a full shutdown.
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (__import__("signal").SIGINT, __import__("signal").SIGTERM):
-        loop.add_signal_handler(sig, shutdown_event.set)
+    import signal as _signal
+    import sys as _sys
+    if _sys.platform != "win32":
+        for sig in (_signal.SIGINT, _signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_event.set)
+    else:
+        # Windows doesn't support add_signal_handler; use a thread-based fallback
+        def _win_signal_handler(signum, frame):
+            loop.call_soon_threadsafe(shutdown_event.set)
+        _signal.signal(_signal.SIGINT, _win_signal_handler)
+        _signal.signal(_signal.SIGTERM, _win_signal_handler)
 
     # Start monitoring as a background task so the dashboard can
     # freely stop and restart it without tearing down the process.
