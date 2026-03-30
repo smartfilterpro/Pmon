@@ -236,6 +236,26 @@ class CheckoutEngine:
         raw = await page.screenshot(type="png")
         return base64.b64encode(raw).decode()
 
+    async def _save_debug_screenshot(self, page, retailer: str, label: str = "failed") -> str | None:
+        """Save a timestamped screenshot for debugging failed checkout steps.
+
+        Screenshots are saved to ./screenshots/{retailer}_{label}_{timestamp}.png
+        Returns the file path, or None if the screenshot couldn't be taken.
+        """
+        from datetime import datetime as _dt
+        screenshots_dir = Path(__file__).parent.parent.parent / "screenshots"
+        screenshots_dir.mkdir(exist_ok=True)
+        timestamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{retailer}_{label}_{timestamp}.png"
+        filepath = screenshots_dir / filename
+        try:
+            await page.screenshot(path=str(filepath), full_page=False)
+            logger.info("Screenshot saved: %s", filepath)
+            return str(filepath)
+        except Exception as e:
+            logger.debug("Could not save screenshot: %s", e)
+            return None
+
     @staticmethod
     def _extract_json(text: str) -> str:
         """Extract JSON from a vision response that may contain markdown fences or prose."""
@@ -1377,6 +1397,7 @@ class CheckoutEngine:
                 )
 
             error = await self._smart_read_error(page)
+            await self._save_debug_screenshot(page, "target", "place_order_not_found")
             await self._save_context(context, "target")
             return CheckoutResult(
                 url=url,
@@ -1387,6 +1408,10 @@ class CheckoutEngine:
             )
 
         except Exception as e:
+            try:
+                await self._save_debug_screenshot(page, "target", "error")
+            except Exception:
+                pass
             return CheckoutResult(
                 url=url,
                 retailer="target",
@@ -2526,6 +2551,7 @@ class CheckoutEngine:
                 )
 
             error = await self._smart_read_error(page)
+            await self._save_debug_screenshot(page, "walmart", "checkout_failed")
             await self._save_context(context, "walmart")
             return CheckoutResult(
                 url=url,
@@ -2535,6 +2561,10 @@ class CheckoutEngine:
                 error_message=error or "Checkout flow interrupted - manual intervention needed",
             )
         except Exception as e:
+            try:
+                await self._save_debug_screenshot(page, "walmart", "error")
+            except Exception:
+                pass
             return CheckoutResult(
                 url=url,
                 retailer="walmart",
@@ -2999,6 +3029,7 @@ class CheckoutEngine:
                 )
 
             error = await self._smart_read_error(page)
+            await self._save_debug_screenshot(page, "pokemoncenter", "checkout_failed")
             await self._save_context(context, "pokemoncenter")
             return CheckoutResult(
                 url=url,
@@ -3008,6 +3039,10 @@ class CheckoutEngine:
                 error_message=error or "Checkout flow interrupted - manual intervention needed",
             )
         except Exception as e:
+            try:
+                await self._save_debug_screenshot(page, "pokemoncenter", "error")
+            except Exception:
+                pass
             return CheckoutResult(
                 url=url,
                 retailer="pokemoncenter",
@@ -4165,6 +4200,7 @@ class CheckoutEngine:
                     )
 
             error = await self._smart_read_error(page)
+            await self._save_debug_screenshot(page, "bestbuy", "checkout_failed")
             await self._save_context(context, "bestbuy")
             return CheckoutResult(
                 url=url,
@@ -4174,6 +4210,10 @@ class CheckoutEngine:
                 error_message=error or "Checkout flow interrupted - manual intervention needed",
             )
         except Exception as e:
+            try:
+                await self._save_debug_screenshot(page, "bestbuy", "error")
+            except Exception:
+                pass
             # Save cookies even on failure so sign-in session persists
             try:
                 await self._save_context(context, "bestbuy")
@@ -4662,6 +4702,7 @@ class CheckoutEngine:
             except Exception as e:
                 logger.error("Amazon: error clicking Place order: %s", e)
 
+            await self._save_debug_screenshot(page, "amazon", "place_order_not_found")
             await self._save_context(context, "amazon")
             return CheckoutResult(
                 url=url, retailer="amazon", product_name=product_name,
@@ -4671,6 +4712,10 @@ class CheckoutEngine:
 
         except Exception as e:
             logger.error("Amazon checkout error: %s", e)
+            try:
+                await self._save_debug_screenshot(page, "amazon", "error")
+            except Exception:
+                pass
             return CheckoutResult(
                 url=url, retailer="amazon", product_name=product_name,
                 status=CheckoutStatus.FAILED,
