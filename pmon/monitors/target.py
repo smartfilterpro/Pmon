@@ -1013,7 +1013,23 @@ class TargetMonitor(BaseMonitor):
                         return result
 
             # 2c: Use CDUI OOS signal if fulfillment data wasn't available
+            # BUT: for marketplace items, the CDUI layout may show adapt_pdp_oos
+            # even when the item IS in stock (sold by a third party). So we
+            # also check for an "Add to cart" / "Buy now" button on the page
+            # before trusting the OOS signal.
             if oos_signal is True:
+                # Check if the page actually has an Add to cart / Buy now button
+                add_btn = soup.find("button", attrs={"data-test": re.compile(r"addToCart|shippingButton|buyNow", re.I)})
+                if not add_btn:
+                    add_btn = soup.find("button", string=re.compile(r"add to cart|buy now", re.I))
+                if add_btn and not add_btn.get("disabled"):
+                    logger.info("Target scrape: CDUI says OOS but 'Add to cart'/'Buy now' button exists — treating as IN_STOCK for %s", product_name)
+                    return StockResult(
+                        url=url, retailer=self.retailer_name,
+                        product_name=product_name,
+                        status=StockStatus.IN_STOCK, price=price_from_preloaded,
+                        image_url=page_image,
+                    )
                 logger.info("Target scrape: CDUI layout OOS signal (adapt_pdp_oos) for %s", product_name)
                 return StockResult(
                     url=url, retailer=self.retailer_name,
