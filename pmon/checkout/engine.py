@@ -4559,38 +4559,8 @@ class CheckoutEngine:
             await page.goto(add_to_cart_url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
 
-            # Check if we got a CAPTCHA
-            page_text = await page.content()
-            if "captcha" in page_text.lower():
-                logger.warning("Amazon: CAPTCHA triggered — solve it in the browser window")
-                # Wait for user to solve CAPTCHA (up to 60s)
-                try:
-                    await page.wait_for_url("**/cart/**", timeout=60000)
-                except Exception:
-                    return CheckoutResult(
-                        url=url, retailer="amazon", product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message="Amazon CAPTCHA timeout — solve it faster next time",
-                    )
-
-            # Check if we need to sign in (Amazon redirects to sign-in for cart actions)
-            current_url = page.url
-            if "/ap/signin" in current_url or "/ap/login" in current_url:
-                logger.info("Amazon: sign-in required — please sign in in the browser window")
-                try:
-                    await page.wait_for_url(
-                        lambda url: "/ap/signin" not in url and "/ap/login" not in url,
-                        timeout=120000,
-                    )
-                    logger.info("Amazon: sign-in complete")
-                    # After sign-in, Amazon usually redirects back to cart add
-                    await wait_for_page_ready(page, timeout=10000)
-                except Exception:
-                    return CheckoutResult(
-                        url=url, retailer="amazon", product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message="Amazon sign-in timeout — sign into Amazon in your browser first",
-                    )
+            # Handle sign-in, CAPTCHA, or any interstitial after add-to-cart
+            await self._amazon_wait_for_sign_in(page)
 
             # Wait for the cart to update
             await random_delay(page, 2000, 3000)
@@ -4603,24 +4573,10 @@ class CheckoutEngine:
             )
             await wait_for_page_ready(page, timeout=15000)
 
-            current_url = page.url
+            # Handle sign-in again at checkout
+            await self._amazon_wait_for_sign_in(page)
 
-            # Check for sign-in again at checkout
-            if "/ap/signin" in current_url or "/ap/login" in current_url:
-                logger.info("Amazon: sign-in needed for checkout — please sign in")
-                try:
-                    await page.wait_for_url(
-                        lambda url: "/ap/signin" not in url and "/ap/login" not in url,
-                        timeout=120000,
-                    )
-                    logger.info("Amazon: sign-in complete, on checkout page")
-                    await wait_for_page_ready(page, timeout=10000)
-                except Exception:
-                    return CheckoutResult(
-                        url=url, retailer="amazon", product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message="Amazon sign-in timeout — sign into Amazon in your browser first",
-                    )
+            logger.info("Amazon: checkout page URL: %s", page.url[:120])
 
             # Check for price guard before placing order
             price_text = ""
@@ -4710,3 +4666,37 @@ class CheckoutEngine:
         if match:
             return match.group(1)
         return None
+
+    @staticmethod
+    def _is_amazon_sign_in(url: str, page_content: str = "") -> bool:
+        """Check if the current page is an Amazon sign-in or interstitial."""
+        url_lower = url.lower()
+        if any(s in url_lower for s in ["/ap/signin", "/ap/login", "/gp/sign-in", "/ap/register"]):
+            return True
+        if page_content and "captcha" in page_content.lower():
+            return True
+        return False
+
+    async def _amazon_wait_for_sign_in(self, page):
+        """If Amazon is showing a sign-in or CAPTCHA page, wait for the user to handle it."""
+        current_url = page.url
+        page_content = await page.content()
+
+        if not self._is_amazon_sign_in(current_url, page_content):
+            return  # Not on a sign-in page — proceed normally
+
+        if "captcha" in page_content.lower():
+            logger.warning("Amazon: CAPTCHA detected — please solve it in the browser window")
+        else:
+            logger.info("Amazon: sign-in required — please sign in in the browser window (2 min timeout)")
+
+        # Wait for the URL to change away from sign-in (user signs in manually)
+        try:
+            await page.wait_for_url(
+                lambda u: not self._is_amazon_sign_in(u),
+                timeout=120000,
+            )
+            logger.info("Amazon: sign-in/CAPTCHA complete")
+            await wait_for_page_ready(page, timeout=10000)
+        except Exception:
+            logger.warning("Amazon: sign-in timeout — continuing anyway (user may still be signing in)")
