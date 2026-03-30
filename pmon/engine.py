@@ -117,6 +117,50 @@ class PmonEngine:
         except Exception as exc:
             logger.debug("Could not load session cookies for %s monitor: %s", retailer, exc)
 
+    async def _sync_browser_cookies_to_monitors(self):
+        """In --my-browser mode, export cookies from the Playwright browser
+        to the HTTP monitors so they benefit from the user's logged-in session.
+
+        This prevents CAPTCHAs on Amazon, Walmart, etc. because the HTTP
+        requests carry the same session cookies as the real browser.
+        """
+        if not self.config.use_my_browser or not self.checkout_engine:
+            return
+        ctx = getattr(self.checkout_engine, "_persistent_context", None)
+        if not ctx:
+            return
+
+        try:
+            cookies = await ctx.cookies()
+            if not cookies:
+                return
+
+            # Group cookies by domain → retailer
+            retailer_cookies: dict[str, dict[str, str]] = {}
+            domain_map = {
+                "amazon": [".amazon.com"],
+                "target": [".target.com"],
+                "walmart": [".walmart.com"],
+                "bestbuy": [".bestbuy.com"],
+                "pokemoncenter": [".pokemoncenter.com"],
+                "costco": [".costco.com"],
+                "samsclub": [".samsclub.com"],
+            }
+            for cookie in cookies:
+                domain = cookie.get("domain", "")
+                for retailer, domains in domain_map.items():
+                    if any(d in domain for d in domains):
+                        if retailer not in retailer_cookies:
+                            retailer_cookies[retailer] = {}
+                        retailer_cookies[retailer][cookie["name"]] = cookie["value"]
+
+            for retailer, cookie_dict in retailer_cookies.items():
+                if retailer in self._monitors and cookie_dict:
+                    self._monitors[retailer].load_session_cookies(cookie_dict)
+                    logger.info("Shared %d browser cookies with %s monitor", len(cookie_dict), retailer)
+        except Exception as e:
+            logger.debug("Could not sync browser cookies to monitors: %s", e)
+
     def _get_discord_notifier(self, webhook: str) -> DiscordNotifier | None:
         if not webhook:
             return None
@@ -145,11 +189,14 @@ class PmonEngine:
         logger.info(f"Starting monitor with {len(self.config.products)} products, "
                      f"polling every {self.config.poll_interval}s")
 
+        # In --my-browser mode, share the browser's cookies with the HTTP monitors
+        # so they don't get CAPTCHAs from Amazon/Walmart/etc.
+        await self._sync_browser_cookies_to_monitors()
+
         try:
             while self._running:
                 self.sync_products_from_db()
                 await self._check_all()
-                # Add ±20% jitter to poll interval to avoid exact-interval bot fingerprint.
                 jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
                 sleep_time = self.config.poll_interval + jitter
                 logger.info(f"Poll complete — next check in {sleep_time:.0f}s "
