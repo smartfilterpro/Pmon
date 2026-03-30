@@ -277,6 +277,9 @@ class PmonEngine:
                                 )
                                 continue
                         # Run checkout in background so it doesn't block polling
+                        # Mark as purchased IMMEDIATELY to prevent duplicate orders
+                        # from the next poll cycle (checkout runs in background)
+                        self._purchased.add(purchase_key)
                         asyncio.create_task(self._auto_checkout_for_user(p, user_id))
 
         elif result.status == StockStatus.OUT_OF_STOCK:
