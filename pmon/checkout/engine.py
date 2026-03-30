@@ -1294,15 +1294,21 @@ class CheckoutEngine:
 
                 # Click checkout
                 if not await self._smart_click(page, "Check out", checkout_all_sel):
-                    # Recovery: checkout button missing likely means we're not
-                    # signed in — Target replaces it with a sign-in prompt.
+                    # Recovery: checkout button missing likely means we're not signed in.
                     logger.warning("Target: checkout button not found — checking if sign-in is required")
-                    if not await self._is_signed_in_target(page):
+                    if self.config.use_my_browser:
+                        # In --my-browser mode, wait for user to sign in manually
+                        logger.info("Target: please sign in to Target in the browser window (2 min timeout)")
+                        try:
+                            await page.wait_for_selector(checkout_sel, timeout=120000)
+                            await self._smart_click(page, "Check out", checkout_all_sel)
+                        except Exception:
+                            raise Exception("Target sign-in timeout — sign into Target in your browser first")
+                    elif not await self._is_signed_in_target(page):
                         logger.info("Target: not signed in — attempting sign-in recovery from cart page")
                         await self._sign_in_target(page, creds)
-                        # Navigate back to cart after login
                         await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
-                        await wait_for_page_ready(page, timeout=15000)
+                        await wait_for_page_ready(page, timeout=10000)
                         await self._nuke_floating_ui_portals(page)
                         await sweep_popups(page)
                         await self._target_select_delivery(page)
@@ -1310,8 +1316,6 @@ class CheckoutEngine:
                         if not await self._smart_click(page, "Check out", checkout_all_sel):
                             raise Exception("Checkout button not found after sign-in recovery")
                     else:
-                        # Also try clicking a "Sign in to check out" button directly
-                        # as it may navigate to login then back to checkout
                         sign_in_checkout_sel = (
                             'button[data-test="checkout-sign-in"], '
                             'button:has-text("Sign in to check out"), '
@@ -1319,11 +1323,10 @@ class CheckoutEngine:
                         )
                         if await self._smart_click(page, "Sign in to check out", sign_in_checkout_sel, timeout=3000):
                             logger.info("Target: clicked 'Sign in to check out' — completing sign-in")
-                            await wait_for_page_ready(page, timeout=15000)
-                            # Complete the sign-in flow
+                            await wait_for_page_ready(page, timeout=10000)
                             await self._sign_in_target(page, creds)
                             await page.goto("https://www.target.com/cart", wait_until="domcontentloaded")
-                            await wait_for_page_ready(page, timeout=15000)
+                            await wait_for_page_ready(page, timeout=10000)
                             await self._nuke_floating_ui_portals(page)
                             await sweep_popups(page)
                             await self._target_select_delivery(page)
