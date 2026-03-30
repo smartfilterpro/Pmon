@@ -1112,7 +1112,7 @@ class CheckoutEngine:
 
             # Navigate to product page
             await page.goto(url, wait_until="domcontentloaded")
-            await wait_for_page_ready(page, timeout=15000)
+            await wait_for_page_ready(page, timeout=10000)
 
             # REVIEWED [Mission 2] — Check for virtual queue before proceeding
             queue_result = await detect_queue(page, "target")
@@ -1131,20 +1131,6 @@ class CheckoutEngine:
             # Sweep all popups/overlays (cookie consent, promos, health consent, etc.)
             await sweep_popups(page)
             await self._dismiss_health_consent_modal(page)
-
-            # Human-like: glance at the page before interacting
-            await idle_scroll(page)
-            await random_delay(page, 500, 1500)
-
-            # Sweep popups again after sign-in (welcome back, promos)
-            await sweep_popups(page)
-
-            # Dismiss Health Data Consent modal if present — Target shows this on
-            # health-related products and it blocks all page interaction.
-            await self._dismiss_health_consent_modal(page)
-
-            # Nuke persistent floating-ui popups via JS before interacting.
-            # Clicking "Close" on these is unreliable — they respawn immediately.
             await self._nuke_floating_ui_portals(page)
 
             # --- Try "Buy now" first — skips cart entirely and goes straight
@@ -1156,15 +1142,15 @@ class CheckoutEngine:
                 'a:has-text("Buy now")'
             )
             buy_now_clicked = await self._smart_click(
-                page, "Buy now", buy_now_sel, timeout=3000
+                page, "Buy now", buy_now_sel, timeout=2000
             )
 
             if buy_now_clicked:
                 logger.info("Target: clicked 'Buy now' — skipping cart")
-                await wait_for_page_ready(page, timeout=15000)
+                await wait_for_page_ready(page, timeout=10000)
 
                 # "Buy now" goes to a "Confirm your order" side-panel.
-                await random_delay(page, 2000, 4000)
+                await random_delay(page, 1000, 2000)
 
                 # Look for "Place your order" directly
                 place_btn = page.locator(
@@ -1214,7 +1200,7 @@ class CheckoutEngine:
 
                     add_to_cart_clicked = await self._smart_click(page, "Ship it / Add to cart", add_to_cart_sel)
                     if add_to_cart_clicked:
-                        await random_delay(page, 1500, 2500)
+                        await random_delay(page, 500, 1000)
                         # Verify item was actually added — check for confirmation modal or cart count
                         if await self._verify_target_add_to_cart(page):
                             logger.info("Target: item confirmed added to cart")
@@ -1876,10 +1862,6 @@ class CheckoutEngine:
         for step in range(5):
             # Sweep popups before each step (address suggestions, promos, etc.)
             await sweep_popups(page)
-
-            # Human-like: small jitter between checkout steps
-            await random_mouse_jitter(page)
-            await random_delay(page, 200, 600)
 
             # Check if "Place your order" is already visible — we're done
             try:
