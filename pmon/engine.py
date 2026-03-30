@@ -150,9 +150,11 @@ class PmonEngine:
                 self.sync_products_from_db()
                 await self._check_all()
                 # Add ±20% jitter to poll interval to avoid exact-interval bot fingerprint.
-                # e.g. 30s → sleeps between 24s and 36s each cycle.
                 jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
-                await asyncio.sleep(self.config.poll_interval + jitter)
+                sleep_time = self.config.poll_interval + jitter
+                logger.info(f"Poll complete — next check in {sleep_time:.0f}s "
+                            f"({len(self.config.products)} products)")
+                await asyncio.sleep(sleep_time)
         except asyncio.CancelledError:
             pass
         finally:
@@ -266,7 +268,8 @@ class PmonEngine:
                                         f"Skipping auto-checkout for {product.name}"
                                     )
                                     continue
-                            await self._auto_checkout_for_user(p, user_id)
+                            # Run checkout in background so it doesn't block polling
+                            asyncio.create_task(self._auto_checkout_for_user(p, user_id))
 
         elif result.status == StockStatus.OUT_OF_STOCK:
             self._notified.discard(product.url)

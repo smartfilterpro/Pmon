@@ -554,9 +554,9 @@ class CheckoutEngine:
                 "--no-default-browser-check",
                 "--disable-infobars",
             ],
-            viewport=None,  # Use Chrome's default viewport (user's window size)
+            viewport=None,
             no_viewport=True,
-            ignore_default_args=["--enable-automation"],
+            ignore_default_args=["--enable-automation", "--no-sandbox"],
         )
         await self._persistent_context.add_init_script(STEALTH_JS)
 
@@ -595,8 +595,8 @@ class CheckoutEngine:
                     stderr=subprocess.DEVNULL,
                     timeout=10,
                 )
-            # Give Chrome time to fully shut down and release profile locks
-            await asyncio.sleep(3)
+            # Windows needs extra time to release profile locks after Chrome dies
+            await asyncio.sleep(5)
             logger.info("Closed existing Chrome to unlock your profile")
         except Exception:
             pass  # Chrome might not be running — that's fine
@@ -929,7 +929,7 @@ class CheckoutEngine:
             context = await self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile_dir),
                 headless=False,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+                args=["--disable-blink-features=AutomationControlled"],
                 **{k: v for k, v in ctx_kwargs.items() if k != "storage_state"},
             )
         else:
@@ -1077,13 +1077,12 @@ class CheckoutEngine:
         page = await context.new_page()
 
         try:
-            # Sign in FIRST before any product interaction.
-            # Target session cookies degrade silently — add-to-cart works
-            # as guest but checkout requires a fresh authenticated session.
-            # _sign_in_target navigates to homepage and uses the full sign-in
-            # panel flow (same as test login), which is more reliable than
-            # the cart-page flyout modal.
-            if creds:
+            # In --my-browser mode, skip programmatic sign-in — the user is
+            # already logged in via Chrome's saved passwords/sessions.
+            if self.config.use_my_browser:
+                logger.info("Target: using your saved browser session (--my-browser)")
+            elif creds:
+                # Sign in FIRST before any product interaction.
                 logger.info("Target: signing in before checkout")
                 await self._sign_in_target(page, creds)
 
@@ -4560,18 +4559,11 @@ class CheckoutEngine:
             await page.goto(add_to_cart_url, wait_until="domcontentloaded")
             await wait_for_page_ready(page, timeout=15000)
 
-            # Check if we got a CAPTCHA or sign-in page
-            page_text = await page.content()
-            if "captcha" in page_text.lower():
-                logger.warning("Amazon: CAPTCHA triggered on add-to-cart")
-                return CheckoutResult(
-                    url=url, retailer="amazon", product_name=product_name,
-                    status=CheckoutStatus.FAILED,
-                    error_message="Amazon CAPTCHA — use --my-browser mode and solve it manually",
-                )
+            # Handle sign-in, CAPTCHA, or any interstitial after add-to-cart
+            await self._amazon_wait_for_sign_in(page)
 
-            # Wait a moment for the cart to update
-            await random_delay(page, 1000, 2000)
+            # Wait for the cart to update
+            await random_delay(page, 2000, 3000)
 
             # Navigate to checkout
             logger.info("Amazon: proceeding to checkout")
@@ -4581,25 +4573,10 @@ class CheckoutEngine:
             )
             await wait_for_page_ready(page, timeout=15000)
 
-            current_url = page.url
+            # Handle sign-in again at checkout
+            await self._amazon_wait_for_sign_in(page)
 
-            # Check if we need to sign in
-            if "/ap/signin" in current_url or "/ap/login" in current_url:
-                logger.info("Amazon: sign-in required — waiting for user to log in (--my-browser mode)")
-                # In --my-browser mode, the user can sign in manually
-                # Wait up to 120 seconds for them to complete sign-in
-                try:
-                    await page.wait_for_url(
-                        "**/gp/buy/**",
-                        timeout=120000,
-                    )
-                    logger.info("Amazon: sign-in complete, on checkout page")
-                except Exception:
-                    return CheckoutResult(
-                        url=url, retailer="amazon", product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message="Amazon sign-in timeout — log into Amazon in your browser first",
-                    )
+            logger.info("Amazon: checkout page URL: %s", page.url[:120])
 
             # Check for price guard before placing order
             price_text = ""
@@ -4689,3 +4666,37 @@ class CheckoutEngine:
         if match:
             return match.group(1)
         return None
+
+    @staticmethod
+    def _is_amazon_sign_in(url: str, page_content: str = "") -> bool:
+        """Check if the current page is an Amazon sign-in or interstitial."""
+        url_lower = url.lower()
+        if any(s in url_lower for s in ["/ap/signin", "/ap/login", "/gp/sign-in", "/ap/register"]):
+            return True
+        if page_content and "captcha" in page_content.lower():
+            return True
+        return False
+
+    async def _amazon_wait_for_sign_in(self, page):
+        """If Amazon is showing a sign-in or CAPTCHA page, wait for the user to handle it."""
+        current_url = page.url
+        page_content = await page.content()
+
+        if not self._is_amazon_sign_in(current_url, page_content):
+            return  # Not on a sign-in page — proceed normally
+
+        if "captcha" in page_content.lower():
+            logger.warning("Amazon: CAPTCHA detected — please solve it in the browser window")
+        else:
+            logger.info("Amazon: sign-in required — please sign in in the browser window (2 min timeout)")
+
+        # Wait for the URL to change away from sign-in (user signs in manually)
+        try:
+            await page.wait_for_url(
+                lambda u: not self._is_amazon_sign_in(u),
+                timeout=120000,
+            )
+            logger.info("Amazon: sign-in/CAPTCHA complete")
+            await wait_for_page_ready(page, timeout=10000)
+        except Exception:
+            logger.warning("Amazon: sign-in timeout — continuing anyway (user may still be signing in)")
