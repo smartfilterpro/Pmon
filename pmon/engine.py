@@ -220,6 +220,8 @@ class PmonEngine:
 
         if result.status == StockStatus.IN_STOCK:
             db.update_last_in_stock(product.url)
+
+            # Notify only once per in-stock event (resets when product goes OOS)
             if product.url not in self._notified:
                 self._notified.add(product.url)
                 logger.info(f"IN STOCK: {product.name} at {product.retailer}")
@@ -227,49 +229,55 @@ class PmonEngine:
                 # Notify console
                 await self._console_notifier.notify_in_stock(result)
 
-                # Find all users watching this product and notify/auto-buy
+                # Discord notifications per user
                 for p in self._all_products:
                     if p["url"] == product.url:
                         user_id = p["owner_id"]
                         settings = db.get_user_settings(user_id)
-
-                        # Discord notification per user
                         webhook = settings.get("discord_webhook", "")
                         notifier = self._get_discord_notifier(webhook)
                         if notifier:
                             await notifier.notify_in_stock(result)
 
-                        # Auto-checkout if enabled and not already purchased
-                        purchase_key = f"{user_id}:{product.url}"
-                        if p["auto_checkout"] and purchase_key not in self._purchased:
-                            # Check per-product max_price guard
-                            max_price = p.get("max_price", 0)
-                            if max_price and max_price > 0:
-                                price = _parse_price(result.price)
-                                if price > 0 and price > max_price:
-                                    logger.warning(
-                                        f"Price too high for {product.name}: "
-                                        f"${price:.2f} exceeds max ${max_price:.2f}. "
-                                        f"Skipping auto-checkout (likely 3rd-party seller)."
-                                    )
-                                    continue
+            # Auto-checkout: checked EVERY poll cycle (not just first detection)
+            # so that enabling auto-buy while a product is in stock works immediately
+            for p in self._all_products:
+                if p["url"] == product.url:
+                    user_id = p["owner_id"]
+                    purchase_key = f"{user_id}:{product.url}"
+                    if p["auto_checkout"] and purchase_key not in self._purchased:
+                        # Re-read product data from DB in case auto_checkout was just toggled
+                        self.sync_products_from_db()
 
-                            # Check spend limit before attempting checkout
-                            spend_limit = settings.get("spend_limit", 0)
-                            if spend_limit and spend_limit > 0:
-                                total_spent = db.get_user_total_spent(user_id)
-                                price = _parse_price(result.price)
-                                estimated_cost = price * p.get("quantity", 1)
-                                if total_spent + estimated_cost > spend_limit:
-                                    logger.warning(
-                                        f"Spend limit reached for user {user_id}: "
-                                        f"${total_spent:.2f} spent + ${estimated_cost:.2f} "
-                                        f"would exceed ${spend_limit:.2f} limit. "
-                                        f"Skipping auto-checkout for {product.name}"
-                                    )
-                                    continue
-                            # Run checkout in background so it doesn't block polling
-                            asyncio.create_task(self._auto_checkout_for_user(p, user_id))
+                        # Check per-product max_price guard
+                        max_price = p.get("max_price", 0)
+                        if max_price and max_price > 0:
+                            price = _parse_price(result.price)
+                            if price > 0 and price > max_price:
+                                logger.warning(
+                                    f"Price too high for {product.name}: "
+                                    f"${price:.2f} exceeds max ${max_price:.2f}. "
+                                    f"Skipping auto-checkout (likely 3rd-party seller)."
+                                )
+                                continue
+
+                        # Check spend limit before attempting checkout
+                        settings = db.get_user_settings(user_id)
+                        spend_limit = settings.get("spend_limit", 0)
+                        if spend_limit and spend_limit > 0:
+                            total_spent = db.get_user_total_spent(user_id)
+                            price = _parse_price(result.price)
+                            estimated_cost = price * p.get("quantity", 1)
+                            if total_spent + estimated_cost > spend_limit:
+                                logger.warning(
+                                    f"Spend limit reached for user {user_id}: "
+                                    f"${total_spent:.2f} spent + ${estimated_cost:.2f} "
+                                    f"would exceed ${spend_limit:.2f} limit. "
+                                    f"Skipping auto-checkout for {product.name}"
+                                )
+                                continue
+                        # Run checkout in background so it doesn't block polling
+                        asyncio.create_task(self._auto_checkout_for_user(p, user_id))
 
         elif result.status == StockStatus.OUT_OF_STOCK:
             self._notified.discard(product.url)

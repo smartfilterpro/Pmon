@@ -514,11 +514,11 @@ class CheckoutEngine:
                 logger.info("API-only checkout mode — this is fine for most retailers")
 
     async def _start_my_browser(self):
-        """Launch the user's real Chrome with their profile using Playwright.
+        """Launch the user's real Chrome with a Pmon-specific profile.
 
-        Uses launch_persistent_context which handles the Chrome lifecycle
-        internally — no manual CDP port management needed. This is much
-        more reliable on Windows where Chrome profile locks are finicky.
+        Chrome blocks remote debugging on its default profile directory,
+        so we use a dedicated PmonChrome profile. The user logs in to
+        their retailer accounts once, and sessions persist across restarts.
         """
         chrome_path = self._find_system_chrome()
         if not chrome_path:
@@ -526,24 +526,23 @@ class CheckoutEngine:
                 "Could not find Chrome on your system. Install Google Chrome."
             )
 
+        # Use a Pmon-specific profile — Chrome blocks debugging on its default profile.
+        # This lives in the user's home directory and persists across restarts.
         profile_dir = self.config.chrome_profile_dir
         if not profile_dir:
-            profile_dir = self._find_default_chrome_profile()
-            if not profile_dir:
-                raise RuntimeError(
-                    "Could not find your Chrome profile directory. "
-                    "Pass it explicitly: --chrome-profile \"C:\\Users\\YourName\\AppData\\Local\\Google\\Chrome\\User Data\""
-                )
+            home = os.path.expanduser("~")
+            profile_dir = os.path.join(home, "PmonChrome")
 
-        # Kill any existing Chrome so we can take over the profile
+        os.makedirs(profile_dir, exist_ok=True)
+
+        # Kill any existing Chrome that might lock the profile
         await self._kill_existing_chrome()
 
         logger.info("Launching YOUR Chrome from: %s", chrome_path)
-        logger.info("Using your profile: %s", profile_dir)
+        logger.info("Using Pmon profile: %s", profile_dir)
 
-        # launch_persistent_context opens a real Chrome window with the
-        # user's profile (saved passwords, cookies, payment methods, etc.)
-        # and gives Playwright full control to open new tabs for checkout.
+        first_run = not os.path.exists(os.path.join(profile_dir, "Default"))
+
         self._persistent_context = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
             executable_path=chrome_path,
@@ -560,7 +559,12 @@ class CheckoutEngine:
         )
         await self._persistent_context.add_init_script(STEALTH_JS)
 
-        logger.info("YOUR Chrome is open — saved passwords, cookies, and logins are active")
+        logger.info("Chrome is open with Pmon profile — sessions persist across restarts")
+        if first_run:
+            logger.info(
+                "FIRST RUN: Log into your retailer accounts (Amazon, Target, etc.) "
+                "in this Chrome window. Your logins will be saved for next time."
+            )
 
     @staticmethod
     async def _kill_existing_chrome():
