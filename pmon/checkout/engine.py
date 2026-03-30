@@ -4605,7 +4605,8 @@ class CheckoutEngine:
         self, url: str, product_name: str, profile: Profile, creds: AccountCredentials,
         dry_run: bool = False, **kwargs,
     ) -> CheckoutResult:
-        """Amazon checkout flow using direct add-to-cart URL."""
+        """Amazon checkout flow. Tries direct add-to-cart URL first, then
+        falls back to navigating the product page and clicking Add to Cart."""
         asin = self._extract_amazon_asin(url)
         if not asin:
             return CheckoutResult(
@@ -4619,21 +4620,21 @@ class CheckoutEngine:
         page = await context.new_page()
 
         try:
-            # Go directly to Amazon's add-to-cart endpoint — skips product page
-            add_to_cart_url = (
-                f"https://www.amazon.com/gp/aws/cart/add.html"
-                f"?ASIN.1={asin}&Quantity.1=1"
-            )
+            # Strategy 1: Direct add-to-cart URL (fast, skips product page)
+            added = await self._amazon_add_to_cart_direct(page, asin, product_name)
 
-            logger.info("Amazon: adding %s to cart via direct URL", product_name)
-            await page.goto(add_to_cart_url, wait_until="domcontentloaded")
-            await wait_for_page_ready(page, timeout=15000)
+            # Strategy 2: Navigate to product page and click Add to Cart
+            if not added:
+                product_url = f"https://www.amazon.com/dp/{asin}"
+                added = await self._amazon_add_to_cart_page(page, product_url, product_name)
 
-            # Handle sign-in, CAPTCHA, or any interstitial after add-to-cart
-            await self._amazon_wait_for_sign_in(page)
-
-            # Wait for the cart to update
-            await random_delay(page, 2000, 3000)
+            if not added:
+                await self._save_debug_screenshot(page, "amazon", "add_to_cart_failed")
+                return CheckoutResult(
+                    url=url, retailer="amazon", product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Could not add item to Amazon cart",
+                )
 
             # Navigate to checkout
             logger.info("Amazon: proceeding to checkout")
@@ -4643,10 +4644,21 @@ class CheckoutEngine:
             )
             await wait_for_page_ready(page, timeout=15000)
 
-            # Handle sign-in again at checkout
+            # Handle sign-in at checkout
             await self._amazon_wait_for_sign_in(page)
 
-            logger.info("Amazon: checkout page URL: %s", page.url[:120])
+            # Check if we actually reached checkout (not a 404/empty cart)
+            page_text = await page.content()
+            if "we couldn't find that page" in page_text.lower() or "sorry" in page_text.lower()[:500]:
+                logger.warning("Amazon: checkout page returned 404 — cart may be empty")
+                await self._save_debug_screenshot(page, "amazon", "checkout_404")
+                return CheckoutResult(
+                    url=url, retailer="amazon", product_name=product_name,
+                    status=CheckoutStatus.FAILED,
+                    error_message="Amazon cart appears empty — item may not have been added",
+                )
+
+            logger.info("Amazon: on checkout page: %s", page.url[:120])
 
             # Check for price guard before placing order
             price_text = ""
@@ -4662,7 +4674,6 @@ class CheckoutEngine:
 
             if dry_run:
                 logger.info("DRY RUN: would place Amazon order for %s — stopping here", product_name)
-                await self._save_context(context, "amazon")
                 return CheckoutResult(
                     url=url, retailer="amazon", product_name=product_name,
                     status=CheckoutStatus.SUCCESS,
@@ -4674,11 +4685,13 @@ class CheckoutEngine:
                 'input[name="placeYourOrder1"], '
                 '#submitOrderButtonId input, '
                 '#placeYourOrder input, '
-                'input[value*="Place your order"]'
+                'input[value*="Place your order"], '
+                'span.place-your-order-button input, '
+                '#bottomSubmitOrderButtonId input'
             ).first
 
             try:
-                if await place_order.is_visible(timeout=5000):
+                if await place_order.is_visible(timeout=8000):
                     await human_click_element(page, place_order)
                     logger.info("Amazon: clicked Place your order!")
 
@@ -4690,13 +4703,11 @@ class CheckoutEngine:
                         )
                         logger.info("Amazon: order confirmed for %s!", product_name)
                     except Exception:
-                        # Check if we're on a confirmation-like page
                         if "thankyou" in page.url.lower() or "confirmation" in page.url.lower():
                             logger.info("Amazon: order appears confirmed for %s", product_name)
                         else:
                             logger.warning("Amazon: order may have been placed — check your account")
 
-                    await self._save_context(context, "amazon")
                     return CheckoutResult(
                         url=url, retailer="amazon", product_name=product_name,
                         status=CheckoutStatus.SUCCESS,
@@ -4707,7 +4718,6 @@ class CheckoutEngine:
                 logger.error("Amazon: error clicking Place order: %s", e)
 
             await self._save_debug_screenshot(page, "amazon", "place_order_not_found")
-            await self._save_context(context, "amazon")
             return CheckoutResult(
                 url=url, retailer="amazon", product_name=product_name,
                 status=CheckoutStatus.FAILED,
@@ -4728,6 +4738,84 @@ class CheckoutEngine:
         finally:
             await page.close()
             await self._close_context(context)
+
+    async def _amazon_add_to_cart_direct(self, page, asin: str, product_name: str) -> bool:
+        """Try adding to cart via Amazon's direct URL. Returns True if item was added."""
+        add_to_cart_url = f"https://www.amazon.com/gp/aws/cart/add.html?ASIN.1={asin}&Quantity.1=1"
+        logger.info("Amazon: adding %s to cart via direct URL", product_name)
+        await page.goto(add_to_cart_url, wait_until="domcontentloaded")
+        await wait_for_page_ready(page, timeout=15000)
+        await self._amazon_wait_for_sign_in(page)
+        await random_delay(page, 1500, 2500)
+
+        # Check if we got an error page or the item was actually added
+        page_text = await page.content()
+        if "we couldn't find that page" in page_text.lower():
+            logger.warning("Amazon: direct add-to-cart returned 404")
+            return False
+
+        # Check for cart confirmation indicators
+        if "added to cart" in page_text.lower() or "proceed to checkout" in page_text.lower():
+            logger.info("Amazon: item added to cart via direct URL")
+            return True
+
+        # Check cart count in the page
+        try:
+            cart_count = page.locator("#nav-cart-count")
+            count_text = await cart_count.text_content(timeout=2000)
+            if count_text and int(count_text.strip()) > 0:
+                logger.info("Amazon: cart has %s item(s) after direct add", count_text.strip())
+                return True
+        except Exception:
+            pass
+
+        logger.warning("Amazon: direct add-to-cart may have failed — trying product page")
+        return False
+
+    async def _amazon_add_to_cart_page(self, page, product_url: str, product_name: str) -> bool:
+        """Navigate to the product page and click Add to Cart. Returns True if item was added."""
+        logger.info("Amazon: navigating to product page for %s", product_name)
+        await page.goto(product_url, wait_until="domcontentloaded")
+        await wait_for_page_ready(page, timeout=15000)
+        await self._amazon_wait_for_sign_in(page)
+
+        # Click "Add to Cart"
+        add_btn = page.locator('#add-to-cart-button, input[name="submit.add-to-cart"]').first
+        try:
+            if await add_btn.is_visible(timeout=5000):
+                await human_click_element(page, add_btn)
+                logger.info("Amazon: clicked Add to Cart on product page")
+                await random_delay(page, 2000, 3000)
+
+                # Verify — look for cart confirmation or "Proceed to checkout"
+                proceed = page.locator(
+                    'a:has-text("Proceed to checkout"), '
+                    'input[value*="Proceed to checkout"], '
+                    '#hlb-ptc-btn-native'
+                ).first
+                try:
+                    if await proceed.is_visible(timeout=5000):
+                        logger.info("Amazon: cart confirmation visible — item added")
+                        return True
+                except Exception:
+                    pass
+
+                # Check cart count
+                try:
+                    cart_count = page.locator("#nav-cart-count")
+                    count_text = await cart_count.text_content(timeout=2000)
+                    if count_text and int(count_text.strip()) > 0:
+                        return True
+                except Exception:
+                    pass
+
+                return True  # Assume success if click worked
+            else:
+                logger.warning("Amazon: Add to Cart button not found on product page")
+        except Exception as e:
+            logger.error("Amazon: error clicking Add to Cart: %s", e)
+
+        return False
 
     @staticmethod
     def _extract_amazon_asin(url: str) -> str | None:
