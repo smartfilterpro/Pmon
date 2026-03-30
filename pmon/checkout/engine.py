@@ -1164,33 +1164,37 @@ class CheckoutEngine:
                 await wait_for_page_ready(page, timeout=15000)
 
                 # "Buy now" goes to a "Confirm your order" side-panel.
-                # In --my-browser mode with saved address/payment, the
-                # "Place your order" button should be directly visible.
-                # Wait for it to appear, then skip _target_navigate_checkout
-                # which tries to click "Continue" buttons and sweeps popups
-                # that interfere with the confirmation panel.
                 await random_delay(page, 2000, 4000)
 
-                # Look for "Place your order" directly — it's in the confirmation panel
+                # Look for "Place your order" directly
                 place_btn = page.locator(
                     'button:has-text("Place your order"), '
                     'button[data-test="placeOrderButton"], '
                     'button:has-text("Place order")'
                 )
+                buy_now_success = False
                 try:
                     if await place_btn.first.is_visible(timeout=10000):
                         logger.info("Target: 'Place your order' button visible on Buy Now confirmation")
-                        # This is where we click it (handled below after this if/else block)
+                        buy_now_success = True
                     else:
-                        # Button not visible yet — maybe checkout steps needed
-                        logger.info("Target: 'Place your order' not immediately visible, navigating checkout")
+                        logger.info("Target: 'Place your order' not visible after Buy Now — navigating checkout")
                         await sweep_popups(page)
                         await self._target_navigate_checkout(page, creds)
+                        buy_now_success = True
                 except Exception:
-                    logger.info("Target: navigating through checkout steps after Buy Now")
+                    logger.warning("Target: Buy Now flow failed — falling back to add-to-cart")
+                    buy_now_success = False
+
+                if not buy_now_success:
+                    # Reload page and try cart flow instead
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await wait_for_page_ready(page, timeout=15000)
                     await sweep_popups(page)
-                    await self._target_navigate_checkout(page, creds)
-            else:
+                    await self._nuke_floating_ui_portals(page)
+                    buy_now_clicked = False  # Fall through to cart flow below
+
+            if not buy_now_clicked:
                 logger.info("Target: 'Buy now' not available — using add-to-cart flow")
                 # Try to add to cart — prefer "Ship it" (sets delivery method immediately)
                 add_to_cart_sel = (
