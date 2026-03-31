@@ -4667,7 +4667,13 @@ class CheckoutEngine:
 
                 await self._amazon_wait_for_sign_in(page)
 
-            logger.info("Amazon: on checkout page: %s", page.url[:120])
+            logger.info("Amazon: on page: %s", page.url[:120])
+
+            # Handle Amazon's "Need anything else?" / "Before you go" interstitial
+            # This page appears after add-to-cart AND after cart checkout click
+            await self._amazon_click_continue_to_checkout(page)
+
+            logger.info("Amazon: checkout page: %s", page.url[:120])
 
             # Check for price guard before placing order
             price_text = ""
@@ -4866,6 +4872,32 @@ class CheckoutEngine:
         if page_content and "captcha" in page_content.lower():
             return True
         return False
+
+    async def _amazon_click_continue_to_checkout(self, page):
+        """Handle Amazon's 'Need anything else?' interstitial page.
+
+        This page shows after add-to-cart and sometimes after clicking
+        'Proceed to checkout' on the cart. It has a 'Continue to checkout'
+        button that must be clicked to reach the actual Place Order page.
+        """
+        # Check if we're on the interstitial (URL contains /checkout/byg/ or page has the button)
+        current_url = page.url
+        page_text = await page.title()
+
+        continue_btn = page.locator(
+            'a:has-text("Continue to checkout"), '
+            'input[value*="Continue to checkout"], '
+            'a:has-text("Continue to Checkout"), '
+            'span:has-text("Continue to checkout") >> xpath=ancestor::a'
+        ).first
+        try:
+            if await continue_btn.is_visible(timeout=3000):
+                await human_click_element(page, continue_btn)
+                logger.info("Amazon: clicked 'Continue to checkout' on interstitial page")
+                await wait_for_page_ready(page, timeout=10000)
+                await self._amazon_wait_for_sign_in(page)
+        except Exception:
+            pass  # Not on interstitial — continue normally
 
     async def _amazon_wait_for_sign_in(self, page):
         """If Amazon is showing a sign-in or CAPTCHA page, wait for the user to handle it."""
