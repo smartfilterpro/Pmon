@@ -57,6 +57,7 @@ class PmonEngine:
 
         self._running = False
         self._monitor_task: asyncio.Task | None = None
+        self._browser_watcher = None
 
         # All products across all users (synced from DB)
         self._all_products: list[dict] = []
@@ -129,6 +130,83 @@ class PmonEngine:
                     monitor.load_session_cookies(cookies)
         except Exception as exc:
             logger.debug("Could not load session cookies for %s monitor: %s", retailer, exc)
+
+    async def _start_browser_watcher(self):
+        """Start browser-based real-time monitoring in --my-browser mode.
+
+        Opens each product in a browser tab with a MutationObserver that
+        detects stock changes instantly. When "Add to Cart" appears, clicks
+        it immediately — no HTTP polling delay.
+        """
+        if not self.config.use_my_browser or not self.checkout_engine:
+            return
+        ctx = getattr(self.checkout_engine, "_persistent_context", None)
+        if not ctx:
+            return
+
+        try:
+            from pmon.checkout.browser_watcher import BrowserWatcher
+
+            self._browser_watcher = BrowserWatcher(
+                ctx, on_in_stock=self._on_browser_stock_detected
+            )
+
+            # Open tabs for auto-checkout products (limit to avoid overwhelming)
+            auto_products = [p for p in self._all_products if p.get("auto_checkout")]
+            max_tabs = min(len(auto_products), 10)  # Cap at 10 tabs
+
+            for p in auto_products[:max_tabs]:
+                retailer = p.get("retailer", "")
+                if retailer in ("amazon", "target", "walmart", "bestbuy", "pokemoncenter"):
+                    await self._browser_watcher.watch(
+                        url=p["url"],
+                        name=p["name"],
+                        retailer=retailer,
+                        auto_checkout=True,
+                        max_price=p.get("max_price", 0),
+                    )
+
+            if self._browser_watcher.watching_count > 0:
+                await self._browser_watcher.start()
+                logger.info(
+                    "⚡ Browser watcher active: %d product tabs open for INSTANT stock detection",
+                    self._browser_watcher.watching_count,
+                )
+            else:
+                logger.info("No auto-checkout products — browser watcher not started")
+        except Exception as e:
+            logger.error("Browser watcher failed to start: %s", e)
+
+    async def _on_browser_stock_detected(self, url: str, retailer: str, page):
+        """Called by BrowserWatcher when a product comes in stock.
+
+        The watcher already clicked "Add to Cart" — now we need to
+        complete checkout.
+        """
+        # Find the product in our list
+        for p in self._all_products:
+            if p["url"] == url:
+                user_id = p["owner_id"]
+                purchase_key = f"{user_id}:{url}"
+
+                if purchase_key in self._purchased:
+                    return  # Already bought
+
+                # Check max price (from the monitor's last known price)
+                stock = self.state.products.get(url)
+                if p.get("max_price", 0) > 0 and stock and stock.price:
+                    price = _parse_price(stock.price)
+                    if price > 0 and price > p["max_price"]:
+                        logger.warning(
+                            "⚡ Browser watcher: price $%.2f exceeds max $%.2f for %s — skipping",
+                            price, p["max_price"], p["name"]
+                        )
+                        return
+
+                logger.info("⚡ Browser watcher triggered checkout for %s", p["name"])
+                self._purchased.add(purchase_key)
+                asyncio.create_task(self._auto_checkout_for_user(p, user_id))
+                return
 
     async def _sync_browser_cookies_to_monitors(self):
         """In --my-browser mode, export cookies from the Playwright browser
@@ -204,6 +282,10 @@ class PmonEngine:
         # In --my-browser mode, share the browser's cookies with the HTTP monitors
         # so they don't get CAPTCHAs from Amazon/Walmart/etc.
         await self._sync_browser_cookies_to_monitors()
+
+        # In --my-browser mode, also open product pages in browser tabs
+        # for instant stock detection (MutationObserver-based, sub-second)
+        await self._start_browser_watcher()
 
         try:
             while self._running:
@@ -490,6 +572,8 @@ class PmonEngine:
 
     async def cleanup(self):
         """Clean up resources."""
+        if self._browser_watcher:
+            await self._browser_watcher.stop()
         for monitor in self._monitors.values():
             await monitor.close()
         if self.checkout_engine:
