@@ -516,6 +516,9 @@ class CheckoutEngine:
             self._playwright = await async_playwright().start()
 
             if self.config.use_my_browser:
+                # Enable fast mode — skip stealth delays in --my-browser mode
+                from pmon.checkout import human_behavior
+                human_behavior.FAST_MODE = True
                 await self._start_my_browser()
             elif self.config.headless:
                 await self._start_headless()
