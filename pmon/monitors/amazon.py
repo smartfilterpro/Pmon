@@ -109,23 +109,28 @@ class AmazonMonitor(BaseMonitor):
         availability = self._extract_availability(soup)
 
         # Determine stock status
-        if availability is None:
-            # Try to infer from add-to-cart button
-            add_to_cart = soup.find("input", id="add-to-cart-button")
-            if add_to_cart:
-                status = StockStatus.IN_STOCK
-            else:
-                buy_now = soup.find("input", id="buy-now-button")
-                status = StockStatus.IN_STOCK if buy_now else StockStatus.OUT_OF_STOCK
-        elif "in stock" in availability.lower():
-            status = StockStatus.IN_STOCK
-        elif "unavailable" in availability.lower() or "out of stock" in availability.lower():
+        if availability and "unavailable" in availability.lower():
             status = StockStatus.OUT_OF_STOCK
-        elif "available from" in availability.lower():
-            # Third-party only — might be overpriced
+        elif availability and "out of stock" in availability.lower():
+            status = StockStatus.OUT_OF_STOCK
+        elif availability and "in stock" in availability.lower():
+            status = StockStatus.IN_STOCK
+        elif availability and "available from" in availability.lower():
             status = StockStatus.IN_STOCK
         else:
-            status = StockStatus.UNKNOWN
+            # Check the full page text for "Currently unavailable" which Amazon
+            # shows prominently even when the #availability div isn't found
+            full_text = soup.get_text().lower()
+            if "currently unavailable" in full_text or "we don't know when or if this item will be back" in full_text:
+                status = StockStatus.OUT_OF_STOCK
+            else:
+                # Try to infer from add-to-cart button
+                add_to_cart = soup.find("input", id="add-to-cart-button")
+                if add_to_cart:
+                    status = StockStatus.IN_STOCK
+                else:
+                    buy_now = soup.find("input", id="buy-now-button")
+                    status = StockStatus.IN_STOCK if buy_now else StockStatus.OUT_OF_STOCK
 
         # Build price string with seller info for the dashboard
         price_display = price
