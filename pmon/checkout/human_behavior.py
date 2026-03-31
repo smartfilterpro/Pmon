@@ -30,6 +30,11 @@ import random
 
 logger = logging.getLogger(__name__)
 
+# When True, stealth delays (idle_scroll, random_delay, random_mouse_jitter)
+# become near-instant. Set by CheckoutEngine when running --my-browser mode
+# since a real Chrome profile doesn't need bot-detection evasion.
+FAST_MODE = False
+
 # ---------------------------------------------------------------------------
 # Mouse movement
 # ---------------------------------------------------------------------------
@@ -199,8 +204,10 @@ async def human_type(page, text: str, *, wpm: int | None = None) -> None:
 # Scrolling
 # ---------------------------------------------------------------------------
 
-async def idle_scroll(page) -> None:
+async def idle_scroll(page, **kwargs) -> None:
     """Mimic a human casually glancing at the page: scroll down, pause, scroll up."""
+    if FAST_MODE:
+        return
     scroll_down = random.randint(150, 400)
     await page.mouse.wheel(0, scroll_down)
     await page.wait_for_timeout(random.randint(400, 1200))
@@ -211,6 +218,8 @@ async def idle_scroll(page) -> None:
 
 async def random_mouse_jitter(page) -> None:
     """Small random mouse movements within the viewport — simulates idle cursor."""
+    if FAST_MODE:
+        return
     try:
         viewport = page.viewport_size or {"width": 1366, "height": 768}
         for _ in range(random.randint(2, 5)):
@@ -228,6 +237,10 @@ async def random_mouse_jitter(page) -> None:
 
 async def random_delay(page, low_ms: int = 500, high_ms: int = 1500) -> None:
     """Wait a random duration between *low_ms* and *high_ms* milliseconds."""
+    if FAST_MODE:
+        # Minimal delay — just enough for page rendering
+        await page.wait_for_timeout(50)
+        return
     await page.wait_for_timeout(random.randint(low_ms, high_ms))
 
 
