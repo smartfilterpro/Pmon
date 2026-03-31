@@ -297,6 +297,10 @@ export async function disableTotp() {
 
 // --- API Key ---
 
+export async function resetSpend() {
+  return (await apiFetch('/settings/reset_spend', { method: 'POST' })).json();
+}
+
 export async function generateApiKey() {
   return (await apiFetch('/settings/generate_api_key', { method: 'POST' })).json();
 }

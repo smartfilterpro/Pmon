@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   getSettings, updateSettings, getAccounts, setAccount, testAccount,
   setupTotp, confirmTotp, disableTotp, checkAuth,
-  getSessions, importSession, deleteSession, generateApiKey,
+  getSessions, importSession, deleteSession, generateApiKey, resetSpend,
 } from '../hooks/useApi';
 import type { User } from '../types';
 import { Save, Clock, Shield, ShieldCheck, Store, Users, CheckCircle, XCircle, Loader, Cookie, Trash2, Upload, Key, DollarSign } from 'lucide-react';
@@ -256,6 +256,15 @@ export default function Settings({ user, onOtpRequired }: Props) {
         </div>
         <button className="save-btn" onClick={handleSaveSettings}>
           <Save size={14} /> {saved ? 'Saved!' : 'Save Spend Limit'}
+        </button>
+        <button className="save-btn" style={{ marginLeft: 8, background: '#ef4444' }} onClick={async () => {
+          if (confirm('Reset spend tracker to $0?')) {
+            await resetSpend();
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+          }
+        }}>
+          <Trash2 size={14} /> Reset Spend
         </button>
       </div>
 
