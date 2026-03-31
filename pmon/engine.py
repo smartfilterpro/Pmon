@@ -62,7 +62,7 @@ class PmonEngine:
         self._all_products: list[dict] = []
 
     def sync_products_from_db(self):
-        """Reload all products from the database."""
+        """Reload all products and settings from the database."""
         all_products = []
         # Get all users' products
         conn = db.get_db()
@@ -82,6 +82,19 @@ class PmonEngine:
                     name=p["name"],
                     auto_checkout=bool(p["auto_checkout"]),
                 ))
+
+        # Sync poll interval from any user's settings (use lowest if multiple users)
+        try:
+            row = conn.execute(
+                "SELECT MIN(poll_interval) as min_poll FROM user_settings WHERE poll_interval > 0"
+            ).fetchone()
+            if row and row["min_poll"] and row["min_poll"] > 0:
+                new_interval = row["min_poll"]
+                if new_interval != self.config.poll_interval:
+                    logger.info("Poll interval changed: %ds → %ds", self.config.poll_interval, new_interval)
+                    self.config.poll_interval = new_interval
+        except Exception:
+            pass
 
         # Refresh session cookies on existing monitors so newly imported
         # cookies take effect without restarting the monitor.
@@ -410,9 +423,14 @@ class PmonEngine:
         # Notify
         await self._console_notifier.notify_checkout(checkout_result)
         settings = db.get_user_settings(user_id)
-        notifier = self._get_discord_notifier(settings.get("discord_webhook", ""))
-        if notifier:
-            await notifier.notify_checkout(checkout_result)
+        webhook = settings.get("discord_webhook", "")
+        if webhook:
+            notifier = self._get_discord_notifier(webhook)
+            if notifier:
+                await notifier.notify_checkout(checkout_result)
+                logger.info("Discord notification sent for %s checkout", checkout_result.status.value)
+        else:
+            logger.debug("No Discord webhook set for user %d — skipping notification", user_id)
 
     async def manual_checkout(self, product: Product, user_id: int | None = None, dry_run: bool = False):
         """Trigger a manual checkout attempt. If dry_run=True, stops before placing order."""
