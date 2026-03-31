@@ -382,10 +382,15 @@ class PmonEngine:
 
         self.state.add_checkout(checkout_result)
 
-        # On success: mark as purchased and disable auto-checkout for this product
+        purchase_key = f"{user_id}:{product_row['url']}"
+
+        # On failure: unmark so it retries on the next poll cycle
+        if checkout_result.status != CheckoutStatus.SUCCESS:
+            self._purchased.discard(purchase_key)
+            logger.info(f"Checkout failed for {product_row['name']} — will retry next poll")
+
+        # On success: keep marked and disable auto-checkout for this product
         if checkout_result.status == CheckoutStatus.SUCCESS:
-            purchase_key = f"{user_id}:{product_row['url']}"
-            self._purchased.add(purchase_key)
             logger.info(
                 f"PURCHASED: {product_row['name']} for user {user_id} — "
                 f"disabling auto-checkout to prevent duplicate orders"
