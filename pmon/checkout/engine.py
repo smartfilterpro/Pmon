@@ -4665,23 +4665,33 @@ class CheckoutEngine:
                     await human_click_element(page, place_order)
                     logger.info("Amazon: clicked Place your order!")
 
-                    # Wait for confirmation
+                    # Wait for confirmation page
                     try:
                         await page.wait_for_url(
                             "**/gp/buy/thankyou/**",
                             timeout=30000,
                         )
                         logger.info("Amazon: order confirmed for %s!", product_name)
+                        return CheckoutResult(
+                            url=url, retailer="amazon", product_name=product_name,
+                            status=CheckoutStatus.SUCCESS,
+                        )
                     except Exception:
                         if "thankyou" in page.url.lower() or "confirmation" in page.url.lower():
-                            logger.info("Amazon: order appears confirmed for %s", product_name)
+                            logger.info("Amazon: order confirmed for %s", product_name)
+                            return CheckoutResult(
+                                url=url, retailer="amazon", product_name=product_name,
+                                status=CheckoutStatus.SUCCESS,
+                            )
                         else:
-                            logger.warning("Amazon: order may have been placed — check your account")
-
-                    return CheckoutResult(
-                        url=url, retailer="amazon", product_name=product_name,
-                        status=CheckoutStatus.SUCCESS,
-                    )
+                            # Did NOT reach confirmation — order was NOT placed
+                            logger.warning("Amazon: clicked Place Order but did NOT reach confirmation page")
+                            await self._save_debug_screenshot(page, "amazon", "no_confirmation")
+                            return CheckoutResult(
+                                url=url, retailer="amazon", product_name=product_name,
+                                status=CheckoutStatus.FAILED,
+                                error_message="Amazon: clicked Place Order but order was not confirmed — check your cart",
+                            )
                 else:
                     logger.warning("Amazon: Place your order button not visible")
             except Exception as e:
