@@ -62,7 +62,7 @@ class PmonEngine:
         self._all_products: list[dict] = []
 
     def sync_products_from_db(self):
-        """Reload all products from the database."""
+        """Reload all products and settings from the database."""
         all_products = []
         # Get all users' products
         conn = db.get_db()
@@ -82,6 +82,19 @@ class PmonEngine:
                     name=p["name"],
                     auto_checkout=bool(p["auto_checkout"]),
                 ))
+
+        # Sync poll interval from any user's settings (use lowest if multiple users)
+        try:
+            row = conn.execute(
+                "SELECT MIN(poll_interval) as min_poll FROM user_settings WHERE poll_interval > 0"
+            ).fetchone()
+            if row and row["min_poll"] and row["min_poll"] > 0:
+                new_interval = row["min_poll"]
+                if new_interval != self.config.poll_interval:
+                    logger.info("Poll interval changed: %ds → %ds", self.config.poll_interval, new_interval)
+                    self.config.poll_interval = new_interval
+        except Exception:
+            pass
 
         # Refresh session cookies on existing monitors so newly imported
         # cookies take effect without restarting the monitor.
