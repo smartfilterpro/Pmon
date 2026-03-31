@@ -423,9 +423,14 @@ class PmonEngine:
         # Notify
         await self._console_notifier.notify_checkout(checkout_result)
         settings = db.get_user_settings(user_id)
-        notifier = self._get_discord_notifier(settings.get("discord_webhook", ""))
-        if notifier:
-            await notifier.notify_checkout(checkout_result)
+        webhook = settings.get("discord_webhook", "")
+        if webhook:
+            notifier = self._get_discord_notifier(webhook)
+            if notifier:
+                await notifier.notify_checkout(checkout_result)
+                logger.info("Discord notification sent for %s checkout", checkout_result.status.value)
+        else:
+            logger.debug("No Discord webhook set for user %d — skipping notification", user_id)
 
     async def manual_checkout(self, product: Product, user_id: int | None = None, dry_run: bool = False):
         """Trigger a manual checkout attempt. If dry_run=True, stops before placing order."""
