@@ -4874,30 +4874,77 @@ class CheckoutEngine:
         return False
 
     async def _amazon_click_continue_to_checkout(self, page):
-        """Handle Amazon's 'Need anything else?' interstitial page.
+        """Click through Amazon's interstitial pages until we reach Place Your Order.
 
-        This page shows after add-to-cart and sometimes after clicking
-        'Proceed to checkout' on the cart. It has a 'Continue to checkout'
-        button that must be clicked to reach the actual Place Order page.
+        Amazon shows various pages between add-to-cart and the final checkout:
+        - "Need anything else?" with "Continue to checkout"
+        - Cart page with "Proceed to checkout"
+        - Address selection
+        - Payment selection
+
+        This method tries multiple selectors and clicks whatever checkout
+        progression button it finds, up to 5 times.
         """
-        # Check if we're on the interstitial (URL contains /checkout/byg/ or page has the button)
-        current_url = page.url
-        page_text = await page.title()
+        for attempt in range(5):
+            await self._amazon_wait_for_sign_in(page)
 
-        continue_btn = page.locator(
-            'a:has-text("Continue to checkout"), '
-            'input[value*="Continue to checkout"], '
-            'a:has-text("Continue to Checkout"), '
-            'span:has-text("Continue to checkout") >> xpath=ancestor::a'
-        ).first
-        try:
-            if await continue_btn.is_visible(timeout=3000):
-                await human_click_element(page, continue_btn)
-                logger.info("Amazon: clicked 'Continue to checkout' on interstitial page")
-                await wait_for_page_ready(page, timeout=10000)
-                await self._amazon_wait_for_sign_in(page)
-        except Exception:
-            pass  # Not on interstitial — continue normally
+            # Check if we're already on the Place Your Order page
+            place_btn = page.locator(
+                'input[name="placeYourOrder1"], '
+                '#submitOrderButtonId input, '
+                '#placeYourOrder input, '
+                'input[value*="Place your order"], '
+                'span.place-your-order-button input, '
+                '#bottomSubmitOrderButtonId input'
+            ).first
+            try:
+                if await place_btn.is_visible(timeout=2000):
+                    logger.info("Amazon: reached Place Your Order page")
+                    return
+            except Exception:
+                pass
+
+            # Try clicking any checkout progression button
+            checkout_selectors = [
+                '#hlb-ptc-btn-native',           # Amazon's standard proceed-to-checkout button
+                '#hlb-ptc-btn a',                 # Wrapped version
+                '#sc-buy-box-ptc-button input',   # Cart page proceed button
+                'a[href*="/checkout/"]',           # Any checkout link
+            ]
+
+            clicked = False
+            for sel in checkout_selectors:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=1000):
+                        await human_click_element(page, btn)
+                        logger.info("Amazon: clicked checkout button via %s", sel)
+                        await wait_for_page_ready(page, timeout=10000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if clicked:
+                continue
+
+            # Try text-based matching as fallback
+            for text in ["Continue to checkout", "Proceed to checkout", "Continue to Checkout", "Proceed to Checkout"]:
+                try:
+                    btn = page.get_by_role("link", name=text).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click()
+                        logger.info("Amazon: clicked '%s'", text)
+                        await wait_for_page_ready(page, timeout=10000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                # Nothing to click — we might already be on checkout or stuck
+                logger.debug("Amazon: no checkout progression button found (attempt %d)", attempt + 1)
+                break
 
     async def _amazon_wait_for_sign_in(self, page):
         """If Amazon is showing a sign-in or CAPTCHA page, wait for the user to handle it."""
