@@ -157,7 +157,6 @@ class PmonEngine:
             for retailer, cookie_dict in retailer_cookies.items():
                 if retailer in self._monitors and cookie_dict:
                     self._monitors[retailer].load_session_cookies(cookie_dict)
-                    logger.info("Shared %d browser cookies with %s monitor", len(cookie_dict), retailer)
         except Exception as e:
             logger.debug("Could not sync browser cookies to monitors: %s", e)
 
@@ -196,6 +195,9 @@ class PmonEngine:
         try:
             while self._running:
                 self.sync_products_from_db()
+                # Re-sync browser cookies to HTTP monitors each cycle
+                # so expired cookies get refreshed automatically
+                await self._sync_browser_cookies_to_monitors()
                 await self._check_all()
                 jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
                 sleep_time = self.config.poll_interval + jitter
