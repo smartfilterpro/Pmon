@@ -4621,27 +4621,44 @@ class CheckoutEngine:
                     error_message="Could not add item to Amazon cart",
                 )
 
-            # Navigate to checkout
-            logger.info("Amazon: proceeding to checkout")
-            await page.goto(
-                "https://www.amazon.com/gp/buy/spc/handlers/display.html?hasWorkingJavascript=1",
-                wait_until="domcontentloaded",
-            )
-            await wait_for_page_ready(page, timeout=15000)
-
-            # Handle sign-in at checkout
+            # Navigate to cart and proceed to checkout
+            logger.info("Amazon: going to cart")
+            await page.goto("https://www.amazon.com/cart", wait_until="domcontentloaded")
+            await wait_for_page_ready(page, timeout=10000)
             await self._amazon_wait_for_sign_in(page)
 
-            # Check if we actually reached checkout (not a 404/empty cart)
-            page_text = await page.content()
-            if "we couldn't find that page" in page_text.lower() or "sorry" in page_text.lower()[:500]:
-                logger.warning("Amazon: checkout page returned 404 — cart may be empty")
-                await self._save_debug_screenshot(page, "amazon", "checkout_404")
+            # Click "Proceed to checkout"
+            proceed_btn = page.locator(
+                'input[name="proceedToRetailCheckout"], '
+                '#sc-buy-box-ptc-button input, '
+                'input[value*="Proceed to checkout"], '
+                'a:has-text("Proceed to checkout"), '
+                '#sc-buy-box-ptc-button a'
+            ).first
+            try:
+                if await proceed_btn.is_visible(timeout=5000):
+                    await human_click_element(page, proceed_btn)
+                    logger.info("Amazon: clicked Proceed to checkout")
+                    await wait_for_page_ready(page, timeout=10000)
+                else:
+                    logger.warning("Amazon: Proceed to checkout button not found on cart page")
+                    await self._save_debug_screenshot(page, "amazon", "cart_no_proceed")
+                    return CheckoutResult(
+                        url=url, retailer="amazon", product_name=product_name,
+                        status=CheckoutStatus.FAILED,
+                        error_message="Amazon: Proceed to checkout button not found on cart page",
+                    )
+            except Exception as e:
+                logger.error("Amazon: error on cart page: %s", e)
+                await self._save_debug_screenshot(page, "amazon", "cart_error")
                 return CheckoutResult(
                     url=url, retailer="amazon", product_name=product_name,
                     status=CheckoutStatus.FAILED,
-                    error_message="Amazon cart appears empty — item may not have been added",
+                    error_message=f"Amazon cart error: {e}",
                 )
+
+            # Handle sign-in at checkout
+            await self._amazon_wait_for_sign_in(page)
 
             logger.info("Amazon: on checkout page: %s", page.url[:120])
 
