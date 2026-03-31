@@ -4605,13 +4605,9 @@ class CheckoutEngine:
         page = await context.new_page()
 
         try:
-            # Strategy 1: Direct add-to-cart URL (fast, skips product page)
-            added = await self._amazon_add_to_cart_direct(page, asin, product_name)
-
-            # Strategy 2: Navigate to product page and click Add to Cart
-            if not added:
-                product_url = f"https://www.amazon.com/dp/{asin}"
-                added = await self._amazon_add_to_cart_page(page, product_url, product_name)
+            # Add to cart by navigating to the product page and clicking "Add to Cart"
+            product_url = f"https://www.amazon.com/dp/{asin}"
+            added = await self._amazon_add_to_cart_page(page, product_url, product_name)
 
             if not added:
                 await self._save_debug_screenshot(page, "amazon", "add_to_cart_failed")
@@ -4621,51 +4617,7 @@ class CheckoutEngine:
                     error_message="Could not add item to Amazon cart",
                 )
 
-            # If we already clicked "Continue to checkout" on the add-to-cart page,
-            # we're already at checkout — skip cart navigation
-            already_at_checkout = getattr(self, "_amazon_already_at_checkout", False)
-            self._amazon_already_at_checkout = False  # Reset for next time
-
-            if already_at_checkout:
-                logger.info("Amazon: already at checkout from add-to-cart page")
-                await self._amazon_wait_for_sign_in(page)
-            else:
-                # Navigate to cart and click "Proceed to checkout"
-                logger.info("Amazon: going to cart")
-                await page.goto("https://www.amazon.com/cart", wait_until="domcontentloaded")
-                await wait_for_page_ready(page, timeout=10000)
-                await self._amazon_wait_for_sign_in(page)
-
-                proceed_btn = page.locator(
-                    'input[name="proceedToRetailCheckout"], '
-                    '#sc-buy-box-ptc-button input, '
-                    'input[value*="Proceed to checkout"], '
-                    'a:has-text("Proceed to checkout"), '
-                    '#sc-buy-box-ptc-button a'
-                ).first
-                try:
-                    if await proceed_btn.is_visible(timeout=5000):
-                        await human_click_element(page, proceed_btn)
-                        logger.info("Amazon: clicked Proceed to checkout")
-                        await wait_for_page_ready(page, timeout=10000)
-                    else:
-                        logger.warning("Amazon: Proceed to checkout button not found on cart page")
-                        await self._save_debug_screenshot(page, "amazon", "cart_no_proceed")
-                        return CheckoutResult(
-                            url=url, retailer="amazon", product_name=product_name,
-                            status=CheckoutStatus.FAILED,
-                            error_message="Amazon: Proceed to checkout button not found on cart page",
-                        )
-                except Exception as e:
-                    logger.error("Amazon: error on cart page: %s", e)
-                    await self._save_debug_screenshot(page, "amazon", "cart_error")
-                    return CheckoutResult(
-                        url=url, retailer="amazon", product_name=product_name,
-                        status=CheckoutStatus.FAILED,
-                        error_message=f"Amazon cart error: {e}",
-                    )
-
-                await self._amazon_wait_for_sign_in(page)
+            # Click through any interstitial pages to reach checkout
 
             logger.info("Amazon: on page: %s", page.url[:120])
 
