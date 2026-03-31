@@ -2414,6 +2414,17 @@ def create_app(engine: "PmonEngine") -> FastAPI:
         )
         return {"ok": True}
 
+    @app.post("/api/settings/reset_spend")
+    async def api_reset_spend(user: dict = Depends(get_current_user)):
+        """Reset the spend tracker to $0 for the current user."""
+        conn = db.get_db()
+        conn.execute(
+            "UPDATE checkout_log SET price_amount = 0 WHERE user_id = ?",
+            (user["id"],),
+        )
+        conn.commit()
+        return {"ok": True}
+
     @app.post("/api/settings/generate_api_key")
     async def api_generate_key(user: dict = Depends(get_current_user)):
         """Generate a new API key for the current user (replaces any existing key)."""
