@@ -212,26 +212,61 @@ class PmonEngine:
         """Called by BrowserWatcher when a product comes in stock.
 
         The watcher already clicked "Add to Cart" — now we need to
-        complete checkout.
+        complete checkout (after price check).
         """
-        # Find the product in our list
         for p in self._all_products:
             if p["url"] == url:
                 user_id = p["owner_id"]
                 purchase_key = f"{user_id}:{url}"
 
                 if purchase_key in self._purchased:
-                    return  # Already bought
+                    return  # Already bought or in progress
 
-                # Check max price (from the monitor's last known price)
-                stock = self.state.products.get(url)
-                if p.get("max_price", 0) > 0 and stock and stock.price:
-                    price = _parse_price(stock.price)
-                    if price > 0 and price > p["max_price"]:
+                max_price = p.get("max_price", 0)
+                if max_price and max_price > 0:
+                    # Try to get price from the browser page first
+                    page_price = 0
+                    try:
+                        price_text = await page.evaluate("""
+                            () => {
+                                // Try common price selectors
+                                const sels = [
+                                    '[data-testid="price"] span', '.price-current',
+                                    '.a-price .a-offscreen', '.a-price-whole',
+                                    'span[data-test="product-price"]', '.priceView-customer-price span',
+                                    '[itemprop="price"]', '.prod-PriceHero .price-group',
+                                    'span.a-color-price',
+                                ];
+                                for (const sel of sels) {
+                                    const el = document.querySelector(sel);
+                                    if (el) return el.textContent;
+                                }
+                                // Generic: find any element with a $ price pattern
+                                const body = document.body.innerText;
+                                const match = body.match(/\\$([\\d,]+\\.\\d{2})/);
+                                return match ? match[0] : '';
+                            }
+                        """)
+                        page_price = _parse_price(price_text or "")
+                    except Exception:
+                        pass
+
+                    # Also check HTTP monitor's price as backup
+                    if page_price == 0:
+                        stock = self.state.products.get(url)
+                        if stock and stock.price:
+                            page_price = _parse_price(stock.price)
+
+                    if page_price > 0 and page_price > max_price:
                         logger.warning(
-                            "⚡ Browser watcher: price $%.2f exceeds max $%.2f for %s — skipping",
-                            price, p["max_price"], p["name"]
+                            "⚡ Browser watcher: price $%.2f exceeds max $%.2f for %s — SKIPPING checkout",
+                            page_price, max_price, p["name"]
                         )
+                        # Reset the clicked state so the watcher doesn't keep skipping
+                        try:
+                            await page.evaluate("() => { window.__pmon_clicked = false; }")
+                        except Exception:
+                            pass
                         return
 
                 logger.info("⚡ Browser watcher triggered checkout for %s", p["name"])
