@@ -177,6 +177,37 @@ class PmonEngine:
         except Exception as e:
             logger.error("Browser watcher failed to start: %s", e)
 
+    async def _sync_browser_watcher_tabs(self):
+        """Open tabs for any new auto-checkout products added after startup."""
+        if not self._browser_watcher:
+            return
+        try:
+            for p in self._all_products:
+                if not p.get("auto_checkout"):
+                    continue
+                url = p["url"]
+                retailer = p.get("retailer", "")
+                # Skip Pokemon Center (bot detection) and already-watched URLs
+                if retailer not in ("amazon", "target", "walmart", "bestbuy"):
+                    continue
+                if url in self._browser_watcher._watched:
+                    continue
+                # New product — open a tab
+                await self._browser_watcher.watch(
+                    url=url, name=p["name"], retailer=retailer,
+                    auto_checkout=True, max_price=p.get("max_price", 0),
+                )
+                logger.info("⚡ Opened new watch tab for: %s", p["name"])
+
+            # Also close tabs for products no longer set to auto-checkout
+            auto_urls = {p["url"] for p in self._all_products if p.get("auto_checkout")}
+            for url in list(self._browser_watcher._watched):
+                if url not in auto_urls:
+                    await self._browser_watcher.unwatch(url)
+                    logger.info("Closed watch tab (auto-buy disabled): %s", url[:80])
+        except Exception as e:
+            logger.debug("Browser watcher tab sync error: %s", e)
+
     async def _on_browser_stock_detected(self, url: str, retailer: str, page):
         """Called by BrowserWatcher when a product comes in stock.
 
@@ -291,8 +322,9 @@ class PmonEngine:
             while self._running:
                 self.sync_products_from_db()
                 # Re-sync browser cookies to HTTP monitors each cycle
-                # so expired cookies get refreshed automatically
                 await self._sync_browser_cookies_to_monitors()
+                # Open tabs for any new auto-checkout products added since startup
+                await self._sync_browser_watcher_tabs()
                 await self._check_all()
                 jitter = self.config.poll_interval * random.uniform(-0.2, 0.2)
                 sleep_time = self.config.poll_interval + jitter
