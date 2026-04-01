@@ -577,12 +577,29 @@ class CheckoutEngine:
             ],
             viewport=None,
             no_viewport=True,
-            # Ignore ALL Playwright default args — they add dozens of flags
-            # like --disable-extensions, --enable-features=CDPScreenshotNewSurface,
-            # --password-store=basic, --metrics-recording-only, etc. that bot
-            # detection systems (PerimeterX, DataDome) use to identify automation.
-            # This makes Chrome launch almost identically to a normal user launch.
-            ignore_default_args=True,
+            # Ignore specific Playwright flags that bot detection systems
+            # (PerimeterX, DataDome) use to identify automation.
+            # Can't use ignore_default_args=True because Playwright needs
+            # some flags (like --remote-debugging-pipe) to control Chrome.
+            ignore_default_args=[
+                "--enable-automation",
+                "--disable-extensions",
+                "--disable-default-apps",
+                "--disable-component-update",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--metrics-recording-only",
+                "--password-store=basic",
+                "--use-mock-keychain",
+                "--disable-client-side-phishing-detection",
+                "--enable-features=CDPScreenshotNewSurface",
+                "--disable-field-trial-config",
+                "--enable-unsafe-swiftshader",
+                "--no-service-autorun",
+                "--export-tagged-pdf",
+                "--unsafely-disable-devtools-self-xss-warnings",
+                "--disable-search-engine-choice-screen",
+            ],
         )
         await self._persistent_context.add_init_script(STEALTH_JS)
 
