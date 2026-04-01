@@ -574,11 +574,15 @@ class CheckoutEngine:
                 "--disable-blink-features=AutomationControlled",
                 "--no-first-run",
                 "--no-default-browser-check",
-                "--disable-infobars",
             ],
             viewport=None,
             no_viewport=True,
-            ignore_default_args=["--enable-automation", "--no-sandbox"],
+            # Ignore ALL Playwright default args — they add dozens of flags
+            # like --disable-extensions, --enable-features=CDPScreenshotNewSurface,
+            # --password-store=basic, --metrics-recording-only, etc. that bot
+            # detection systems (PerimeterX, DataDome) use to identify automation.
+            # This makes Chrome launch almost identically to a normal user launch.
+            ignore_default_args=True,
         )
         await self._persistent_context.add_init_script(STEALTH_JS)
 
