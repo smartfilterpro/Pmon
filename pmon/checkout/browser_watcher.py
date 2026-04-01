@@ -39,24 +39,30 @@ WATCHER_JS = """
             '#add-to-cart-button',
             'input[name="submit.add-to-cart"]',
             '#buy-now-button',
+            '#submit\\.add-to-pre-order-cart',
+            'input[name="submit.add-to-pre-order-cart"]',
         ],
         target: [
             'button[data-test="shipItButton"]',
             'button[data-test="shippingButton"]',
             'button[data-test="buyNowButton"]',
             'button[data-test="addToCartButton"]',
+            'button[data-test="preorderButton"]',
         ],
         walmart: [
             'button[data-testid="add-to-cart-btn"]',
             'button:not([disabled])[aria-label*="Add to cart"]',
+            'button:not([disabled])[aria-label*="Pre-order"]',
         ],
         bestbuy: [
             'button.add-to-cart-button:not([disabled])',
             'button[data-button-state="ADD_TO_CART"]',
+            'button[data-button-state="PRE_ORDER"]',
         ],
         pokemoncenter: [
             'button[data-testid="add-to-cart"]',
             'button.add-to-cart',
+            'button[data-testid="pre-order"]',
         ],
     };
 
@@ -73,6 +79,7 @@ WATCHER_JS = """
     if (selectors.length === 0) return;
 
     function checkButtons() {
+        // Check specific selectors first
         for (const sel of selectors) {
             const btn = document.querySelector(sel);
             if (btn && !btn.disabled && btn.offsetParent !== null) {
@@ -80,6 +87,20 @@ WATCHER_JS = """
                     window.__pmon_in_stock = true;
                     window.__pmon_stock_time = Date.now();
                     console.log('[PMON] IN STOCK detected via: ' + sel);
+                }
+                return true;
+            }
+        }
+        // Generic fallback: any visible button with buy/cart/pre-order text
+        const allButtons = document.querySelectorAll('button:not([disabled]), input[type="submit"]:not([disabled])');
+        for (const btn of allButtons) {
+            const text = (btn.textContent || btn.value || '').toLowerCase();
+            if ((text.includes('add to cart') || text.includes('pre-order') || text.includes('preorder') || text.includes('buy now'))
+                && btn.offsetParent !== null) {
+                if (!window.__pmon_in_stock) {
+                    window.__pmon_in_stock = true;
+                    window.__pmon_stock_time = Date.now();
+                    console.log('[PMON] IN STOCK detected via text: ' + text.trim());
                 }
                 return true;
             }
@@ -112,15 +133,16 @@ WATCHER_JS = """
 AUTO_CLICK_JS = """
 () => {
     const BUTTON_SELECTORS = {
-        amazon: ['#add-to-cart-button', 'input[name="submit.add-to-cart"]'],
+        amazon: ['#add-to-cart-button', 'input[name="submit.add-to-cart"]', '#buy-now-button', 'input[name="submit.add-to-pre-order-cart"]'],
         target: [
             'button[data-test="buyNowButton"]',
             'button[data-test="shipItButton"]',
             'button[data-test="shippingButton"]',
+            'button[data-test="preorderButton"]',
         ],
-        walmart: ['button[data-testid="add-to-cart-btn"]'],
-        bestbuy: ['button.add-to-cart-button:not([disabled])'],
-        pokemoncenter: ['button[data-testid="add-to-cart"]', 'button.add-to-cart'],
+        walmart: ['button[data-testid="add-to-cart-btn"]', 'button:not([disabled])[aria-label*="Pre-order"]'],
+        bestbuy: ['button.add-to-cart-button:not([disabled])', 'button[data-button-state="PRE_ORDER"]'],
+        pokemoncenter: ['button[data-testid="add-to-cart"]', 'button.add-to-cart', 'button[data-testid="pre-order"]'],
     };
 
     const url = window.location.hostname;
@@ -139,6 +161,18 @@ AUTO_CLICK_JS = """
             window.__pmon_clicked = true;
             console.log('[PMON] CLICKED: ' + sel);
             return sel;
+        }
+    }
+    // Generic fallback: click any button with buy/cart/pre-order text
+    const allButtons = document.querySelectorAll('button:not([disabled]), input[type="submit"]:not([disabled])');
+    for (const btn of allButtons) {
+        const text = (btn.textContent || btn.value || '').toLowerCase();
+        if ((text.includes('add to cart') || text.includes('pre-order') || text.includes('preorder') || text.includes('buy now'))
+            && btn.offsetParent !== null) {
+            btn.click();
+            window.__pmon_clicked = true;
+            console.log('[PMON] CLICKED text button: ' + text.trim());
+            return 'text:' + text.trim();
         }
     }
     return null;
