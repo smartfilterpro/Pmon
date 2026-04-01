@@ -58,6 +58,8 @@ class PmonEngine:
         self._running = False
         self._monitor_task: asyncio.Task | None = None
         self._browser_watcher = None
+        # URLs where browser watcher detected stock but price exceeded max
+        self._price_rejected: set[str] = set()
 
         # All products across all users (synced from DB)
         self._all_products: list[dict] = []
@@ -214,6 +216,9 @@ class PmonEngine:
         The watcher already clicked "Add to Cart" — now we need to
         complete checkout (after price check).
         """
+        if url in self._price_rejected:
+            return  # Already rejected due to price — stop spamming
+
         for p in self._all_products:
             if p["url"] == url:
                 user_id = p["owner_id"]
@@ -262,14 +267,21 @@ class PmonEngine:
                             "⚡ Browser watcher: price $%.2f exceeds max $%.2f for %s — SKIPPING checkout",
                             page_price, max_price, p["name"]
                         )
-                        # Reset the clicked state so the watcher doesn't keep skipping
-                        try:
-                            await page.evaluate("() => { window.__pmon_clicked = false; }")
-                        except Exception:
-                            pass
+                        # Keep __pmon_clicked = true so the watcher stops re-detecting.
+                        # It will reset when the page refreshes or price changes.
+                        self._price_rejected.add(url)
                         return
 
-                logger.info("⚡ Browser watcher triggered checkout for %s", p["name"])
+                # Price check passed — now click Add to Cart
+                logger.info("⚡ Browser watcher: price OK, clicking Add to Cart for %s", p["name"])
+                try:
+                    from pmon.checkout.browser_watcher import AUTO_CLICK_JS
+                    clicked = await page.evaluate(AUTO_CLICK_JS)
+                    if clicked:
+                        logger.info("⚡ AUTO-CLICKED '%s' on %s", clicked, p["name"])
+                except Exception as e:
+                    logger.debug("Auto-click failed: %s", e)
+
                 self._purchased.add(purchase_key)
                 asyncio.create_task(self._auto_checkout_for_user(p, user_id))
                 return
