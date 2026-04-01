@@ -566,44 +566,53 @@ class CheckoutEngine:
 
         first_run = not os.path.exists(os.path.join(profile_dir, "Default"))
 
-        self._persistent_context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            executable_path=chrome_path,
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
+        # Launch Chrome ourselves (via subprocess) with ZERO Playwright flags.
+        # Playwright's launch_persistent_context adds detectable flags that
+        # PerimeterX/DataDome use for bot detection. By launching Chrome
+        # manually and connecting via CDP, Chrome looks 100% normal.
+        import subprocess
+
+        debug_port = self.config.chrome_debug_port
+
+        self._chrome_process = subprocess.Popen(
+            [
+                chrome_path,
+                f"--remote-debugging-port={debug_port}",
+                f"--user-data-dir={profile_dir}",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--disable-blink-features=AutomationControlled",
             ],
-            viewport=None,
-            no_viewport=True,
-            # Ignore specific Playwright flags that bot detection systems
-            # (PerimeterX, DataDome) use to identify automation.
-            # Can't use ignore_default_args=True because Playwright needs
-            # some flags (like --remote-debugging-pipe) to control Chrome.
-            ignore_default_args=[
-                "--enable-automation",
-                "--disable-extensions",
-                "--disable-default-apps",
-                "--disable-component-update",
-                "--disable-background-networking",
-                "--disable-sync",
-                "--metrics-recording-only",
-                "--password-store=basic",
-                "--use-mock-keychain",
-                "--disable-client-side-phishing-detection",
-                "--enable-features=CDPScreenshotNewSurface",
-                "--disable-field-trial-config",
-                "--enable-unsafe-swiftshader",
-                "--no-service-autorun",
-                "--export-tagged-pdf",
-                "--unsafely-disable-devtools-self-xss-warnings",
-                "--disable-search-engine-choice-screen",
-            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        await self._persistent_context.add_init_script(STEALTH_JS)
 
-        logger.info("Chrome is open with Pmon profile — sessions persist across restarts")
+        # Wait for Chrome's debug port to be ready
+        import httpx
+        cdp_url = f"http://127.0.0.1:{debug_port}"
+        for attempt in range(30):
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{cdp_url}/json/version", timeout=2.0)
+                    if resp.status_code == 200:
+                        break
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        else:
+            raise RuntimeError(
+                f"Chrome launched but debug port {debug_port} not responding after 30s."
+            )
+
+        # Connect Playwright to our clean Chrome via CDP
+        self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
+
+        # Get the default context (has user's cookies/passwords)
+        if self._browser.contexts:
+            self._persistent_context = self._browser.contexts[0]
+            await self._persistent_context.add_init_script(STEALTH_JS)
+
+        logger.info("Chrome is open with Pmon profile — zero Playwright flags, undetectable")
         if first_run:
             logger.info(
                 "FIRST RUN: Log into your retailer accounts (Amazon, Target, etc.) "
