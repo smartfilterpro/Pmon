@@ -153,9 +153,7 @@ class PmonEngine:
 
             # Open tabs for auto-checkout products (limit to avoid overwhelming)
             auto_products = [p for p in self._all_products if p.get("auto_checkout")]
-            max_tabs = min(len(auto_products), 10)  # Cap at 10 tabs
-
-            for p in auto_products[:max_tabs]:
+            for p in auto_products:
                 retailer = p.get("retailer", "")
                 if retailer in ("amazon", "target", "walmart", "bestbuy"):
                     # Note: Pokemon Center excluded — their PerimeterX bot detection
