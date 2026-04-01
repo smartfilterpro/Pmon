@@ -157,7 +157,9 @@ class PmonEngine:
 
             for p in auto_products[:max_tabs]:
                 retailer = p.get("retailer", "")
-                if retailer in ("amazon", "target", "walmart", "bestbuy", "pokemoncenter"):
+                if retailer in ("amazon", "target", "walmart", "bestbuy"):
+                    # Note: Pokemon Center excluded — their PerimeterX bot detection
+                    # triggers on browser tabs with MutationObserver. Use HTTP polling instead.
                     await self._browser_watcher.watch(
                         url=p["url"],
                         name=p["name"],
