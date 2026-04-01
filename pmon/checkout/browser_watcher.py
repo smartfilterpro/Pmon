@@ -243,13 +243,18 @@ class BrowserWatcher:
                                 )
 
                     except Exception as e:
-                        # Page might have navigated or crashed — reload it
-                        logger.debug("Watch tab error for %s: %s", wp.name, e)
-                        try:
-                            await wp.page.reload(timeout=10000)
-                            await wp.page.evaluate(WATCHER_JS)
-                        except Exception:
-                            pass
+                        # Page might have navigated or crashed
+                        # Don't auto-reload Pokemon Center — their bot detection
+                        # triggers on rapid page loads
+                        if wp.retailer != "pokemoncenter":
+                            logger.debug("Watch tab error for %s: %s — reloading", wp.name, e)
+                            try:
+                                await wp.page.reload(timeout=10000)
+                                await wp.page.evaluate(WATCHER_JS)
+                            except Exception:
+                                pass
+                        else:
+                            logger.debug("Watch tab error for %s (PKC, no auto-reload): %s", wp.name, e)
 
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
