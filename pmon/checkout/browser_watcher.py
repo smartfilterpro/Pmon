@@ -265,12 +265,10 @@ class BrowserWatcher:
                         if in_stock and not already_clicked:
                             logger.info("⚡ INSTANT STOCK DETECTED: %s", wp.name)
 
-                            # Auto-click Add to Cart immediately
-                            clicked_sel = await wp.page.evaluate(AUTO_CLICK_JS)
-                            if clicked_sel:
-                                logger.info("⚡ AUTO-CLICKED '%s' on %s", clicked_sel, wp.name)
+                            # Mark as detected so we don't spam
+                            await wp.page.evaluate("() => { window.__pmon_clicked = true; }")
 
-                            # Notify the engine for checkout
+                            # Notify the engine — it will check price and click if OK
                             if self._on_in_stock:
                                 asyncio.create_task(
                                     self._on_in_stock(url, wp.retailer, wp.page)
